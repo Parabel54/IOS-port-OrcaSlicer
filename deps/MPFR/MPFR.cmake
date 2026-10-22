@@ -43,11 +43,18 @@ else ()
         set(_mpfr_cflags "${_mpfr_cflags} -mmacosx-version-min=${DEP_OSX_TARGET}")
     endif ()
 
+    # Belt and braces: the tarball ships generated configure/Makefile.in, so never
+    # regenerate them (the exact automake version used upstream is not installed).
+    set(_mpfr_no_autotools AUTOMAKE=true ACLOCAL=true AUTOCONF=true AUTOHEADER=true)
+
     ExternalProject_Add(dep_MPFR
         URL https://ftp.gnu.org/gnu/mpfr/mpfr-4.2.2.tar.bz2
             https://www.mpfr.org/mpfr-4.2.2/mpfr-4.2.2.tar.bz2
         URL_HASH SHA256=9ad62c7dc910303cd384ff8f1f4767a655124980bb6d8650fe62c815a231bb7b
         DOWNLOAD_DIR ${DEP_DOWNLOAD_DIR}/MPFR
+        # Keep the tarball's own file timestamps. Without this (CMake >= 3.24 / CMP0135),
+        # extracted files get random-order mtimes and make tries to re-run automake-1.17.
+        DOWNLOAD_EXTRACT_TIMESTAMP ON
         BUILD_IN_SOURCE ON
         CONFIGURE_COMMAND env
             "CC=${CMAKE_C_COMPILER}"
@@ -56,8 +63,8 @@ else ()
             "CXXFLAGS=${_mpfr_cflags}"
             "LDFLAGS=${_mpfr_ldflags}"
             ./configure ${_cross_compile_arg} --prefix=${DESTDIR} --enable-shared=no --enable-static=yes --with-gmp=${DESTDIR} ${_gmp_build_tgt}
-        BUILD_COMMAND make -j
-        INSTALL_COMMAND make install
+        BUILD_COMMAND make -j ${_mpfr_no_autotools}
+        INSTALL_COMMAND make install ${_mpfr_no_autotools}
         DEPENDS dep_GMP
     )
 endif ()
