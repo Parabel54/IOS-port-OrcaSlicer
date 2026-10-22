@@ -1,0 +1,76 @@
+name: Build unsigned OrcaSlicer IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-ipa:
+    # iOS builds require macOS + Xcode. The Orca engine dependencies can take a while.
+    runs-on: macos-15
+    timeout-minutes: 360
+
+    steps:
+      - name: Check out iOS port branch
+        uses: actions/checkout@v4
+        with:
+          ref: ios-port
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Select Xcode
+        run: |
+          xcodebuild -version
+          xcode-select -p
+
+      - name: Install build tools
+        run: |
+          brew update
+          brew install cmake ninja pkg-config
+          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+          cmake --version
+
+      - name: Build iOS device dependencies
+        run: |
+          chmod +x scripts/build_ios_deps.sh scripts/build_ios_engine_after_deps.sh scripts/bundle_engine_libs.sh
+          ./scripts/build_ios_deps.sh iphoneos arm64
+
+      - name: Build OrcaSlicer engine for physical iPhones
+        run: |
+          ./scripts/build_ios_engine_after_deps.sh iphoneos arm64
+          test -f build-ios-iphoneos-arm64/engine_bundle/lib/liborca_engine.a
+
+      - name: Show Xcode schemes
+        run: xcodebuild -list -project ios/OrcaSlicer.xcodeproj
+
+      - name: Archive app without signing
+        run: |
+          xcodebuild archive \
+            -project ios/OrcaSlicer.xcodeproj \
+            -scheme OrcaSlicer \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath "$RUNNER_TEMP/OrcaSlicer.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      - name: Package unsigned IPA
+        run: |
+          APP="$RUNNER_TEMP/OrcaSlicer.xcarchive/Products/Applications/OrcaSlicer.app"
+          test -d "$APP"
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -R "$APP" "$RUNNER_TEMP/ipa/Payload/"
+          cd "$RUNNER_TEMP/ipa"
+          /usr/bin/zip -qry "$GITHUB_WORKSPACE/OrcaSlicer-unsigned.ipa" Payload
+          test -s "$GITHUB_WORKSPACE/OrcaSlicer-unsigned.ipa"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OrcaSlicer-unsigned-IPA
+          path: OrcaSlicer-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 7
