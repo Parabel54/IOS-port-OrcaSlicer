@@ -91,6 +91,10 @@ else ()
         set(_cross_compile_arg --host=${TOOLCHAIN_PREFIX})
     endif ()
 
+    # The 0001-GMP_GCC15 patch touches configure/acinclude.m4, which can make the
+    # autotools rebuild rules fire. Turn them into no-ops; configure is shipped pre-generated.
+    set(_gmp_no_autotools AUTOMAKE=true ACLOCAL=true AUTOCONF=true AUTOHEADER=true)
+
     ExternalProject_Add(dep_GMP
         URL https://github.com/SoftFever/OrcaSlicer_deps/releases/download/gmp-6.2.1/gmp-6.2.1.tar.bz2
         URL_HASH SHA256=eae9326beb4158c386e39a356818031bd28f3124cf915f8c5b1dc4c7a36b4d7c
@@ -99,7 +103,7 @@ else ()
         BUILD_IN_SOURCE ON
         CONFIGURE_COMMAND  env "CC=${CMAKE_C_COMPILER}" "CXX=${CMAKE_CXX_COMPILER}" "CFLAGS=${_gmp_ccflags}" "CXXFLAGS=${_gmp_ccflags}" "LDFLAGS=${CMAKE_EXE_LINKER_FLAGS} ${_gmp_ldflags}" ./configure ${_cross_compile_arg} --enable-shared=no --enable-cxx=yes --enable-static=yes "--prefix=${DESTDIR}" ${_gmp_build_tgt}
         # MAKEINFO=true: skip texinfo docs (makeinfo often missing; fails gmp.info on iOS)
-        BUILD_COMMAND     make -j MAKEINFO=true
-        INSTALL_COMMAND   make install MAKEINFO=true
+        BUILD_COMMAND     make -j MAKEINFO=true ${_gmp_no_autotools}
+        INSTALL_COMMAND   make install MAKEINFO=true ${_gmp_no_autotools}
     )
 endif ()
