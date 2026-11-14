@@ -2,6 +2,12 @@
 """Generate Xcode project for OrcaSlicer iOS/macOS host (official libslic3r via C ABI)."""
 from pathlib import Path
 import uuid
+import argparse
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--require-engine", choices=("iphoneos", "iphonesimulator"),
+                    help="Fail instead of generating an unlinked app for this SDK")
+args = parser.parse_args()
 
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parent
@@ -16,13 +22,18 @@ has_mac_engine = (ENGINE_MAC / "liborca_engine.a").is_file()
 has_ios_sim_engine = (ENGINE_IOS_SIM / "liborca_engine.a").is_file()
 has_ios_dev_engine = (ENGINE_IOS_DEV / "liborca_engine.a").is_file()
 has_ios_engine = has_ios_sim_engine or has_ios_dev_engine
+if args.require_engine:
+    archive = (ENGINE_IOS_DEV if args.require_engine == "iphoneos" else ENGINE_IOS_SIM) / "liborca_engine.a"
+    if not archive.is_file() or archive.stat().st_size == 0:
+        parser.error(f"Missing or empty engine archive for {args.require_engine}: {archive}")
 
 
-def uid():
-    return uuid.uuid4().hex[:24].upper()
+
+def uid(key):
+    return uuid.uuid5(uuid.NAMESPACE_URL, "orca-ios-project/" + key).hex[:24].upper()
 
 
-IDs = {k: uid() for k in [
+IDs = {k: uid(k) for k in [
     "project", "target", "sources", "resources", "frameworks", "product",
     "swift_app", "swift_engine", "swift_plate", "swift_process", "logo", "assets",
     "process_profile", "process_profile_fine", "profiles_folder", "calib_folder", "scenekit_fw",
@@ -33,7 +44,16 @@ IDs = {k: uid() for k in [
 
 # Full official vendor trees (~79MB) for all printers/process/filament/covers
 PROFILES_DIR = ROOT / "OrcaSlicerApp" / "Resources" / "profiles"
+# Keep profiles in sync with the engine revision, including upstream removals.
+import shutil
+if (REPO / "resources" / "profiles").is_dir():
+    PROFILES_DIR.parent.mkdir(parents=True, exist_ok=True)
+    if PROFILES_DIR.exists():
+        shutil.rmtree(PROFILES_DIR)
+    shutil.copytree(REPO / "resources" / "profiles", PROFILES_DIR)
 has_profiles = PROFILES_DIR.is_dir() and any(PROFILES_DIR.glob("*.json"))
+if args.require_engine and not has_profiles:
+    parser.error("Official resources/profiles must be present for an engine build")
 # Official calibration meshes (temp tower, flow, PA, retraction, …)
 # Resources/ is gitignored (large); sync from repo resources/calib when missing/stale.
 CALIB_DIR = ROOT / "OrcaSlicerApp" / "Resources" / "calib"
@@ -71,7 +91,7 @@ ios_ld = (
 # Team for Automatic signing (override with ORCA_IOS_DEVELOPMENT_TEAM).
 # Empty → Xcode shows "Signing requires a development team" until set in UI.
 import os as _os
-DEVELOPMENT_TEAM = _os.environ.get("ORCA_IOS_DEVELOPMENT_TEAM", "6PU4X4CG8B")
+DEVELOPMENT_TEAM = _os.environ.get("ORCA_IOS_DEVELOPMENT_TEAM", "")
 
 
 def tgt_settings(name: str) -> str:
@@ -103,7 +123,7 @@ def tgt_settings(name: str) -> str:
         '\t\t\t\t\t"$(inherited)",',
         "\t\t\t\t);",
         "\t\t\t\tMACOSX_DEPLOYMENT_TARGET = 13.0;",
-        "\t\t\t\tMARKETING_VERSION = 2.5.0;",
+        "\t\t\t\tMARKETING_VERSION = 2.5.1;",
         # Engine bundles are arm64-only (Apple Silicon). Exclude x86_64 so Xcode
         # does not try to link Intel-sim slices that do not exist → linker fail.
         '\t\t\t\t"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = "x86_64 i386";',

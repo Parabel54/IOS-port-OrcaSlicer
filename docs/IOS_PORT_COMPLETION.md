@@ -1,3 +1,6 @@
+> Historical checklist: completion claims below are not current verification.
+> See [current integration status](IOS_MODERNIZATION.md) and `IOS_PORT_STATUS.json`.
+
 # iOS OrcaSlicer port — **100% completion criteria**
 
 Source of truth for whether the **full** mobile port is done.  

@@ -1,0 +1,52 @@
+name: iOS engine and app
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'ios/**'
+      - 'src/**'
+      - 'deps/**'
+      - 'deps_src/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - 'scripts/*ios*'
+      - 'scripts/bundle_engine_libs.sh'
+      - 'scripts/tests/test_ios_project.py'
+      - 'resources/**'
+      - '.github/workflows/ios-engine.yml'
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk: [iphoneos, iphonesimulator]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Check project generation
+        run: python3 -m unittest discover -s scripts/tests -p test_ios_project.py -v
+      - name: Install build tools
+        run: brew install cmake autoconf automake libtool pkg-config
+      - name: Build dependencies
+        run: bash scripts/build_ios_deps.sh "${{ matrix.sdk }}" arm64
+      - name: Build and bundle engine
+        run: bash scripts/build_ios_engine_after_deps.sh "${{ matrix.sdk }}" arm64
+      - name: Require linked engine and current profiles
+        run: python3 ios/generate_xcodeproj.py --require-engine "${{ matrix.sdk }}"
+      - name: Compile unsigned app
+        run: |
+          xcodebuild -project ios/OrcaSlicer.xcodeproj -scheme OrcaSlicer \
+            -sdk "${{ matrix.sdk }}" -configuration Release \
+            -derivedDataPath build-ios-app ARCHS=arm64 \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+      - name: Preserve build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-logs-${{ matrix.sdk }}
+          path: build_logs/

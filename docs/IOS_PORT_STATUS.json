@@ -1,27 +1,19 @@
 {
-  "status": "wx_parity_in_progress",
-  "percent_estimate": 100,
-  "updated": "2026-08-03T21:30:00Z",
-  "branch": "ios-port",
-  "last_focus": "shortcuts + aux docs; explode/wizard/clip already on branch",
-  "gates": {
-    "G1": true,
-    "G2": true,
-    "G3": true,
-    "G4": true,
-    "G5": true,
-    "G6": true,
-    "G7": true,
-    "G8": true,
-    "G9": true,
-    "G10": true,
-    "G11": true,
-    "G12": true,
-    "G13": true,
-    "G14": true,
-    "G15": true,
-    "G16": true
+  "status": "integration_pending_macos_verification",
+  "updated": "2026-11-14",
+  "branch": "ios-modernization",
+  "upstream": {
+    "tag": "v2.5.1",
+    "commit": "eef7710cb102fdb51a9bcdbd9efd61047f44774a"
   },
-  "notes": "Idle 15m schedule cancelled \u2014 work runs immediately. wx~96%. Optional left: full font emboss, Bambu/AMS (W4).",
-  "wx_parity_percent": 96
+  "completion_percent": null,
+  "verification": {
+    "dependency_configuration_linux": "passed",
+    "project_generator_tests": "passed",
+    "iphoneos_build": "not_run",
+    "iphonesimulator_build": "not_run",
+    "physical_device": "not_run",
+    "desktop_slice_equivalence": "not_run"
+  },
+  "remaining_work": "docs/IOS_MODERNIZATION.md"
 }

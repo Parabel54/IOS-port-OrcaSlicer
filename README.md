@@ -39,7 +39,11 @@ Official libslic3r (C++ — every engine .cpp stays upstream code)
 
 ---
 
-## Status
+## Current integration
+
+The `ios-modernization` branch integrates upstream **v2.5.1** source. iOS builds and device behavior remain unverified. See [verification and remaining work](docs/IOS_MODERNIZATION.md). Historical “100%” checklists do not establish desktop parity.
+
+## Historical status
 
 | Piece | Status |
 |---|---|

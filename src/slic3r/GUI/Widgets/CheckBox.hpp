@@ -3,6 +3,8 @@
 
 #include "../wxExtensions.hpp"
 
+#include <wx/anybutton.h>
+#include <wx/checklst.h>
 #include <wx/tglbtn.h>
 
 class CheckBox : public wxBitmapToggleButton
@@ -27,6 +29,7 @@ public:
 protected:
 #ifdef __WXMSW__
     virtual State GetNormalState() const wxOVERRIDE;
+    virtual bool MSWCommand(WXUINT param, WXWORD id) wxOVERRIDE;
 #endif
     
 #ifdef __WXOSX__

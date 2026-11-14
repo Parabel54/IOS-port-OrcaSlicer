@@ -5,6 +5,10 @@ export PATH="$HOME/local/bin:/usr/bin:/bin:$PATH"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET="${1:-iphonesimulator}"   # iphonesimulator | iphoneos
 ARCH="${2:-arm64}"
+case "$TARGET:$ARCH" in
+  iphoneos:arm64|iphonesimulator:arm64) ;;
+  *) echo "Expected iphoneos or iphonesimulator with arm64" >&2; exit 2 ;;
+esac
 DEPS_PREFIX="${ROOT}/deps/build-ios-${TARGET}-${ARCH}/OrcaSlicer_dep/usr/local"
 BUILD_DIR="${ROOT}/build-ios-${TARGET}-${ARCH}"
 if [[ ! -d "$DEPS_PREFIX/lib" ]]; then
@@ -28,5 +32,5 @@ cmake -S "$ROOT" -B "$BUILD_DIR" \
   -G "Unix Makefiles"
 cmake --build "$BUILD_DIR" --target orca_ios_api -j "$(sysctl -n hw.ncpu)"
 "$ROOT/scripts/bundle_engine_libs.sh" "$BUILD_DIR" "$DEPS_PREFIX/lib"
-cd "$ROOT/ios" && python3 generate_xcodeproj.py
+cd "$ROOT/ios" && python3 generate_xcodeproj.py --require-engine "$TARGET"
 echo "iOS engine ready ($TARGET $ARCH). Rebuild Xcode with ORCA_LINKED."

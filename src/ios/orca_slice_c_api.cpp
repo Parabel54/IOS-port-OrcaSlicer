@@ -463,7 +463,12 @@ int orca_session_slice_to_gcode(orca_session_t *s, const char *gcode_out_path)
             s->report_progress(12, "Calibration mode active");
         }
 
-        print.set_status_silent();
+        // Forward the engine's actual phases rather than freezing at 15%.
+        print.set_status_callback([s](const PrintBase::SlicingStatus &status) {
+            if (status.percent >= 0)
+                s->report_progress(15 + std::clamp(status.percent, 0, 100) * 70 / 100,
+                                   status.text.c_str());
+        });
         s->report_progress(15, "Slicing (Print::process)");
         print.process();
 
