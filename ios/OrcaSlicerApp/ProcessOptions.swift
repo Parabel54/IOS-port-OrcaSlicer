@@ -168,8 +168,8 @@ extension OrcaEngine {
 struct ProcessSettingsBrowser: View {
     @ObservedObject var engine: OrcaEngine
     var onChanged: (() -> Void)?
-    @State private var scope = 0
-    @State private var mode = 0
+    @AppStorage("orca.settings.scope") private var scope = 0
+    @AppStorage("orca.settings.visibility") private var mode = 0
     @State private var presetSearch = ""
     @State private var saveName = ""
     @State private var savePreset = false
@@ -206,6 +206,8 @@ struct ProcessSettingsBrowser: View {
                 $0.key.lowercased().contains(q)
                     || $0.label.lowercased().contains(q)
                     || $0.category.lowercased().contains(q)
+                    || DesktopSettings.location($0).page.lowercased().contains(q)
+                    || DesktopSettings.location($0).group.lowercased().contains(q)
                     || $0.value.lowercased().contains(q)
             }
         }
