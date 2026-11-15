@@ -112,6 +112,7 @@ jobs:
         run: |
           mkdir -p build-artifacts
           app="build-ios-app/Build/Products/Release-${IOS_SDK}/OrcaSlicer.app"
+          python3 scripts/audit_ios_app.py "$app" "$IOS_SDK"
           if [[ "$IOS_SDK" == iphoneos ]]; then
             package_dir="$RUNNER_TEMP/orca-unsigned-package"
             mkdir -p "$package_dir/Payload"

@@ -59,6 +59,16 @@ class ProjectGenerationTests(unittest.TestCase):
         self.assertEqual(first, project.read_bytes())
         self.assertFalse(stale.exists())
 
+    def test_simulator_archive_is_never_linked_into_device_app(self):
+        self.engine('iphonesimulator')
+        self.assertEqual(self.generate('iphonesimulator').returncode, 0)
+        project = (self.root / 'ios/OrcaSlicer.xcodeproj/project.pbxproj').read_text()
+        self.assertIn('LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]', project)
+        self.assertNotIn('LIBRARY_SEARCH_PATHS[sdk=iphoneos*]', project)
+        self.assertNotIn('SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphoneos*]', project)
+        self.assertNotIn('SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx"', project)
+        self.assertIn('TARGETED_DEVICE_FAMILY = "1,2"', project)
+
     def test_bundles_engine_tables_and_rejects_missing_tables(self):
         self.engine('iphoneos')
         result = self.generate('iphoneos')

@@ -25,7 +25,7 @@ struct CloudAccountPanel: View {
                         let profiles = try engine.exportLocalCloudProfiles()
                         Task { await account.uploadLocalProfiles(profiles) }
                     } catch { account.message = error.localizedDescription }
-                }.disabled(account.busy || engine.modelImporting || engine.presetsLoading || engine.sliceRunning)
+                }.disabled(account.busy || engine.modelImporting || engine.presetsLoading)
                 Text("Cloud presets: \(account.profiles.filter { $0.kind == "printer" }.count) printers · \(account.profiles.filter { $0.kind == "filament" }.count) filaments · \(account.profiles.filter { $0.kind == "print" }.count) processes")
                     .font(.caption)
                 if !account.profileImportMessage.isEmpty { Text(account.profileImportMessage).font(.caption) }

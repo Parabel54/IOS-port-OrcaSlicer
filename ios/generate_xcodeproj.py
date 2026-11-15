@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate Xcode project for OrcaSlicer iOS/macOS host (official libslic3r via C ABI)."""
+"""Generate Xcode project for the OrcaSlicer iOS host (official libslic3r via C ABI)."""
 from pathlib import Path
 import uuid
 import argparse
@@ -167,26 +167,14 @@ def tgt_settings(name: str) -> str:
         "\t\t\t\t);",
         "\t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = com.orcaslicer.ios;",
         '\t\t\t\tPRODUCT_NAME = "$(TARGET_NAME)";',
-        '\t\t\t\tSUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";',
+        '\t\t\t\tSUPPORTED_PLATFORMS = "iphoneos iphonesimulator";',
         "\t\t\t\tSUPPORTS_MACCATALYST = NO;",
         '\t\t\t\tSWIFT_ACTIVE_COMPILATION_CONDITIONS = "";',
         "\t\t\t\tSWIFT_EMIT_LOC_STRINGS = YES;",
         '\t\t\t\tSWIFT_OBJC_BRIDGING_HEADER = "OrcaSlicerApp/Bridging-Header.h";',
         "\t\t\t\tSWIFT_VERSION = 5.0;",
-        '\t\t\t\tTARGETED_DEVICE_FAMILY = "1,2,6";',
+        '\t\t\t\tTARGETED_DEVICE_FAMILY = "1,2";',
     ]
-    if has_mac_engine:
-        lines += [
-            f'\t\t\t\t"LIBRARY_SEARCH_PATHS[sdk=macosx*]" = (',
-            f'\t\t\t\t\t"{mac_lib_path}",',
-            '\t\t\t\t\t"$(inherited)",',
-            "\t\t\t\t);",
-            f'\t\t\t\t"OTHER_LDFLAGS[sdk=macosx*]" = (',
-            '\t\t\t\t\t"$(inherited)",',
-            f'\t\t\t\t\t"{mac_ld}",',
-            "\t\t\t\t);",
-            '\t\t\t\t"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=macosx*]" = "ORCA_LINKED";',
-        ]
     if has_ios_sim_engine:
         lines += [
             f'\t\t\t\t"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = (',
@@ -214,9 +202,7 @@ def tgt_settings(name: str) -> str:
             "\t\t\t\t);",
             '\t\t\t\t"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphoneos*]" = "ORCA_LINKED";',
         ]
-    elif has_ios_sim_engine:
-        # Device not ready yet — still declare ORCA_LINKED path so project stays consistent
-        lines += [
+    lines += [
             f'\t\t\t\t"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = (',
             f'\t\t\t\t\t"{ios_sim_lib_path}",',
             '\t\t\t\t\t"$(inherited)",',
@@ -453,7 +439,7 @@ pbx = f'''// !$*UTF8*$!
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				ONLY_ACTIVE_ARCH = YES;
 				SDKROOT = auto;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 			}};
 			name = Debug;
 		}};
@@ -466,7 +452,7 @@ pbx = f'''// !$*UTF8*$!
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				SDKROOT = auto;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 			}};
 			name = Release;
 		}};
