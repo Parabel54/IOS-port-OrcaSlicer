@@ -40,12 +40,13 @@ final class OrcaCloudAccount: ObservableObject {
         busy = true
         signingIn = true
         let current = generation
-        defer { busy = false; signingIn = false }
+        defer { if generation == current { busy = false; signingIn = false } }
         do {
             let authorization = try await authentication.signIn(provider: provider)
             let session = try await api.exchange(code: authorization.code, verifier: authorization.verifier)
             guard generation == current else { return }
             try install(session)
+            signingIn = false
             let result = try await api.printers(accessToken: session.access_token)
             guard generation == current else { return }
             printers = result
@@ -57,13 +58,20 @@ final class OrcaCloudAccount: ObservableObject {
         }
     }
 
-    func cancelSignIn() { authentication.cancel() }
+    func cancelSignIn() {
+        guard signingIn else { return }
+        generation = UUID()
+        authentication.cancel()
+        signingIn = false
+        busy = false
+        message = OrcaCloudError.cancelled.localizedDescription
+    }
 
     func sync() async {
         guard !busy, var session = cloudSession else { return }
         busy = true
         let current = generation
-        defer { busy = false }
+        defer { if generation == current { busy = false } }
         do {
             if session.expiry.timeIntervalSinceNow < 60 {
                 session = try await refreshSession(session, generation: current)
@@ -90,6 +98,8 @@ final class OrcaCloudAccount: ObservableObject {
         do { try credentials.remove(Self.credentialID) }
         catch { message = OrcaCloudError.storage.localizedDescription; return }
         generation = UUID()
+        busy = false
+        signingIn = false
         authentication.cancel()
         cloudSession = nil
         signedIn = false
@@ -108,6 +118,7 @@ final class OrcaCloudAccount: ObservableObject {
             do { try credentials.remove(Self.credentialID) }
             catch { throw OrcaCloudError.storage }
             generation = UUID()
+            busy = false
             cloudSession = nil
             signedIn = false
             displayName = ""

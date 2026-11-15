@@ -959,6 +959,7 @@ struct OrcaRootView: View {
     private func moonrakerBaseURL() -> URL? { printerBaseURL() }
 
     private func connectPrinterHost() async {
+        guard !isConnecting, !isJobBusy else { return }
         switch hostType {
         case .moonraker: await connectMoonraker()
         case .flashforge: await connectFlashforge()
@@ -967,6 +968,7 @@ struct OrcaRootView: View {
     }
 
     private func uploadGCodeToHost() async {
+        guard !isConnecting, !isJobBusy else { return }
         switch hostType {
         case .moonraker: await uploadGCodeToMoonraker()
         case .flashforge: await uploadGCodeToFlashforge()
@@ -975,6 +977,7 @@ struct OrcaRootView: View {
     }
 
     private func startHostPrint() async {
+        guard !isConnecting, !isJobBusy else { return }
         switch hostType {
         case .moonraker: await startMoonrakerPrint()
         case .flashforge: await startFlashforgePrint()
@@ -983,6 +986,7 @@ struct OrcaRootView: View {
     }
 
     private func cancelHostPrint() async {
+        guard !isConnecting, !isJobBusy else { return }
         switch hostType {
         case .moonraker: await cancelMoonrakerPrint()
         case .flashforge: await cancelFlashforgePrint()
