@@ -45,6 +45,10 @@ int main(int argc, char **argv)
     }
 
     // Sensible defaults for a simple FFF slice without full profile stack
+    if (!config) {
+        orca_session_set_option(s, "use_relative_e_distances", "1");
+        orca_session_set_option(s, "layer_change_gcode", "G92 E0");
+    }
     orca_session_set_option(s, "layer_height", "0.2");
     orca_session_set_option(s, "wall_loops", "2");
     orca_session_set_option(s, "sparse_infill_density", "15%");

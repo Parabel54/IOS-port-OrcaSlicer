@@ -764,6 +764,9 @@ final class OrcaEngine: ObservableObject {
 
     private func applyDefaultFFF() {
         #if ORCA_LINKED
+        // Minimal printer defaults must agree with upstream's extrusion-mode validation.
+        _ = setOptionRaw("use_relative_e_distances", "1")
+        _ = setOptionRaw("layer_change_gcode", "G92 E0")
         _ = setOptionRaw("layer_height", "0.2")
         _ = setOptionRaw("wall_loops", "2")
         _ = setOptionRaw("sparse_infill_density", "15%")

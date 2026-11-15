@@ -43,6 +43,7 @@ int main(int argc, char **argv)
                  "project retains its layer height"))
         return 4;
     const char *options[][2] = {
+        {"use_relative_e_distances", "1"}, {"layer_change_gcode", "G92 E0"},
         {"layer_height", "0.2"}, {"wall_loops", "2"},
         {"sparse_infill_density", "15%"}, {"filament_diameter", "1.75"},
         {"nozzle_diameter", "0.4"}, {"printable_area", "0x0,220x0,220x220,0x220"},
