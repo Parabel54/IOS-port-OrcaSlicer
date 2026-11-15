@@ -228,7 +228,7 @@
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				ONLY_ACTIVE_ARCH = YES;
-				SDKROOT = auto;
+				SDKROOT = iphoneos;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 			};
 			name = Debug;
@@ -241,7 +241,7 @@
 				CLANG_ENABLE_OBJC_ARC = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				SDKROOT = auto;
+				SDKROOT = iphoneos;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 			};
 			name = Release;
@@ -272,7 +272,6 @@
 				LIBRARY_SEARCH_PATHS = (
 					"$(inherited)",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				MARKETING_VERSION = 2.5.1;
 				ORCA_PROFILE_REVISION = d8b0ff714f6c82f3a01b082aee4fa2bf1689399e4bd5ef30872b75c8fd0fe665;
 				ORCA_BUILD_REVISION = development;
@@ -319,7 +318,6 @@
 				LIBRARY_SEARCH_PATHS = (
 					"$(inherited)",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				MARKETING_VERSION = 2.5.1;
 				ORCA_PROFILE_REVISION = d8b0ff714f6c82f3a01b082aee4fa2bf1689399e4bd5ef30872b75c8fd0fe665;
 				ORCA_BUILD_REVISION = development;

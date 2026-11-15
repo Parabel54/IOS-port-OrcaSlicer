@@ -658,61 +658,54 @@ final class OrcaEngine: ObservableObject {
         #endif
     }
 
-    /// Import config JSON as overlay (or as user process/filament if kind set).
-    /// kind: nil = overlay only; 0 = user process; 1 = user filament
+    /// Catalog imports preserve preset type/inheritance. Untyped session JSON is
+    /// a settings overlay; it must not become a printer merely because it has IDs.
+    @MainActor
     @discardableResult
-    func importConfigJSON(url: URL, asUserPreset kind: Int? = nil) -> Bool {
+    func importConfigJSON(url: URL, asUserPreset kind: Int? = nil) async -> Bool {
+        guard !modelImporting, !presetsLoading, !sliceRunning else { return false }
         #if ORCA_LINKED
         guard let s = session else { return false }
         let accessed = url.startAccessingSecurityScopedResource()
         defer { if accessed { url.stopAccessingSecurityScopedResource() } }
         guard let dest = copyToTemp(url) else { return false }
-        let object = url.pathExtension.lowercased() == "json"
-            ? (try? JSONSerialization.jsonObject(with: Data(contentsOf: dest))) as? [String: Any] : nil
-        let isCatalog = ["orca_printer", "orca_filament", "orca_bundle", "zip"].contains(url.pathExtension.lowercased())
-            || object?["type"] != nil || object?["printer_settings_id"] != nil
-            || object?["filament_settings_id"] != nil || object?["print_settings_id"] != nil
-        if isCatalog {
-            let count = dest.path.withCString { orca_session_import_preset_catalog(s, $0) }
-            guard count > 0 else {
-                lastMessage = orca_session_last_error(s).map { String(cString: $0) } ?? "Preset import failed"
+        modelImporting = true
+        defer { modelImporting = false }
+        let bits = UInt(bitPattern: s)
+        do {
+            let (result, catalog) = try await Task.detached(priority: .userInitiated) { () throws -> (Int32, Bool) in
+                let session = OpaquePointer(bitPattern: bits)!
+                let catalog = try DocumentImportStore.isPresetCatalog(dest)
+                let result = dest.path.withCString { path -> Int32 in
+                    if catalog { return orca_session_import_preset_catalog(session, path) }
+                    if let kind { return orca_session_import_user_preset(session, path, Int32(kind)) }
+                    return orca_session_import_config(session, path)
+                }
+                return (result, catalog)
+            }.value
+            guard catalog ? result > 0 : result == 0 else {
+                lastMessage = orca_session_last_error(s).map { String(cString: $0) } ?? "Settings import failed"
                 return false
             }
             refreshPresetLists()
-            lastMessage = String(localized: "Imported \(count) presets. Select them in Process settings.")
-            return true
-        }
-        if let kind {
-            let rc = dest.path.withCString { orca_session_import_user_preset(s, $0, Int32(kind)) }
-            if rc != 0 {
-                lastMessage = orca_session_last_error(s).map { String(cString: $0) } ?? "import preset failed"
-                return false
-            }
-            refreshPresetLists()
-            if kind == 0 {
-                if let c = orca_session_selected_process(s) {
-                    selectedProcess = String(cString: c)
+            if catalog {
+                lastMessage = String(localized: "Imported \(result) presets. Select them in Process settings.")
+            } else if let kind {
+                if kind == 0, let selected = orca_session_selected_process(s) {
+                    selectedProcess = String(cString: selected)
                     activeProcessProfile = selectedProcess
+                } else if let selected = orca_session_selected_filament(s) {
+                    selectedFilament = String(cString: selected)
                 }
+                persistSelection()
+                lastMessage = String(localized: "Imported user preset from \(url.lastPathComponent).")
             } else {
-                if let c = orca_session_selected_filament(s) {
-                    selectedFilament = String(cString: c)
-                }
+                invalidateSlice()
+                refreshBedSize()
+                lastMessage = String(localized: "Imported settings from \(url.lastPathComponent).")
             }
-            persistSelection()
-            lastMessage = kind == 0
-                ? "Imported user process from \(url.lastPathComponent)"
-                : "Imported user filament from \(url.lastPathComponent)"
             return true
-        } else {
-            let rc = dest.path.withCString { orca_session_import_config(s, $0) }
-            if rc != 0 {
-                lastMessage = orca_session_last_error(s).map { String(cString: $0) } ?? "import config failed"
-                return false
-            }
-            lastMessage = "Imported config overlay from \(url.lastPathComponent)"
-            return true
-        }
+        } catch { lastMessage = error.localizedDescription; return false }
         #else
         return false
         #endif

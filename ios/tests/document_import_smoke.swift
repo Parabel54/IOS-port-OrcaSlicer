@@ -2,7 +2,8 @@ import Foundation
 
 @main
 struct DocumentImportSmoke {
-    static func main() throws {
+    @MainActor
+    static func main() async throws {
         let fm = FileManager.default
         let root = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try fm.createDirectory(at: root, withIntermediateDirectories: true)
@@ -30,6 +31,25 @@ struct DocumentImportSmoke {
         catch {}
         do { _ = try store.copy(URL(string: "https://example.invalid/model.stl")!); preconditionFailure("Remote URL accepted as a file") }
         catch {}
+        let settings = root.appendingPathComponent("settings.json")
+        try Data(#"{"name":"Whole session","printer_settings_id":"Printer","filament_settings_id":["PLA"],"print_settings_id":"Process"}"#.utf8).write(to: settings)
+        let overlay = try DocumentImportStore.isPresetCatalog(settings)
+        precondition(!overlay)
+        try Data(#"{"name":"PLA","type":"filament","filament_settings_id":["PLA"]}"#.utf8).write(to: settings)
+        let filament = try DocumentImportStore.isPresetCatalog(settings)
+        precondition(filament)
+        let inbox = DocumentInbox()
+        for ext in ["orca_printer", "orca_filament", "orca_bundle", "zip", "json"] {
+            let source = root.appendingPathComponent("presets." + ext)
+            try bytes.write(to: source)
+            inbox.receive(source, kind: .model(append: false))
+            for _ in 0..<2000 where inbox.receiving > 0 { try await Task.sleep(nanoseconds: 1_000_000) }
+            guard let imported = inbox.takeNext(), case .settings = imported.kind else {
+                preconditionFailure("Preset bundle was sent to model reader")
+            }
+            try fm.removeItem(at: imported.url.deletingLastPathComponent())
+        }
+        print("PASS: JSON and Orca/ZIP bundles route to settings even from Open model")
         print("PASS: coordinated document imports, source preservation, same-name isolation, reopen and failure handling")
     }
 }

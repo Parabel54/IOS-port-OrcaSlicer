@@ -28,6 +28,8 @@ struct CloudAccountPanel: View {
                 }.disabled(account.busy || engine.modelImporting || engine.presetsLoading)
                 Text("Cloud presets: \(account.profiles.filter { $0.kind == "printer" }.count) printers · \(account.profiles.filter { $0.kind == "filament" }.count) filaments · \(account.profiles.filter { $0.kind == "print" }.count) processes")
                     .font(.caption)
+                Button("Show all synced presets in Process") { engine.setCompatibleOnly(false) }
+                    .disabled(engine.modelImporting || engine.presetsLoading)
                 if !account.profileImportMessage.isEmpty { Text(account.profileImportMessage).font(.caption) }
                 if let date = account.lastSynced {
                     Text("Last synchronized: \(date.formatted(date: .omitted, time: .shortened))")

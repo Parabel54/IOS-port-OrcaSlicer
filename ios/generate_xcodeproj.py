@@ -16,14 +16,11 @@ REPO = ROOT.parent
 PROJ = ROOT / "OrcaSlicer.xcodeproj"
 PROJ.mkdir(exist_ok=True)
 
-ENGINE_MAC = REPO / "build-macos-headless-arm64" / "engine_bundle" / "lib"
 ENGINE_IOS_SIM = REPO / "build-ios-iphonesimulator-arm64" / "engine_bundle" / "lib"
 ENGINE_IOS_DEV = REPO / "build-ios-iphoneos-arm64" / "engine_bundle" / "lib"
 
-has_mac_engine = (ENGINE_MAC / "liborca_engine.a").is_file()
 has_ios_sim_engine = (ENGINE_IOS_SIM / "liborca_engine.a").is_file()
 has_ios_dev_engine = (ENGINE_IOS_DEV / "liborca_engine.a").is_file()
-has_ios_engine = has_ios_sim_engine or has_ios_dev_engine
 if args.require_engine:
     archive = (ENGINE_IOS_DEV if args.require_engine == "iphoneos" else ENGINE_IOS_SIM) / "liborca_engine.a"
     if not archive.is_file() or archive.stat().st_size == 0:
@@ -88,19 +85,10 @@ for folder in ("info", "flush", "filament_mixing"):
     elif args.require_engine:
         parser.error(f"Missing required engine resources: {source}")
 
-mac_lib_path = "$(SRCROOT)/../build-macos-headless-arm64/engine_bundle/lib"
 ios_sim_lib_path = "$(SRCROOT)/../build-ios-iphonesimulator-arm64/engine_bundle/lib"
 ios_dev_lib_path = "$(SRCROOT)/../build-ios-iphoneos-arm64/engine_bundle/lib"
-# Prefer per-SDK paths; fall back to sim path for legacy single-bundle setups
-ios_lib_path = ios_sim_lib_path if has_ios_sim_engine else ios_dev_lib_path
 hdr_path = "$(SRCROOT)/../src/ios"
 
-mac_ld = (
-    "-lorca_engine -lc++ -lz -liconv -lexpat "
-    "-framework Foundation -framework ModelIO -framework IOKit "
-    "-framework CoreFoundation -framework Security -framework SystemConfiguration "
-    "-framework SceneKit -framework UIKit"
-)
 ios_ld = (
     "-lorca_engine -lc++ -lz -liconv -lexpat "
     "-framework Foundation -framework ModelIO "
@@ -154,7 +142,6 @@ def tgt_settings(name: str) -> str:
         "\t\t\t\tLIBRARY_SEARCH_PATHS = (",
         '\t\t\t\t\t"$(inherited)",',
         "\t\t\t\t);",
-        "\t\t\t\tMACOSX_DEPLOYMENT_TARGET = 13.0;",
         "\t\t\t\tMARKETING_VERSION = 2.5.1;",
         f"\t\t\t\tORCA_PROFILE_REVISION = {PROFILE_REVISION};",
         f"\t\t\t\tORCA_BUILD_REVISION = {BUILD_REVISION};",
@@ -427,7 +414,7 @@ pbx = f'''// !$*UTF8*$!
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				ONLY_ACTIVE_ARCH = YES;
-				SDKROOT = auto;
+				SDKROOT = iphoneos;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 			}};
 			name = Debug;
@@ -440,7 +427,7 @@ pbx = f'''// !$*UTF8*$!
 				CLANG_ENABLE_OBJC_ARC = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				SDKROOT = auto;
+				SDKROOT = iphoneos;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 			}};
 			name = Release;
@@ -495,7 +482,6 @@ for folder in engine_resource_folders:
 
 (PROJ / "project.pbxproj").write_text(pbx)
 print("Wrote", PROJ / "project.pbxproj")
-print("has_mac_engine=", has_mac_engine)
 print("has_ios_sim_engine=", has_ios_sim_engine)
 print("has_ios_dev_engine=", has_ios_dev_engine)
 print("has_profiles=", has_profiles, PROFILES_DIR if has_profiles else "")

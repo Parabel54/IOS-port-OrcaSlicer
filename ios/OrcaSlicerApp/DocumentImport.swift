@@ -29,6 +29,14 @@ struct DocumentImportStore {
     static let temporary = DocumentImportStore(directory: FileManager.default.temporaryDirectory
         .appendingPathComponent("OrcaSlicer/ImportStaging", isDirectory: true))
 
+    static func isPresetCatalog(_ url: URL) throws -> Bool {
+        if ["orca_printer", "orca_filament", "orca_bundle", "zip"].contains(url.pathExtension.lowercased()) { return true }
+        let object = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
+        if object?["type"] != nil { return true }
+        let identities = ["printer_settings_id", "filament_settings_id", "print_settings_id"]
+        return identities.filter { object?[$0] != nil }.count == 1
+    }
+
     func owns(_ url: URL) -> Bool {
         url.isFileURL && url.standardizedFileURL.path.hasPrefix(directory.standardizedFileURL.path + "/")
     }
@@ -83,6 +91,10 @@ final class DocumentInbox: ObservableObject {
                 let extensionName = url.pathExtension.lowercased()
                 guard ["stl", "obj", "3mf", "amf", "json", "orca_printer", "orca_filament", "orca_bundle", "zip"].contains(extensionName) else {
                     errorMessage = String(localized: "Choose a model, JSON settings file, or Orca preset bundle.")
+                    return
+                }
+                if case .settings = kind, !["json", "orca_printer", "orca_filament", "orca_bundle", "zip"].contains(extensionName) {
+                    errorMessage = String(localized: "Choose JSON settings or an Orca preset bundle.")
                     return
                 }
                 let resolved: DocumentImportKind

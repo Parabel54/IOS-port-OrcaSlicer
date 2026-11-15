@@ -330,6 +330,12 @@ struct OrcaCloudAPI {
         guard UUID(uuidString: id) != nil else { throw OrcaCloudError.invalidResponse }
         var body = try profile.record()
         body["id"] = id
+        if var content = body["content"] as? [String: Any] {
+            for key in Array(content.keys) where key.hasPrefix("printhost_") || ["print_host", "print_host_webui"].contains(key) {
+                content.removeValue(forKey: key)
+            }
+            body["content"] = content
+        }
         body.removeValue(forKey: "updated_time")
         if let originalTime { body["original_updated_time"] = String(originalTime) }
         var request = URLRequest(url: OrcaCloudEndpoints.api.appendingPathComponent("api/v1/sync/push"))

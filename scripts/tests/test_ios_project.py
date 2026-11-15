@@ -1,5 +1,6 @@
 """Generator checks without Xcode, SDKs, or real engine archives."""
 import importlib.util
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -8,6 +9,22 @@ import unittest
 from pathlib import Path
 
 SOURCE = Path(__file__).resolve().parents[2] / 'ios/generate_xcodeproj.py'
+
+
+class DocumentAssociationTests(unittest.TestCase):
+    def test_native_documents_use_model_and_preset_types(self):
+        info = plistlib.loads((SOURCE.parent / 'OrcaSlicerApp/Info.plist').read_bytes())
+        declared = {ext: item for item in info['UTImportedTypeDeclarations']
+                    for ext in item['UTTypeTagSpecification']['public.filename-extension']}
+        for ext in ('stl', 'obj', 'amf', '3mf', 'orca_printer', 'orca_filament', 'orca_bundle'):
+            self.assertIn(ext, declared)
+        handlers = {uti for item in info['CFBundleDocumentTypes'] for uti in item['LSItemContentTypes']}
+        self.assertIn('public.geometry-definition-format', handlers)
+        self.assertIn('public.zip-archive', handlers)
+        self.assertNotIn('public.object-code', handlers)
+        for item in info['CFBundleDocumentTypes']:
+            self.assertEqual(item['LSHandlerRank'], 'Alternate')
+        self.assertNotIn('NSAllowsArbitraryLoadsInLocalNetwork', info['NSAppTransportSecurity'])
 
 
 class ProjectGenerationTests(unittest.TestCase):

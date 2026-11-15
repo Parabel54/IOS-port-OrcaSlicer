@@ -178,7 +178,7 @@ The supplied LiveContainer crash report on iOS 26.4 showed `EXC_BAD_ACCESS / KER
 
 ### Opening models and settings
 
-Open/Add use a native document picker. Preset import first dismisses the process sheet so the picker has a free presenter. STL, OBJ, 3MF and AMF are supported model inputs; JSON is a settings input. The app also registers these document types for Files/Share opening.
+Open/Add use a native document picker. Preset import first dismisses the process sheet so the picker has a free presenter. STL, OBJ, 3MF and AMF are supported model inputs. JSON settings and `.orca_printer`, `.orca_filament`, `.orca_bundle` or ZIP preset exports use the settings importer. Open also routes preset files to this importer. The app also registers these document types for Files/Share opening.
 
 Selected and externally opened files are read under security-scoped access with `NSFileCoordinator`, then copied into uniquely named folders in `Documents/OrcaSlicer/Imports`. Recent-file entries refer to those local copies. The import queue waits for profile startup and slicing to finish before calling the engine. Temporary engine staging also uses unique directories and never removes an identically named source before copying.
 
@@ -192,7 +192,7 @@ The Device page discovers enabled sign-in methods from the official authenticati
 
 Only loopback peers, the expected host/path, and a single matching state/code are accepted for browser callbacks. Authentication codes are exchanged at the official token endpoint; refresh/access tokens stay in a distinct device-only Keychain item. HTTP redirects are rejected on token and printer API requests. Provider and verification flows have protocol fixture coverage; successful interactive sign-in still depends on the provider's configuration and needs an account test on the device.
 
-The account restores its session, refreshes tokens, and fetches `/api/v1/printers` manually or while the account panel is visible. Cloud printer metadata, connection state and job state appear natively. A cloud printer can be linked to one saved local connection; this association persists without uploading LAN addresses or access codes. Registration of new cloud printers remains on the cloud website. Native printer transport and cloud account membership are separate: account synchronization does not discover a Flashforge IP address or obtain its LAN access code automatically.
+The account restores its session, refreshes tokens, and fetches `/api/v1/printers` and `/api/v1/sync/pull` manually or while the account panel is visible. Printer, filament and process presets load into the official native catalog. Use **Show all synced presets in Process** if compatibility filtering hides a preset, and **Upload local presets to Orca Cloud** to send user presets through the conflict-checked sync API. A conflict preserves both versions; automatic deletion of local presets from cloud tombstones is not implemented. Cloud printer metadata, connection state and job state appear natively. A cloud printer can be linked to one saved local connection; this association persists without uploading LAN addresses or access codes. Registration of new cloud printers remains on the cloud website. Native printer transport and cloud account membership are separate: account synchronization does not discover a Flashforge IP address or obtain its LAN access code automatically.
 
 ### Flashforge AD5X and Adventurer 5M
 
@@ -201,3 +201,7 @@ Choose **Flashforge** on Device, enter the printer IP/URL (default HTTP port 889
 Select the matching official Flashforge slicing profile in Process before uploading. The connector reads `/detail` for temperatures, status and AD5X material slots. An AD5X material station can map generated G-code tools 0–3 to loaded slots 1–4. Only tools found in the G-code are sent in the mapping; empty/missing slots and unsupported tools are rejected. UI tool labels are 1-based. File upload streams a temporary multipart body and sets `printNow=false`. **Start print** sends a separate `/printGcode` request for that upload; changing the connection, slice or print options invalidates the start target. Cancel uses `/control` with `jobCtl_cmd`.
 
 Protocol fixtures verify requests and error handling without contacting a printer. Physical firmware compatibility, IFS color/material behavior and actual printing still require testing on the AD5X and 5M.
+
+### Touch controls and installed build
+
+Choose **Orbit**, **Pan**, **Move**, **Rotate** or **Select** in the viewport strip. Each uses one finger. Pinch with two fingers to zoom in any mode. Move translates the object on the bed; Rotate turns it around Z. Use **Fit** to frame the model again. The drawer handle can still hide the lower controls. **About** shows the build revision so an older installed IPA can be distinguished from a new build.

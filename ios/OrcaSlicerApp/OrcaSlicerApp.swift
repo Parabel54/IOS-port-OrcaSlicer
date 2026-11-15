@@ -3417,7 +3417,7 @@ struct OrcaRootView: View {
                         }
                     }
                 } header: {
-                    Text("System profiles")
+                    Text("Printer and filament presets")
                 }
 
                 Section {
@@ -4545,7 +4545,7 @@ struct OrcaRootView: View {
                 status = engine.lastMessage
                 if success { engine.rememberRecent(url: document.url) }
             case .settings(let preset):
-                success = engine.importConfigJSON(url: document.url, asUserPreset: preset)
+                success = await engine.importConfigJSON(url: document.url, asUserPreset: preset)
                 status = engine.lastMessage
             }
             if !success { documents.errorMessage = status }
