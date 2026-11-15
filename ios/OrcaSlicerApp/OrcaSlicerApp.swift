@@ -80,6 +80,19 @@ struct OrcaRootView: View {
     @State private var operationError: String?
     @State private var showProcess = false
     @State private var showPlateInspector = false
+    @State private var showModelLibrary = false
+    @State private var primitiveKind = 0
+    @State private var primitiveX = "20"
+    @State private var primitiveY = "20"
+    @State private var primitiveZ = "20"
+    @State private var scaleX = "100"
+    @State private var scaleY = "100"
+    @State private var scaleZ = "100"
+    @State private var uniformScale = true
+    @State private var moveX = "0"
+    @State private var moveY = "0"
+    @State private var moveZ = "0"
+    @State private var rotateAmount = "45"
     @State private var showPreviewControls = false
     @State private var sidebarVisible = true
     @State private var showCalibration = false
@@ -225,6 +238,10 @@ struct OrcaRootView: View {
                                 plateStage
                                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                                     .allowsHitTesting(!isSlicing && !engine.presetsLoading && !engine.modelImporting)
+                                if mainTab == .preview && !engine.previewLayerHeights.isEmpty {
+                                    previewLayerBar.padding(.horizontal, 12).padding(.vertical, 6)
+                                        .background(OrcaTheme.panel)
+                                }
                                 compactControls.padding(.vertical, 4).background(OrcaTheme.panel)
                             }
                         }
@@ -289,6 +306,7 @@ struct OrcaRootView: View {
                     VStack(alignment: .leading, spacing: 16) {
                         plateTabsRow
                         objectPickerRow
+                        transformEditor
                         plateToolsRow
                     }.padding()
                 }
@@ -297,6 +315,7 @@ struct OrcaRootView: View {
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showPlateInspector = false } } }
             }.presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
         }
+        .sheet(isPresented: $showModelLibrary) { modelLibrary }
         .sheet(isPresented: $showPreviewControls) {
             NavigationStack {
                 ScrollView { layerScrubber.padding() }
@@ -1920,6 +1939,7 @@ struct OrcaRootView: View {
             Menu {
                 Button("Open model…") { requestDocumentPicker(.model(append: false)) }
                 Button("Add model…") { requestDocumentPicker(.model(append: true)) }
+                Button("Add primitive or handy model…") { showModelLibrary = true }.accessibilityIdentifier("model-library")
                 Divider()
                 Button("Import process preset…") { requestDocumentPicker(.settings(preset: 0)) }
                 Button("Import filament preset…") { requestDocumentPicker(.settings(preset: 1)) }
@@ -1955,6 +1975,131 @@ struct OrcaRootView: View {
                     .accessibilityIdentifier("slice-plate")
             }
         }.padding(.horizontal, 8))
+    }
+
+    private let handyModels: [(String, [String])] = [
+        ("Orca Cube", ["OrcaCube_v2.drc", "OrcaPlug_v2.drc"]),
+        ("OrcaSliced Combo", ["OrcaSliced.3mf", "OrcaCube_v2.drc", "OrcaPlug_v2.drc"]),
+        ("Orca Badge", ["OrcaBadge.3mf"]),
+        ("Orca Tolerance Test", ["OrcaToleranceTest.drc"]),
+        ("3DBenchy", ["3DBenchy.drc"]), ("Cali Cat", ["calicat.drc"]),
+        ("Autodesk FDM Test", ["ksr_fdmtest_v4.drc"]),
+        ("Voron Cube", ["Voron_Design_Cube_v7.drc"]),
+        ("Stanford Bunny", ["Stanford_Bunny.drc"]),
+        ("Orca String Hell", ["Orca_stringhell.drc"])
+    ]
+
+    private var modelLibrary: AnyView {
+        AnyView(NavigationStack {
+            Form {
+                Section("Primitive") {
+                    Picker("Shape", selection: $primitiveKind) {
+                        ForEach(Array(["Cube", "Cylinder", "Sphere", "Cone", "Torus", "Disc"].enumerated()), id: \.offset) { i, name in
+                            Text(name).tag(i)
+                        }
+                    }.onChange(of: primitiveKind) { kind in primitiveZ = kind == 5 ? "0.2" : "20" }
+                    numericField(primitiveKind == 0 ? "Width X (mm)" : primitiveKind == 4 ? "Inner diameter (mm)" : "Diameter (mm)", text: $primitiveX)
+                    if primitiveKind == 0 || primitiveKind == 4 {
+                        numericField(primitiveKind == 4 ? "Tube diameter (mm)" : "Depth Y (mm)", text: $primitiveY)
+                    }
+                    if primitiveKind != 2 && primitiveKind != 4 { numericField("Height Z (mm)", text: $primitiveZ) }
+                    Button("Add to plate") {
+                        guard let x = Float(primitiveX), let y = Float(primitiveY), let z = Float(primitiveZ),
+                              [x, y, z].allSatisfy({ $0.isFinite && $0 > 0 && $0 <= 10000 }) else {
+                            documents.errorMessage = "Enter dimensions between 0 and 10000 mm."; return
+                        }
+                        if engine.addPrimitive(kind: primitiveKind, x: x, y: y, z: z) {
+                            mainTab = .prepare; fitCameraRequest = UUID(); showModelLibrary = false
+                        } else { documents.errorMessage = engine.lastMessage }
+                    }.accessibilityIdentifier("add-primitive")
+                }
+                Section("Handy models") {
+                    ForEach(Array(handyModels.enumerated()), id: \.offset) { _, model in
+                        Button(model.0) {
+                            showModelLibrary = false
+                            Task { @MainActor in
+                                for file in model.1 {
+                                    guard let root = Bundle.main.resourceURL else { return }
+                                    let url = root.appendingPathComponent("handy_models").appendingPathComponent(file)
+                                    guard await engine.loadDocumentModel(url: url, append: true) else {
+                                        documents.errorMessage = engine.lastMessage; return
+                                    }
+                                }
+                                engine.arrange()
+                                mainTab = .prepare; fitCameraRequest = UUID(); status = engine.lastMessage
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Add model").navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { showModelLibrary = false } } }
+        })
+    }
+
+    private func numericField(_ title: String, text: Binding<String>) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            TextField(title, text: text).multilineTextAlignment(.trailing)
+                .keyboardType(.numbersAndPunctuation).frame(maxWidth: 110)
+                .textFieldStyle(.roundedBorder)
+        }
+    }
+
+    private var transformEditor: AnyView {
+        AnyView(VStack(alignment: .leading, spacing: 12) {
+            Text("Transform selection").font(.headline)
+            Text(engine.selectedObjectIndex < 0 ? "All objects" : engine.objectNames.indices.contains(engine.selectedObjectIndex) ? engine.objectNames[engine.selectedObjectIndex] : "Selection")
+                .font(.caption).foregroundStyle(.secondary)
+            Picker("Transform", selection: Binding(get: { [.move, .rotate, .scale].contains(gizmoMode) ? gizmoMode : .move }, set: { gizmoMode = $0 })) {
+                Text("Move").tag(GizmoMode.move)
+                Text("Rotate").tag(GizmoMode.rotate)
+                Text("Scale").tag(GizmoMode.scale)
+            }.pickerStyle(.segmented)
+                .onChange(of: gizmoMode) { mode in
+                    if mode == .move { plateTouchMode = .move }
+                    if mode == .rotate { plateTouchMode = .rotate }
+                    if mode == .scale { plateTouchMode = .scale }
+                }
+            if gizmoMode == .scale {
+                Toggle("Uniform scale", isOn: $uniformScale)
+                numericField(uniformScale ? "Scale (%)" : "X scale (%)", text: $scaleX)
+                if !uniformScale {
+                    numericField("Y scale (%)", text: $scaleY)
+                    numericField("Z scale (%)", text: $scaleZ)
+                }
+                Text("Relative to current size, along the object's local axes.").font(.caption).foregroundStyle(.secondary)
+                Button("Apply scale") {
+                    let values = uniformScale ? [scaleX, scaleX, scaleX] : [scaleX, scaleY, scaleZ]
+                    let factors = values.compactMap { Float($0) }
+                    guard factors.count == 3, factors.allSatisfy({ $0.isFinite && $0 > 0 && $0 <= 10000 }) else {
+                        documents.errorMessage = "Enter scale percentages between 0 and 10000."; return
+                    }
+                    engine.scale(x: factors[0] / 100, y: factors[1] / 100, z: factors[2] / 100)
+                    status = engine.lastMessage; showPlateInspector = false
+                }.accessibilityIdentifier("apply-scale")
+            } else if gizmoMode == .rotate {
+                Picker("Axis", selection: $rotationAxis) { Text("X").tag(0); Text("Y").tag(1); Text("Z").tag(2) }
+                    .pickerStyle(.segmented)
+                numericField("Rotation (degrees)", text: $rotateAmount)
+                Button("Apply rotation") {
+                    guard let angle = Float(rotateAmount), angle.isFinite else { documents.errorMessage = "Enter a valid angle."; return }
+                    engine.rotate(axis: rotationAxis, degrees: angle)
+                    status = engine.lastMessage; showPlateInspector = false
+                }
+            } else {
+                numericField("Move X (mm)", text: $moveX)
+                numericField("Move Y (mm)", text: $moveY)
+                numericField("Move Z (mm)", text: $moveZ)
+                Button("Apply move") {
+                    let values = [moveX, moveY, moveZ].compactMap { Float($0) }
+                    guard values.count == 3, values.allSatisfy({ $0.isFinite }) else { documents.errorMessage = "Enter valid distances."; return }
+                    engine.translate(dx: values[0], dy: values[1], dz: values[2])
+                    status = engine.lastMessage; showPlateInspector = false
+                }
+            }
+        }.disabled(!engine.hasModel))
     }
 
     private var objectPickerRow: some View {
@@ -2077,9 +2222,11 @@ struct OrcaRootView: View {
                 ForEach(GizmoMode.allCases, id: \.self) { mode in
                     toolChip(mode.rawValue, gizmoIcon(mode), selected: gizmoMode == mode) {
                         gizmoMode = mode
+                        showPlateInspector = false
                         moveMode = (mode == .move)
                         if mode == .move { plateTouchMode = .move }
                         else if mode == .rotate { plateTouchMode = .rotate }
+                        else if mode == .scale { plateTouchMode = .scale }
                         else if mode == .select { plateTouchMode = .select }
                         if mode != .measure {
                             measurePointA = nil
@@ -2198,13 +2345,17 @@ struct OrcaRootView: View {
                 objectMeshes: engine.objectMeshes,
                 selectedObjectIndex: engine.selectedObjectIndex,
                 gcodeNode: engine.gcodePathNode,
-                showGCode: mainTab == .preview && engine.gcodePathNode != nil,
+                showGCode: mainTab == .preview,
                 bedSize: engine.bedSize,
                 bedTexturePath: engine.bedTexturePath,
                 accent: UIColor(red: 0, green: 150 / 255, blue: 136 / 255, alpha: 1),
                 touchMode: activePlateTouchMode,
                 fitRequest: fitCameraRequest,
                 rotationAxis: rotationAxis,
+                onScaleCommit: { factor, index in
+                    engine.scale(factor: factor, index: index)
+                    status = engine.lastMessage
+                },
                 onRotateCommit: { degrees, index in
                     engine.rotate(axis: rotationAxis, degrees: degrees, index: index)
                     status = engine.lastMessage
@@ -2244,11 +2395,15 @@ struct OrcaRootView: View {
                                 if mainTab == .prepare || mode == .orbit || mode == .pan {
                                     toolChip(mode.rawValue, mode.icon, selected: activePlateTouchMode == mode) {
                                         plateTouchMode = mode
-                                        gizmoMode = mode == .move ? .move : mode == .rotate ? .rotate : .select
+                                        gizmoMode = mode == .move ? .move : mode == .rotate ? .rotate : mode == .scale ? .scale : .select
                                         moveMode = mode == .move
                                         engine.clearPaintOverlay()
                                     }
                                 }
+                            }
+                            if mainTab == .prepare {
+                                toolChip("Add", "plus") { showModelLibrary = true }.accessibilityIdentifier("model-library-shortcut")
+                                toolChip("Transform", "slider.horizontal.3") { showPlateInspector = true }
                             }
                             toolChip("Fit", "arrow.up.left.and.arrow.down.right") { fitCameraRequest = UUID() }
                         }.padding(8)
@@ -2261,6 +2416,16 @@ struct OrcaRootView: View {
                         }.pickerStyle(.segmented).padding(.horizontal, 8).padding(.bottom, 8)
                     }
                     }.background(.ultraThinMaterial).clipShape(RoundedRectangle(cornerRadius: 12)).padding(8)
+                }
+            }
+            .overlay {
+                if mainTab == .preview && engine.gcodeGeometry == nil {
+                    VStack(spacing: 12) {
+                        Image(systemName: "square.3.layers.3d").font(.largeTitle)
+                        Text("Slice the plate to preview toolpaths")
+                        Button("Slice plate", action: sliceNow).buttonStyle(.borderedProminent)
+                            .disabled(!engine.hasModel || isSlicing)
+                    }.padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
                 }
             }
             .overlay(alignment: .topLeading) {
@@ -2739,51 +2904,63 @@ struct OrcaRootView: View {
         .buttonStyle(.plain)
     }
 
-    private var layerScrubber: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("Clip Z (min–max)")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(OrcaTheme.muted)
-                Spacer()
-                Text(String(
-                    format: "%.2f–%.2f / %.2f mm",
-                    engine.previewMinZ, engine.previewMaxZ, engine.gcodeZMax
-                ))
-                    .font(.system(size: 12, weight: .medium, design: .monospaced))
-                    .foregroundStyle(OrcaTheme.accent)
-            }
-            // Max Z (top clip) — desktop G-code layer scrubber
-            Slider(
-                value: Binding(
-                    get: { Double(engine.previewMaxZ) },
-                    set: { v in
-                        engine.previewMaxZ = Float(v)
-                        if engine.previewMinZ > engine.previewMaxZ {
-                            engine.previewMinZ = engine.previewMaxZ
-                        }
-                        engine.applyPreviewLayer()
-                    }
-                ),
-                in: Double(engine.gcodeZMin)...Double(max(engine.gcodeZMax, engine.gcodeZMin + 0.05))
-            )
-            .tint(OrcaTheme.accent)
-            // Min Z (bottom clip / clipping plane lite)
-            Slider(
-                value: Binding(
-                    get: { Double(engine.previewMinZ) },
-                    set: { v in
-                        engine.previewMinZ = Float(v)
-                        if engine.previewMinZ > engine.previewMaxZ {
-                            engine.previewMaxZ = engine.previewMinZ
-                        }
-                        engine.applyPreviewLayer()
-                    }
-                ),
-                in: Double(engine.gcodeZMin)...Double(max(engine.gcodeZMax, engine.gcodeZMin + 0.05))
-            )
-            .tint(OrcaTheme.muted)
+    private var lowerPreviewLayer: Int {
+        engine.previewLayerHeights.firstIndex(where: { $0 >= engine.previewMinZ - 0.001 }) ?? 0
+    }
+    private var upperPreviewLayer: Int {
+        engine.previewLayerHeights.lastIndex(where: { $0 <= engine.previewMaxZ + 0.001 }) ?? 0
+    }
+    private var upperLayerBinding: Binding<Double> {
+        Binding(get: { Double(upperPreviewLayer) }, set: { value in
+            let i = Int(value.rounded())
+            guard engine.previewLayerHeights.indices.contains(i) else { return }
+            let z = engine.previewLayerHeights[i]
+            guard z != engine.previewMaxZ else { return }
+            engine.previewMaxZ = z
+            engine.previewMinZ = min(engine.previewMinZ, z)
+            engine.applyPreviewLayer()
+        })
+    }
 
+    private var previewLayerBar: some View {
+        VStack(spacing: 2) {
+            HStack {
+                Text("Layer \(upperPreviewLayer + 1) / \(engine.previewLayerHeights.count)")
+                Spacer()
+                Text(String(format: "Z %.2f mm", engine.previewMaxZ))
+            }.font(.caption.monospacedDigit())
+            Slider(value: upperLayerBinding, in: 0...Double(max(1, engine.previewLayerHeights.count - 1)), step: 1)
+                .disabled(engine.previewLayerHeights.count < 2).tint(OrcaTheme.accent)
+                .accessibilityLabel("Upper preview layer")
+        }
+    }
+
+    private var layerScrubber: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if engine.gcodeGeometry == nil { Text("Slice the plate to preview toolpaths.") }
+            else {
+                Text(engine.lastSliceStatsText).font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                if engine.previewIsReduced {
+                    Text("Toolpaths are reduced to fit available memory.").font(.caption).foregroundStyle(.secondary)
+                }
+                previewLayerBar
+                Text("Lower layer \(lowerPreviewLayer + 1)").font(.caption)
+                Slider(value: Binding(get: { Double(lowerPreviewLayer) }, set: { value in
+                    let i = Int(value.rounded())
+                    guard engine.previewLayerHeights.indices.contains(i) else { return }
+                    let z = engine.previewLayerHeights[i]
+                    guard z != engine.previewMinZ else { return }
+                    engine.previewMinZ = z
+                    engine.previewMaxZ = max(engine.previewMaxZ, z)
+                    engine.applyPreviewLayer()
+                }), in: 0...Double(max(1, engine.previewLayerHeights.count - 1)), step: 1)
+                    .disabled(engine.previewLayerHeights.count < 2)
+                Button("Show all layers") {
+                    engine.previewMinZ = engine.gcodeZMin
+                    engine.previewMaxZ = engine.gcodeZMax
+                    engine.applyPreviewLayer()
+                }
+            }
             // Color legend chips — wall / infill / support / travel / other (W5)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
@@ -3399,7 +3576,7 @@ struct OrcaRootView: View {
     }
 
     private var editingModalPresented: Bool {
-        showPlateInspector || showPreviewControls || showProcess || showWizard || showCalibration || showObjectSettings || showPreferences || showAbout || showShortcuts
+        showModelLibrary || showPlateInspector || showPreviewControls || showProcess || showWizard || showCalibration || showObjectSettings || showPreferences || showAbout || showShortcuts
     }
 
     private func importCloudPresetsIfReady() {

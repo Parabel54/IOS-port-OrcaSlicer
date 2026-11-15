@@ -39,7 +39,7 @@ class ProjectGenerationTests(unittest.TestCase):
         profiles = self.root / 'resources/profiles'
         profiles.mkdir(parents=True)
         (profiles / 'vendor.json').write_text('{}')
-        for folder in ('info', 'flush', 'filament_mixing'):
+        for folder in ('info', 'flush', 'filament_mixing', 'handy_models'):
             resource = self.root / 'resources' / folder
             resource.mkdir()
             (resource / 'table.json').write_text('{}')
@@ -96,7 +96,7 @@ class ProjectGenerationTests(unittest.TestCase):
         result = self.generate('iphoneos')
         self.assertEqual(result.returncode, 0, result.stderr)
         project = (self.root / 'ios/OrcaSlicer.xcodeproj/project.pbxproj').read_text()
-        for folder in ('info', 'flush', 'filament_mixing'):
+        for folder in ('info', 'flush', 'filament_mixing', 'handy_models'):
             self.assertIn(f'path = Resources/{folder};', project)
             self.assertTrue((self.root / 'ios/OrcaSlicerApp/Resources' / folder / 'table.json').is_file())
         shutil.rmtree(self.root / 'resources/info')

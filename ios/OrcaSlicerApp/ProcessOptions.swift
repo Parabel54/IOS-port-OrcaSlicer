@@ -165,12 +165,78 @@ extension OrcaEngine {
 // MARK: - Searchable full settings browser
 
 /// Browse / edit every DynamicPrintConfig key via official serialize strings.
+private struct PresetSelectionList: View {
+    @ObservedObject var engine: OrcaEngine
+    let scope: Int
+    var onChanged: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var search = ""
+    @State private var source = 0
+
+    private var names: [String] {
+        scope == 2 ? engine.printerNames : scope == 1 ? engine.filamentNames : engine.processNames
+    }
+    private var selected: String {
+        scope == 2 ? engine.selectedPrinter : scope == 1 ? engine.selectedFilament : engine.selectedProcess
+    }
+    private func origin(_ name: String) -> Int { engine.presetOrigins[scope]?[name] ?? 0 }
+    private func matching(_ group: Int) -> [String] {
+        names.filter { origin($0) == group && (search.isEmpty || $0.localizedCaseInsensitiveContains(search)) }
+    }
+
+    var body: some View {
+        List {
+            Picker("Preset source", selection: $source) {
+                Text("My presets").tag(0)
+                Text("System").tag(1)
+                Text("All").tag(2)
+            }.pickerStyle(.segmented)
+            if scope != 2 {
+                Toggle("Compatible with selected printer", isOn: Binding(
+                    get: { engine.compatibleOnly }, set: { engine.setCompatibleOnly($0) }))
+            }
+            ForEach([2, 1, 0], id: \.self) { group in
+                if source == 2 || (source == 0 && group > 0) || (source == 1 && group == 0) {
+                    let rows = matching(group)
+                    if !rows.isEmpty {
+                        Section(group == 2 ? "Orca Cloud" : group == 1 ? "User presets" : "System presets") {
+                            ForEach(rows, id: \.self) { name in
+                                Button {
+                                    let ok = scope == 2 ? engine.selectPrinter(name) :
+                                        scope == 1 ? engine.selectFilament(name) : engine.selectProcess(name)
+                                    if ok { onChanged(); dismiss() } else { selectionFailed = true }
+                                } label: {
+                                    HStack {
+                                        Text(name)
+                                        Spacer()
+                                        if name == selected { Image(systemName: "checkmark") }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if source == 0 && !names.contains(where: { origin($0) > 0 }) {
+                Text("No personal presets match this printer. Choose System or turn off compatibility filtering.")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .searchable(text: $search, prompt: "Search presets")
+        .navigationTitle("Select preset")
+        .onAppear { source = names.contains(where: { origin($0) > 0 }) ? 0 : 1 }
+        .alert("Preset selection failed", isPresented: Binding(get: { selectionFailed }, set: { selectionFailed = $0 })) {
+            Button("OK", role: .cancel) {}
+        } message: { Text(engine.lastMessage) }
+    }
+    @State private var selectionFailed = false
+}
+
 struct ProcessSettingsBrowser: View {
     @ObservedObject var engine: OrcaEngine
     var onChanged: (() -> Void)?
     @AppStorage("orca.settings.scope") private var scope = 0
     @AppStorage("orca.settings.visibility") private var mode = 0
-    @State private var presetSearch = ""
     @State private var saveName = ""
     @State private var savePreset = false
 
@@ -306,7 +372,7 @@ struct ProcessSettingsBrowser: View {
             .preferredColorScheme(.dark)
             .tint(themeAccent)
             .onAppear { reload() }
-            .onChange(of: scope) { _ in categoryFilter = ""; presetSearch = "" }
+            .onChange(of: scope) { _ in categoryFilter = "" }
             .onChange(of: engine.selectedPrinter) { _ in reload() }
             .onChange(of: engine.selectedFilament) { _ in reload() }
             .onChange(of: engine.selectedProcess) { _ in reload() }
@@ -323,20 +389,12 @@ struct ProcessSettingsBrowser: View {
     }
 
     private var presetSelector: some View {
-        let names = scope == 2 ? engine.printerNames : scope == 1 ? engine.filamentNames : engine.processNames
         let selected = scope == 2 ? engine.selectedPrinter : scope == 1 ? engine.selectedFilament : engine.selectedProcess
         return NavigationLink {
-            List(names.filter { presetSearch.isEmpty || $0.localizedCaseInsensitiveContains(presetSearch) }, id: \.self) { name in
-                Button {
-                    let ok = scope == 2 ? engine.selectPrinter(name) : scope == 1 ? engine.selectFilament(name) : engine.selectProcess(name)
-                    if !ok { applyError = engine.lastMessage }
-                    reload()
-                    onChanged?()
-                } label: {
-                    HStack { Text(name); Spacer(); if name == selected { Image(systemName: "checkmark") } }
-                }
-            }.searchable(text: $presetSearch, prompt: "Search presets")
-                .navigationTitle("Select preset")
+            PresetSelectionList(engine: engine, scope: scope) {
+                reload()
+                onChanged?()
+            }
         } label: {
             HStack {
                 Image(systemName: "slider.horizontal.3")

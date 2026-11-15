@@ -25,6 +25,39 @@ int main(int argc, char **argv)
             std::fprintf(stderr, "%s: %s\n", message, orca_session_last_error(session.get()));
         return condition;
     };
+    // All desktop primitives must be real, bed-placed engine objects.
+    for (int kind = 0; kind < 6; ++kind) {
+        std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+            shape(orca_session_create(argv[2]), orca_session_destroy);
+        float b[6]{};
+        if (!require(orca_session_add_primitive(shape.get(), kind, 20, 8, 12) == 0, "add primitive") ||
+            !require(orca_session_model_bounds(shape.get(), b, b+1, b+2, b+3, b+4, b+5) == 0,
+                     "primitive bounds") ||
+            !require(std::fabs(b[2]) < 0.01 && b[3] > b[0] && b[4] > b[1] && b[5] > b[2],
+                     "primitive is a positive solid on the bed")) return 4;
+    }
+    {
+        std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+            shape(orca_session_create(argv[2]), orca_session_destroy);
+        float b[6]{};
+        if (!require(orca_session_add_primitive(shape.get(), 0, 20, 10, 8) == 0, "scale fixture") ||
+            !require(orca_session_translate_object(shape.get(), 0, 15, -7, 0) == 0, "off-center fixture") ||
+            !require(orca_session_scale_object_axes(shape.get(), 0, 2, 3, 0.5) == 0, "axis scale") ||
+            !require(orca_session_model_bounds(shape.get(), b, b+1, b+2, b+3, b+4, b+5) == 0, "scaled bounds") ||
+            !require(std::fabs(b[3]-b[0]-40) < 0.01 && std::fabs(b[4]-b[1]-30) < 0.01 &&
+                     std::fabs(b[5]-4) < 0.01 && std::fabs((b[0]+b[3])*0.5-125) < 0.01 &&
+                     std::fabs((b[1]+b[4])*0.5-103) < 0.01, "scaled dimensions and stable center") ||
+            !require(orca_session_scale_object_axes(shape.get(), 0, -1, 1, 1) != 0, "reject negative scale")) return 4;
+    }
+    for (const char *file : {"3DBenchy.drc", "calicat.drc", "OrcaCube_v2.drc", "OrcaPlug_v2.drc",
+             "OrcaSliced.3mf", "OrcaBadge.3mf", "OrcaToleranceTest.drc", "ksr_fdmtest_v4.drc",
+             "Voron_Design_Cube_v7.drc", "Stanford_Bunny.drc", "Orca_stringhell.drc"}) {
+        std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+            handy(orca_session_create(argv[2]), orca_session_destroy);
+        const std::string path = std::string(argv[2]) + "/handy_models/" + file;
+        if (!require(orca_session_add_model(handy.get(), path.c_str()) == 0, file) ||
+            !require(orca_session_object_count(handy.get()) > 0, "handy model contains geometry")) return 4;
+    }
     int scope = -1;
     if (!require(orca_session_option_presentation("layer_height", &scope) >= 0 && scope == 0, "process option ownership") ||
         !require(orca_session_option_presentation("filament_type", &scope) >= 0 && scope == 1, "filament option ownership") ||
@@ -78,13 +111,25 @@ int main(int argc, char **argv)
         {"layer_height", "0.2"}, {"wall_loops", "2"},
         {"sparse_infill_density", "15%"}, {"filament_diameter", "1.75"},
         {"nozzle_diameter", "0.4"}, {"printable_area", "0x0,220x0,220x220,0x220"},
-        {"printable_height", "250"}
+        {"printable_height", "250"},
+        // A stale 2-filament matrix with four active filaments reproduced the
+        // mobile G-code export failure. Preserve its custom 100 mm³ pair.
+        {"filament_colour", "#FF0000;#00FF00;#0000FF;#FFFFFF"},
+        {"filament_diameter", "1.75,1.75,1.75,1.75"},
+        {"flush_volumes_matrix", "0,100,100,0"}
     };
     for (const auto &option : options)
         if (!require(orca_session_set_option(session.get(), option[0], option[1]) == 0, option[0]))
             return 5;
     if (!require(orca_session_slice_to_gcode(session.get(), output.c_str()) == 0, "slice"))
         return 6;
+    char flush[2048]{};
+    if (!require(orca_session_get_option(session.get(), "flush_volumes_matrix", flush, sizeof(flush)) == 0,
+                 "read repaired flush matrix")) return 6;
+    int separators = 0;
+    for (const char *p = flush; *p; ++p) if (*p == ',') ++separators;
+    if (!require(separators == 15, "flush matrix matches four filaments") ||
+        !require(std::string(flush).find("0,100,") == 0, "preserve existing custom purge volume")) return 6;
     std::ifstream stream(output);
     const std::string gcode((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
     if (!require(gcode.find(";TYPE:") != std::string::npos, "export contains toolpaths"))
@@ -98,13 +143,15 @@ int main(int argc, char **argv)
     if (!require(count > 0 && count <= 60000 && total >= count, "preview is populated and bounded"))
         return 9;
     float max_z = 0.f;
+    bool has_height = false;
     for (size_t i = 0; i < count; ++i) {
         if (!require(std::isfinite(segments[i].end_z), "finite preview coordinates"))
             return 10;
+        if (!segments[i].travel && segments[i].height > 0) has_height = true;
         if (!segments[i].travel && segments[i].end_z > max_z)
             max_z = segments[i].end_z;
     }
-    if (!require(max_z > 19.f, "preview reaches the top of the cube"))
+    if (!require(has_height, "preview includes processed bead height") || !require(max_z > 19.f, "preview reaches the top of the cube"))
         return 11;
     // A reader failure must leave the existing model/config/preview usable.
     const std::string broken = directory + "/broken.3mf";
@@ -156,6 +203,10 @@ int main(int argc, char **argv)
         !require(orca_session_export_user_profiles(session.get(), (directory + "/user-profile-export.json").c_str()) >= 4,
                  "export local and cloud profiles for sync"))
         return 16;
+    if (!require(orca_session_preset_origin(session.get(), 2, "iOS cloud printer") == 2, "cloud printer ownership") ||
+        !require(orca_session_preset_origin(session.get(), 1, "iOS cloud PLA") == 2, "cloud filament ownership") ||
+        !require(orca_session_preset_origin(session.get(), 2, "iOS imported printer") == 1, "local printer ownership")) return 16;
+    std::printf("PASS: primitives, centered axis scaling, flush matrix repair and processed preview height\n");
     std::printf("PASS: native preset bundle, cloud printer/filament catalog, selection and profile export\n");
     std::printf("PASS: 3MF import, slicing, G-code export, processed preview, validation, cancellation and recovery\n");
     return 0;

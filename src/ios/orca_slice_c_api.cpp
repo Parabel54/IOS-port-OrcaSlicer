@@ -12,6 +12,8 @@
 
 #include "orca_slice_c_api.h"
 
+#include <algorithm>
+#include <cmath>
 #include <exception>
 #include <fstream>
 #include <sstream>
@@ -498,6 +500,30 @@ void orca_session_set_progress_callback(
     s->progress_user = user;
 }
 
+// Desktop Plater resizes project flush data when filament/nozzle counts change.
+// The headless host must perform the same step, including for imported projects.
+static void normalize_flush_config(DynamicPrintConfig &config)
+{
+    const size_t filaments = config.option<ConfigOptionStrings>("filament_colour")->values.size();
+    const size_t nozzles = config.option<ConfigOptionFloats>("nozzle_diameter")->values.size();
+    if (filaments == 0 || nozzles == 0)
+        throw std::runtime_error("Printer must have a nozzle and filament");
+    const auto *matrix = config.option<ConfigOptionFloats>("flush_volumes_matrix");
+    const auto *multipliers = config.option<ConfigOptionFloats>("flush_multiplier");
+    if (matrix->values.size() != filaments * filaments * nozzles || multipliers->values.size() != nozzles) {
+        PresetBundle staged;
+        staged.printers.get_edited_preset().config.apply(config);
+        staged.project_config.apply_only(config, {"flush_volumes_matrix", "flush_volumes_vector", "flush_multiplier"});
+        auto &old_multipliers = staged.project_config.option<ConfigOptionFloats>("flush_multiplier")->values;
+        if (old_multipliers.empty()) old_multipliers.push_back(1.);
+        staged.filament_presets.resize(filaments);
+        staged.update_multi_material_filament_presets();
+        config.apply_only(staged.project_config, {"flush_volumes_matrix", "flush_volumes_vector", "flush_multiplier"});
+    }
+    // Fast purge also has one multiplier per physical nozzle.
+    config.option<ConfigOptionFloats>("flush_multiplier_fast")->values.resize(nozzles, 1.);
+}
+
 int orca_session_slice_to_gcode(orca_session_t *s, const char *gcode_out_path)
 {
     if (!s || !gcode_out_path)
@@ -528,6 +554,7 @@ int orca_session_slice_to_gcode(orca_session_t *s, const char *gcode_out_path)
             return -2;
         }
         ensure_default_config(s);
+        normalize_flush_config(s->config);
         s->report_progress(5, "Applying config");
         Print &print = *running;
         // Center / place objects if needed — use model as loaded
@@ -609,7 +636,7 @@ int orca_session_slice_to_gcode(orca_session_t *s, const char *gcode_out_path)
             const bool travel = move.type == EMoveType::Travel;
             s->preview_segments.push_back({start.x(), start.y(), start.z(),
                 end.x(), end.y(), end.z(), travel ? 0.f : move.width,
-                move.feedrate * 60.f, int(move.extrusion_role), travel ? 1 : 0});
+                move.feedrate * 60.f, int(move.extrusion_role), travel ? 1 : 0, travel ? 0.f : move.height});
         }
         // Capture official GCodeProcessor statistics for UI
         s->last_time_sec = result.print_statistics.modes[
@@ -1243,14 +1270,26 @@ int orca_session_mirror_object(orca_session_t *s, int index, int axis)
 
 int orca_session_scale_object(orca_session_t *s, int index, float factor)
 {
-    if (!s || !s->has_model || factor <= 0.f)
+    return orca_session_scale_object_axes(s, index, factor, factor, factor);
+}
+
+int orca_session_scale_object_axes(orca_session_t *s, int index, float x, float y, float z)
+{
+    if (!s || !s->has_model || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) ||
+        x <= 0.f || y <= 0.f || z <= 0.f || index < -1 || index >= int(s->model.objects.size()))
         return -1;
     try {
+        const Vec3d group_center = s->model.bounding_box_exact().center();
         for_each_object(s, index, [&](ModelObject *obj) {
             for (ModelInstance *inst : obj->instances) {
                 if (!inst) continue;
-                Vec3d sc = inst->get_scaling_factor();
-                inst->set_scaling_factor(sc * double(factor));
+                const Vec3d center = obj->instance_bounding_box(*inst).center();
+                inst->set_scaling_factor(inst->get_scaling_factor().cwiseProduct(Vec3d(x, y, z)));
+                obj->invalidate_bounding_box();
+                const Vec3d scaled_center = obj->instance_bounding_box(*inst).center();
+                const Vec3d desired_center = index < 0 ? group_center +
+                    (center - group_center).cwiseProduct(Vec3d(x, y, z)) : center;
+                inst->set_offset(inst->get_offset() + desired_center - scaled_center);
             }
             obj->invalidate_bounding_box();
             obj->ensure_on_bed();
@@ -2731,6 +2770,65 @@ int orca_session_add_box(
         s->set_error("add_box: unknown error");
         return -3;
     }
+}
+
+int orca_session_add_primitive(orca_session_t *s, int kind, float x, float y, float z)
+{
+    if (!s || kind < 0 || kind > 5 || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) ||
+        x <= 0 || y <= 0 || z <= 0)
+        return -1;
+    if (kind == 0) return orca_session_add_box(s, "Cube", x, y, z);
+    s->clear_error();
+    try {
+        ensure_default_config(s);
+        const auto step = [](double radius) {
+            return std::clamp(2. * std::acos(1. - std::min(1., 0.002 / radius)),
+                              2. * M_PI / 720., 2. * M_PI / 16.);
+        };
+        TriangleMesh mesh;
+        const double radius = 0.5 * x;
+        if (kind == 1 || kind == 5) mesh = TriangleMesh(its_make_cylinder(radius, z, step(radius)));
+        else if (kind == 2) mesh = TriangleMesh(its_make_sphere(radius, step(radius)));
+        else if (kind == 3) mesh = TriangleMesh(its_make_cone(radius, z, step(radius)));
+        else {
+            const double tube = 0.5 * y;
+            mesh = TriangleMesh(its_make_torus(radius + tube, tube, step(radius + 2. * tube), step(tube)));
+        }
+        static const char *names[] = {"Cube", "Cylinder", "Sphere", "Cone", "Torus", "Disc"};
+        ModelObject *obj = s->model.add_object(names[kind], "", std::move(mesh));
+        obj->add_instance();
+        double cx, cy;
+        bed_center_xy(s, cx, cy);
+        const Vec3d center = obj->instance_bounding_box(0).center();
+        obj->instances.front()->set_offset(Vec3d(cx - center.x(), cy - center.y(), 0.));
+        obj->invalidate_bounding_box();
+        obj->ensure_on_bed();
+        s->has_model = true;
+        s->has_explode_baseline = false;
+        s->explode_baseline_offsets.clear();
+        s->explode_factor_current = 0.f;
+        return int(s->model.objects.size()) - 1;
+    } catch (const std::exception &ex) {
+        s->set_error(std::string("add_primitive: ") + ex.what());
+        return -2;
+    } catch (...) {
+        s->set_error("add_primitive: unknown error");
+        return -2;
+    }
+}
+
+// Preserve desktop preset ownership instead of inferring it from display names.
+int orca_session_preset_origin(orca_session_t *s, int scope, const char *name)
+{
+    if (!s || !s->preset_bundle || !name || scope < 0 || scope > 2) return -1;
+    const PresetCollection &collection = scope == 2 ? s->preset_bundle->printers :
+        scope == 1 ? s->preset_bundle->filaments : s->preset_bundle->prints;
+    const Preset *preset = collection.find_preset(name);
+    if (preset && preset->is_user() && !preset->is_system && !preset->is_default)
+        return preset->user_id.empty() ? 1 : 2;
+    const auto &legacy = scope == 1 ? s->user_filament_names : s->user_process_names;
+    if (scope != 2 && std::find(legacy.begin(), legacy.end(), name) != legacy.end()) return 1;
+    return 0;
 }
 
 int orca_session_mesh_stats(

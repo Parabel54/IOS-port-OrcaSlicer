@@ -74,7 +74,7 @@ has_calib = CALIB_DIR.is_dir() and any(CALIB_DIR.rglob("*"))
 
 # Small engine data tables used by nozzle validation, flush prediction and mixing.
 engine_resource_folders = []
-for folder in ("info", "flush", "filament_mixing"):
+for folder in ("info", "flush", "filament_mixing", "handy_models"):
     source = REPO / "resources" / folder
     destination = ROOT / "OrcaSlicerApp" / "Resources" / folder
     if source.is_dir():

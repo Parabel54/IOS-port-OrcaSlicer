@@ -10,7 +10,7 @@ import SceneKit
 import UIKit
 
 enum PlateTouchMode: String, CaseIterable, Identifiable {
-    case orbit = "Orbit", pan = "Pan", move = "Move", rotate = "Rotate", select = "Select"
+    case orbit = "Orbit", pan = "Pan", move = "Move", rotate = "Rotate", scale = "Scale", select = "Select"
     var id: String { rawValue }
     var icon: String {
         switch self {
@@ -18,6 +18,7 @@ enum PlateTouchMode: String, CaseIterable, Identifiable {
         case .pan: return "hand.draw"
         case .move: return "arrow.up.and.down.and.arrow.left.and.right"
         case .rotate: return "rotate.3d"
+        case .scale: return "arrow.up.left.and.arrow.down.right"
         case .select: return "cursorarrow"
         }
     }
@@ -41,8 +42,9 @@ struct PlateSceneView: UIViewRepresentable {
     var fitRequest = UUID()
     var rotationAxis: Int = 2
     /// Tap object to select; drag on object to move (without requiring Move gizmo).
-    var selectMode: Bool { [.select, .move, .rotate].contains(touchMode) }
+    var selectMode: Bool { [.select, .move, .rotate, .scale].contains(touchMode) }
     var moveMode: Bool { touchMode == .move }
+    var onScaleCommit: ((Float, Int) -> Void)? = nil
     var onRotateCommit: ((Float, Int) -> Void)? = nil
     /// Measure gizmo: tap places points in slic3r XYZ (mm).
     var measureMode: Bool = false
@@ -125,7 +127,7 @@ struct PlateSceneView: UIViewRepresentable {
         let top = camera.simdPosition
         coordinator.cameraDrag(delta: .zero, view: view, mode: .orbit)
         coordinator.cameraDrag(delta: CGPoint(x: 10, y: 0), view: view, mode: .orbit)
-        return abs(camera.simdPosition.y - top.y) < 0.001
+        return abs(camera.simdPosition.y - top.y) < 0.001 && GCodePathGeometry.previewSmokeTest()
 
     }
 
@@ -253,18 +255,20 @@ struct PlateSceneView: UIViewRepresentable {
             context.coordinator.lastFitRequest = fitRequest
         }
 
-        // G-code toolpaths (Preview tab) — also under content (Z-up)
-        content.childNode(withName: "gcode", recursively: false)?.removeFromParentNode()
-        if showGCode, let gcodeNode {
-            let clone = gcodeNode.clone()
-            clone.name = "gcode"
-            // G-code nodes were previously self-rotated; strip extra rotation if present
-            clone.eulerAngles = SCNVector3Zero
-            content.addChildNode(clone)
-            content.childNode(withName: "model", recursively: false)?.opacity = 0.15
-        } else {
-            content.childNode(withName: "model", recursively: false)?.opacity = 1.0
+        // Reuse the existing scene subtree for camera/selection UI updates.
+        let previewID = gcodeNode.map { ObjectIdentifier($0) }
+        if context.coordinator.lastPreviewID != previewID || context.coordinator.lastShowGCode != showGCode {
+            content.childNode(withName: "gcode", recursively: false)?.removeFromParentNode()
+            if showGCode, let gcodeNode {
+                let clone = gcodeNode.clone()
+                clone.name = "gcode"
+                clone.eulerAngles = SCNVector3Zero
+                content.addChildNode(clone)
+            }
+            context.coordinator.lastPreviewID = previewID
+            context.coordinator.lastShowGCode = showGCode
         }
+        content.childNode(withName: "model", recursively: false)?.isHidden = showGCode
 
         // Paint overlay (support/seam/mmu/fuzzy facets)
         content.childNode(withName: "paintOverlay", recursively: false)?.removeFromParentNode()
@@ -483,6 +487,8 @@ struct PlateSceneView: UIViewRepresentable {
         weak var view: SCNView?
         var parent: PlateSceneView?
         var lastMeshKey: String = ""
+        var lastPreviewID: ObjectIdentifier?
+        var lastShowGCode = false
         var lastBed: SIMD2<Float> = SIMD2(0, 0)
         var lastTexture: String = ""
         var lastFitRequest: UUID?
@@ -603,7 +609,7 @@ struct PlateSceneView: UIViewRepresentable {
             }
         }
 
-        private func rotateObject(_ gesture: UIPanGestureRecognizer, view: SCNView, parent: PlateSceneView) {
+        private func transformObject(_ gesture: UIPanGestureRecognizer, view: SCNView, parent: PlateSceneView) {
             switch gesture.state {
             case .began:
                 dragObjectIndex = hitObjectIndex(view: view, screen: gesture.location(in: view)) ?? parent.selectedObjectIndex
@@ -621,6 +627,12 @@ struct PlateSceneView: UIViewRepresentable {
             case .changed:
                 guard isDragging else { return }
                 rotateDegrees = Float(gesture.translation(in: view).x / max(view.bounds.width, 1)) * 180
+                if parent.touchMode == .scale {
+                    let factor = expf(Float(-gesture.translation(in: view).y / max(view.bounds.height, 1)) * logf(4))
+                    let clamped = max(0.01, min(100, factor))
+                    rotationNode?.scale = SCNVector3(clamped, clamped, clamped)
+                    return
+                }
                 let angle = rotateDegrees * Float.pi / 180
                 switch parent.rotationAxis {
                 case 0: rotationNode?.eulerAngles.x = angle
@@ -628,13 +640,19 @@ struct PlateSceneView: UIViewRepresentable {
                 default: rotationNode?.eulerAngles.z = angle
                 }
             case .ended, .cancelled, .failed:
-                let commit = gesture.state == .ended && isDragging && abs(rotateDegrees) > 0.1
+                let scale = rotationNode?.scale.x ?? 1
+                let scaling = parent.touchMode == .scale
+                let commit = gesture.state == .ended && isDragging &&
+                    (scaling ? abs(scale - 1) > 0.001 : abs(rotateDegrees) > 0.1)
                 rotationNode?.transform = SCNMatrix4Identity
                 rotationNode?.pivot = SCNMatrix4Identity
                 rotationNode = nil
                 isDragging = false
                 suppressSelectUntil = Date().timeIntervalSince1970 + 0.35
-                if commit { parent.onRotateCommit?(rotateDegrees, dragObjectIndex) }
+                if commit {
+                    if scaling { parent.onScaleCommit?(scale, dragObjectIndex) }
+                    else { parent.onRotateCommit?(rotateDegrees, dragObjectIndex) }
+                }
                 dragObjectIndex = -1
             default: break
             }
@@ -750,8 +768,8 @@ struct PlateSceneView: UIViewRepresentable {
                 cameraPan(gr, view: view, mode: parent.touchMode)
                 return
             }
-            if parent.touchMode == .rotate {
-                rotateObject(gr, view: view, parent: parent)
+            if parent.touchMode == .rotate || parent.touchMode == .scale {
+                transformObject(gr, view: view, parent: parent)
                 return
             }
             guard parent.moveMode else { return }
@@ -1033,6 +1051,7 @@ struct GCodePathGeometry {
         var width: Float
         /// Feedrate mm/min from last F word on the segment (0 if unknown)
         var feedrate: Float
+        var height: Float = 0.2
     }
     var segments: [Segment]
     var zMin: Float = 0
@@ -1090,15 +1109,53 @@ struct GCodePathGeometry {
                 let g = Self.group(for: seg.feature)
                 if !enabled.contains(g) { continue }
             }
-            let pts = seg.points.filter { $0.z >= minZ - 0.001 && $0.z <= maxZ + 0.001 }
-            if pts.count > 1 {
-                out.append(Segment(points: pts, feature: seg.feature, width: seg.width, feedrate: seg.feedrate))
+            // Keep separate runs when a path exits/re-enters the Z range;
+            // filtering vertices alone would draw a false connecting extrusion.
+            var run: [SCNVector3] = []
+            func flush() {
+                if run.count > 1 {
+                    out.append(Segment(points: run, feature: seg.feature, width: seg.width,
+                                       feedrate: seg.feedrate, height: seg.height))
+                }
+                run.removeAll(keepingCapacity: true)
             }
+            for (a, b) in zip(seg.points, seg.points.dropFirst()) {
+                let dz = b.z - a.z
+                var lo: Float = 0, hi: Float = 1
+                if abs(dz) < 0.000001 {
+                    if a.z < minZ - 0.001 || a.z > maxZ + 0.001 { flush(); continue }
+                } else {
+                    let t0 = (minZ - a.z) / dz, t1 = (maxZ - a.z) / dz
+                    lo = max(0, min(t0, t1)); hi = min(1, max(t0, t1))
+                    if lo > hi { flush(); continue }
+                }
+                let start = SCNVector3(a.x + (b.x - a.x) * lo, a.y + (b.y - a.y) * lo, a.z + dz * lo)
+                let end = SCNVector3(a.x + (b.x - a.x) * hi, a.y + (b.y - a.y) * hi, a.z + dz * hi)
+                if let last = run.last, abs(last.x - start.x) + abs(last.y - start.y) + abs(last.z - start.z) > 0.001 { flush() }
+                if run.isEmpty { run.append(start) }
+                run.append(end)
+                if hi < 1 { flush() }
+            }
+            flush()
         }
         return GCodePathGeometry(
             segments: out, zMin: max(zMin, minZ), zMax: maxZ,
             feedMin: feedMin, feedMax: feedMax, defaultWidth: defaultWidth
         )
+    }
+
+    static func previewSmokeTest() -> Bool {
+        let path = Segment(points: [SCNVector3(0, 0, 0), SCNVector3(1, 0, 2), SCNVector3(2, 0, 0)],
+                           feature: "Outer wall", width: 0.45, feedrate: 1200, height: 0.3)
+        let clipped = GCodePathGeometry(segments: [path]).filtered(minZ: 1, maxZ: 1.5)
+        guard clipped.segments.count == 2,
+              clipped.segments.allSatisfy({ $0.points.allSatisfy({ $0.z >= 1 && $0.z <= 1.5 }) }) else { return false }
+        let bead = Segment(points: [SCNVector3(0, 0, 1), SCNVector3(10, 0, 1)],
+                           feature: "Outer wall", width: 0.45, feedrate: 1200, height: 0.3)
+        let node = GCodePathGeometry(segments: [bead]).makeNode(color: .white)
+        guard let geometry = node.childNodes.first else { return false }
+        let bounds = geometry.boundingBox
+        return bounds.max.z - bounds.min.z >= 0.29 && bounds.max.y - bounds.min.y >= 0.44
     }
 
     static func color(for feature: String) -> UIColor {
@@ -1188,7 +1245,7 @@ struct GCodePathGeometry {
                 root.addChildNode(makeLineNode(points: seg.points, color: c.withAlphaComponent(0.55)))
             } else {
                 let w = seg.width > 0.05 ? seg.width : defaultWidth
-                if let ribbon = makeRibbonNode(points: seg.points, width: w, color: c) {
+                if let ribbon = makeRibbonNode(points: seg.points, width: w, height: seg.height, color: c) {
                     root.addChildNode(ribbon)
                 } else {
                     root.addChildNode(makeLineNode(points: seg.points, color: c))
@@ -1221,7 +1278,7 @@ struct GCodePathGeometry {
     }
 
     /// Flat ribbon in XY (slic3r bed plane) extruded ±half-width perpendicular to path.
-    private func makeRibbonNode(points: [SCNVector3], width: Float, color: UIColor) -> SCNNode? {
+    private func makeRibbonNode(points: [SCNVector3], width: Float, height: Float, color: UIColor) -> SCNNode? {
         let n = points.count
         guard n >= 2 else { return nil }
         let half = max(width, 0.12) * 0.5
@@ -1240,7 +1297,7 @@ struct GCodePathGeometry {
         guard m >= 2 else { return nil }
 
         var verts: [SCNVector3] = []
-        verts.reserveCapacity(m * 2)
+        verts.reserveCapacity(m * 4)
         for j in 0..<m {
             let p = sampled[j]
             // Tangent from neighbors
@@ -1255,18 +1312,23 @@ struct GCodePathGeometry {
             let py = tx * half
             verts.append(SCNVector3(p.x + px, p.y + py, p.z + 0.02))
             verts.append(SCNVector3(p.x - px, p.y - py, p.z + 0.02))
+            let bottom = p.z - max(0.01, height)
+            verts.append(SCNVector3(p.x + px, p.y + py, bottom))
+            verts.append(SCNVector3(p.x - px, p.y - py, bottom))
         }
 
         var indices: [UInt32] = []
-        indices.reserveCapacity((m - 1) * 6)
+        indices.reserveCapacity((m - 1) * 24 + 12)
         for j in 0..<(m - 1) {
-            let a = UInt32(j * 2)
-            let b = a + 1
-            let c = a + 2
-            let d = a + 3
-            // two triangles (double-sided via material)
-            indices.append(contentsOf: [a, c, b, b, c, d])
+            let a = UInt32(j * 4), b = a + 4
+            indices.append(contentsOf: [a, b, a + 1, a + 1, b, b + 1,
+                a, a + 2, b, b, a + 2, b + 2,
+                a + 1, b + 1, a + 3, a + 3, b + 1, b + 3,
+                a + 2, a + 3, b + 2, b + 2, a + 3, b + 3])
         }
+        let last = UInt32((m - 1) * 4)
+        indices.append(contentsOf: [0, 1, 2, 2, 1, 3,
+            last, last + 2, last + 1, last + 1, last + 2, last + 3])
 
         // SCNVector3 may pack as 16 bytes on some platforms — use Float triples explicitly
         var floats: [Float] = []

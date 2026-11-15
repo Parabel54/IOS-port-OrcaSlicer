@@ -79,6 +79,7 @@ typedef struct orca_preview_segment {
     float width, feedrate;
     int role;
     int travel;
+    float height; // processed extrusion height in mm (0 for travel)
 } orca_preview_segment_t;
 
 /**
@@ -196,9 +197,16 @@ ORCA_API int orca_session_rotate_object_axis(
 ORCA_API int orca_session_mirror_object(
     orca_session_t *s, int index, int axis);
 
-/**
- * Uniform scale object about its center. index = -1 → all.
- */
+/** Relative scale along local X/Y/Z axes. Keeps the visible center and bed contact. */
+ORCA_API int orca_session_scale_object_axes(orca_session_t *s, int index, float x, float y, float z);
+/** Primitive kinds: cube=0, cylinder=1, sphere=2, cone=3, torus=4, disc=5.
+ * x/y/z are cube dimensions; x is diameter, z height; torus x is hole diameter, y tube diameter.
+ * Returns the appended object index, or a negative error. */
+ORCA_API int orca_session_add_primitive(orca_session_t *s, int kind, float x, float y, float z);
+/** Preset scope: process=0, filament=1, printer=2. Origin: system=0, local=1, cloud=2. */
+ORCA_API int orca_session_preset_origin(orca_session_t *s, int scope, const char *name);
+
+/** Uniform scale about the selection center; index = -1 applies to the whole group. */
 ORCA_API int orca_session_scale_object(
     orca_session_t *s, int index, float factor);
 

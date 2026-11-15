@@ -50,6 +50,7 @@ final class OrcaEngine: ObservableObject {
     /// Layer scrubber: max/min Z shown in Preview (mm) — horizontal clip plane
     @Published var previewMaxZ: Float = 100
     @Published var previewMinZ: Float = 0
+    @Published var previewLayerHeights: [Float] = []
     @Published var gcodeZMin: Float = 0
     @Published var gcodeZMax: Float = 20
     /// Assembly explode factor (0 = collapsed layout)
@@ -67,6 +68,7 @@ final class OrcaEngine: ObservableObject {
     @Published private(set) var startupFinished = false
     @Published var presetsLoaded = false
     @Published var presetsLoading = false
+    @Published var presetOrigins: [Int: [String: Int]] = [:]
     @Published var printerNames: [String] = []
     @Published var processNames: [String] = []
     @Published var filamentNames: [String] = []
@@ -206,6 +208,7 @@ final class OrcaEngine: ObservableObject {
     private func invalidateSlice() {
         gcodeURL = nil
         gcodeGeometry = nil
+        previewLayerHeights = []
         gcodePathNode = nil
         previewIsReduced = false
         lastSliceStatsText = ""
@@ -221,6 +224,7 @@ final class OrcaEngine: ObservableObject {
         #if ORCA_LINKED
         gcodePathNode = nil
         gcodeGeometry = nil
+        previewLayerHeights = []
         gcodeURL = nil
         if let s = session, !presetsLoading, !sliceRunning, !modelImporting {
             orca_session_purge_option_caches(s)
@@ -410,6 +414,13 @@ final class OrcaEngine: ObservableObject {
             }
         }
         userFilamentNames = ufils
+        var origins: [Int: [String: Int]] = [:]
+        for (scope, names) in [0: procs, 1: fils, 2: printers] {
+            origins[scope] = Dictionary(uniqueKeysWithValues: names.map { name in
+                (name, Int(name.withCString { orca_session_preset_origin(s, Int32(scope), $0) }))
+            })
+        }
+        presetOrigins = origins
         compatibleOnly = orca_session_get_compatible_only(s) != 0
     }
 
@@ -1074,6 +1085,7 @@ final class OrcaEngine: ObservableObject {
         gcodeURL = nil
         gcodePathNode = nil
         gcodeGeometry = nil
+        previewLayerHeights = []
         if is3MF && !append {
             lastMessage = "Opened project \(url.lastPathComponent) · \(objectCount) object(s) · config restored"
         } else {
@@ -1327,6 +1339,41 @@ final class OrcaEngine: ObservableObject {
         #endif
     }
 
+    func scale(x: Float, y: Float, z: Float, index: Int? = nil) {
+        #if ORCA_LINKED
+        guard let s = session, hasModel, [x, y, z].allSatisfy({ $0.isFinite && $0 > 0 }) else { return }
+        pushUndoSnapshot(label: "scale")
+        let rc = orca_session_scale_object_axes(s, Int32(index ?? selectedObjectIndex), x, y, z)
+        if rc == 0 {
+            refreshMesh(); refreshBounds(); refreshModelInfo()
+            lastMessage = "Scaled selection"
+        } else {
+            lastMessage = orca_session_last_error(s).map { String(cString: $0) } ?? "Scale failed"
+        }
+        #endif
+    }
+
+    @discardableResult
+    func addPrimitive(kind: Int, x: Float, y: Float, z: Float) -> Bool {
+        #if ORCA_LINKED
+        guard let s = session else { return false }
+        pushUndoSnapshot(label: "add-primitive")
+        let index = orca_session_add_primitive(s, Int32(kind), x, y, z)
+        guard index >= 0 else {
+            lastMessage = orca_session_last_error(s).map { String(cString: $0) } ?? "Invalid primitive dimensions"
+            return false
+        }
+        hasModel = true
+        selectedObjectIndex = Int(index)
+        explodeFactor = 0
+        refreshObjectList(); refreshMesh(); refreshBounds(); refreshModelInfo()
+        lastMessage = "Added primitive"
+        return true
+        #else
+        return false
+        #endif
+    }
+
     func scale(factor: Float, index: Int? = nil) {
         #if ORCA_LINKED
         guard let s = session, hasModel else { return }
@@ -1345,6 +1392,7 @@ final class OrcaEngine: ObservableObject {
     func scaleToFit(marginMm: Float = 5, index: Int? = nil) {
         #if ORCA_LINKED
         guard let s = session, hasModel else { return }
+        pushUndoSnapshot(label: "scale-to-fit")
         let idx = Int32(index ?? selectedObjectIndex)
         let rc = orca_session_scale_to_fit(s, idx, marginMm)
         if rc == 0 {
@@ -1359,6 +1407,7 @@ final class OrcaEngine: ObservableObject {
     func autoOrient(index: Int? = nil) {
         #if ORCA_LINKED
         guard let s = session, hasModel else { return }
+        pushUndoSnapshot(label: "auto-orient")
         let idx = Int32(index ?? selectedObjectIndex)
         let rc = orca_session_orient_object(s, idx)
         if rc == 0 {
@@ -1568,6 +1617,7 @@ final class OrcaEngine: ObservableObject {
         gcodeURL = nil
         gcodePathNode = nil
         gcodeGeometry = nil
+        previewLayerHeights = []
         lastMessage = "Plate cleared"
         #endif
     }
@@ -2015,7 +2065,7 @@ final class OrcaEngine: ObservableObject {
                     if !paths.isEmpty {
                         let index = paths.count - 1
                         if let previousEnd = paths[index].points.last,
-                           paths[index].feature == feature, paths[index].width == move.width,
+                           paths[index].feature == feature, paths[index].width == move.width, paths[index].height == move.height,
                            paths[index].feedrate == move.feedrate,
                            previousEnd.x == start.x, previousEnd.y == start.y, previousEnd.z == start.z {
                             paths[index].points.append(end)
@@ -2023,7 +2073,7 @@ final class OrcaEngine: ObservableObject {
                         }
                     }
                     paths.append(GCodePathGeometry.Segment(points: [start, end],
-                        feature: feature, width: move.width, feedrate: move.feedrate))
+                        feature: feature, width: move.width, feedrate: move.feedrate, height: move.height))
                 }
                 // Parking and homing travels are not printable layer heights.
                 let zs = records.filter { $0.travel == 0 }.flatMap { [$0.start_z, $0.end_z] }
@@ -2033,6 +2083,7 @@ final class OrcaEngine: ObservableObject {
                     feedMin: feeds.min() ?? 0, feedMax: feeds.max() ?? 1,
                     defaultWidth: defW)
                 self.previewIsReduced = totalCount > count
+                self.previewLayerHeights = Array(Set(records.filter { $0.travel == 0 }.map { $0.end_z })).sorted()
                 self.gcodeGeometry = path
                 self.gcodeZMin = path.zMin
                 self.gcodeZMax = max(path.zMax, path.zMin + 0.2)

@@ -17,6 +17,10 @@ final class WorkspaceUITests: XCTestCase {
         }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [imported], timeout: 180), .completed,
                        "The native picker must finish import and dismiss before rotation")
+        app.buttons["model-library-shortcut"].tap()
+        XCTAssertTrue(app.buttons["add-primitive"].waitForExistence(timeout: 10))
+        app.buttons["add-primitive"].tap()
+        XCTAssertTrue(slice.waitForExistence(timeout: 10))
         XCUIDevice.shared.orientation = .landscapeRight
         let landscape = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             app.state == .runningForeground && app.frame.width > app.frame.height
