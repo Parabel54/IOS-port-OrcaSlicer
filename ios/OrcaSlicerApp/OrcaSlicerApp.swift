@@ -11,6 +11,25 @@ import UIKit
 
 @main
 struct OrcaSlicerApp: App {
+    init() {
+        if ProcessInfo.processInfo.arguments.contains("--test-view-metadata") {
+            let completion = DispatchSemaphore(value: 0)
+            let result = FileManager.default.temporaryDirectory.appendingPathComponent("orca-view-metadata-smoke.txt")
+            try? FileManager.default.removeItem(at: result)
+            let worker = Thread {
+                _ = String(reflecting: OrcaRootView.Body.self)
+                do { try "PASS: root view metadata resolves on a 1 MB stack".write(to: result, atomically: true, encoding: .utf8) }
+                catch { NSLog("Could not write view metadata test result: %@", error.localizedDescription) }
+                completion.signal()
+            }
+            worker.name = "OrcaViewMetadataSmoke"
+            worker.stackSize = 1_048_576
+            worker.start()
+            precondition(completion.wait(timeout: .now() + 15) == .success && FileManager.default.fileExists(atPath: result.path),
+                         "Root view metadata test failed")
+        }
+    }
+
     var body: some Scene {
         WindowGroup {
             StartupRecoveryView()
@@ -162,8 +181,11 @@ struct OrcaRootView: View {
         }
     }
 
-    var body: some View {
-        GeometryReader { geo in
+    // The root previously resolved a single enormous opaque view type and could
+    // overflow the main-thread stack while SwiftUI instantiated its metadata.
+    // Erase at screen and presentation boundaries, preserving the existing state.
+    private var rootLayout: AnyView {
+        AnyView(GeometryReader { geo in
             let bottomPad = max(geo.safeAreaInsets.bottom, 8)
             ZStack {
                 OrcaTheme.bg.ignoresSafeArea()
@@ -201,7 +223,11 @@ struct OrcaRootView: View {
                 .background(OrcaTheme.panel)
                 .clipShape(RoundedRectangle(cornerRadius: 14))
             }
-        }
+        })
+    }
+
+    private var primaryPresentations: AnyView {
+        AnyView(rootLayout
         .sheet(isPresented: $showProcess) {
             processSheet
                 .presentationDetents([.medium, .large])
@@ -220,6 +246,11 @@ struct OrcaRootView: View {
                 .interactiveDismissDisabled(!OrcaEngine.wizardCompleted)
                 .preferredColorScheme(.dark)
         }
+        )
+    }
+
+    private var auxiliaryPresentations: AnyView {
+        AnyView(primaryPresentations
         .sheet(isPresented: $showPreferences) {
             preferencesSheet
                 .presentationDetents([.medium, .large])
@@ -272,6 +303,11 @@ struct OrcaRootView: View {
                 .presentationDetents([.medium, .large])
                 .preferredColorScheme(.dark)
         }
+        )
+    }
+
+    var body: some View {
+        auxiliaryPresentations
         .onAppear {
             if !OrcaEngine.wizardCompleted {
                 showWizard = true
@@ -307,8 +343,8 @@ struct OrcaRootView: View {
         }
     }
 
-    private var headerBar: some View {
-        HStack(spacing: 12) {
+    private var headerBar: AnyView {
+        AnyView(HStack(spacing: 12) {
             OrcaLogoMark()
                 .frame(width: 36, height: 36)
             VStack(alignment: .leading, spacing: 2) {
@@ -391,11 +427,11 @@ struct OrcaRootView: View {
         .background(OrcaTheme.panel)
         .overlay(alignment: .bottom) {
             Rectangle().fill(OrcaTheme.border).frame(height: 1)
-        }
+        })
     }
 
-    private var tabBar: some View {
-        HStack(spacing: 0) {
+    private var tabBar: AnyView {
+        AnyView(HStack(spacing: 0) {
             ForEach(MainTab.allCases, id: \.self) { tab in
                 Button {
                     mainTab = tab
@@ -414,7 +450,7 @@ struct OrcaRootView: View {
                 .buttonStyle(.plain)
             }
         }
-        .background(OrcaTheme.panel)
+        .background(OrcaTheme.panel))
     }
 
     private var hintOverlay: some View {
@@ -491,8 +527,8 @@ struct OrcaRootView: View {
         }
     }
 
-    private var devicePlaceholder: some View {
-        ScrollView {
+    private var devicePlaceholder: AnyView {
+        AnyView(ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 HStack(spacing: 12) {
                     Image(systemName: "printer.fill")
@@ -840,7 +876,7 @@ struct OrcaRootView: View {
             .padding(20)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(OrcaTheme.bg.opacity(0.96))
+        .background(OrcaTheme.bg.opacity(0.96)))
     }
 
     private var canStartPrint: Bool {
@@ -1670,8 +1706,8 @@ struct OrcaRootView: View {
         }
     }
 
-    private func controlsPanel(bottomInset: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+    private func controlsPanel(bottomInset: CGFloat) -> AnyView {
+        AnyView(VStack(alignment: .leading, spacing: 12) {
             if !status.isEmpty {
                 Text(status)
                     .font(.system(size: 13, weight: .medium))
@@ -1820,7 +1856,7 @@ struct OrcaRootView: View {
         .background(OrcaTheme.panel)
         .overlay(alignment: .top) {
             Rectangle().fill(OrcaTheme.border).frame(height: 1)
-        }
+        })
     }
 
     private func actionButton(title: String, systemImage: String, action: @escaping () -> Void) -> some View {
@@ -2066,8 +2102,8 @@ struct OrcaRootView: View {
         }
     }
 
-    private var plateStage: some View {
-        ZStack {
+    private var plateStage: AnyView {
+        AnyView(ZStack {
             PlateSceneView(
                 mesh: engine.mesh,
                 objectMeshes: engine.objectMeshes,
@@ -2118,7 +2154,7 @@ struct OrcaRootView: View {
                     devicePlaceholder
                 }
             }
-        }
+        })
     }
 
     @ViewBuilder
@@ -2311,8 +2347,8 @@ struct OrcaRootView: View {
         objExtruder = engine.getObjectOption(index: idx, key: "extruder") ?? "0"
     }
 
-    private var configWizardSheet: some View {
-        NavigationStack {
+    private var configWizardSheet: AnyView {
+        AnyView(NavigationStack {
             List {
                 Section("Welcome") {
                     Text("First-run setup (desktop ConfigWizard lite). Language, region, preferred vendors, and last printer are stored in UserDefaults.")
@@ -2395,11 +2431,11 @@ struct OrcaRootView: View {
                     await engine.loadAllSystemPresets()
                 }
             }
-        }
+        })
     }
 
-    private var preferencesSheet: some View {
-        NavigationStack {
+    private var preferencesSheet: AnyView {
+        AnyView(NavigationStack {
             List {
                 Section("Appearance") {
                     Toggle("Dark mode (forced)", isOn: .constant(true))
@@ -2462,11 +2498,11 @@ struct OrcaRootView: View {
                         .foregroundStyle(OrcaTheme.accent)
                 }
             }
-        }
+        })
     }
 
-    private var aboutSheet: some View {
-        NavigationStack {
+    private var aboutSheet: AnyView {
+        AnyView(NavigationStack {
             VStack(spacing: 16) {
                 Image(systemName: "seal.fill")
                     .font(.system(size: 48))
@@ -2496,11 +2532,11 @@ struct OrcaRootView: View {
                         .foregroundStyle(OrcaTheme.accent)
                 }
             }
-        }
+        })
     }
 
-    private var objectSettingsSheet: some View {
-        let idx = engine.selectedObjectIndex >= 0 ? engine.selectedObjectIndex : 0
+    private var objectSettingsSheet: AnyView {
+        AnyView(let idx = engine.selectedObjectIndex >= 0 ? engine.selectedObjectIndex : 0
         return NavigationStack {
             List {
                 Section("Object \(idx + 1)") {
@@ -2543,7 +2579,7 @@ struct OrcaRootView: View {
                         .foregroundStyle(OrcaTheme.accent)
                 }
             }
-        }
+        })
     }
 
     private func toolChip(
@@ -2793,8 +2829,8 @@ struct OrcaRootView: View {
     @State private var calibFlowPass = 1
     @State private var calibFlowLinear = true
 
-    private var calibrationSheet: some View {
-        NavigationStack {
+    private var calibrationSheet: AnyView {
+        AnyView(NavigationStack {
             List {
                 if engine.calibMode != 0 {
                     Section {
@@ -2998,11 +3034,11 @@ struct OrcaRootView: View {
                         .foregroundStyle(OrcaTheme.accent)
                 }
             }
-        }
+        })
     }
 
-    private var processSheet: some View {
-        NavigationStack {
+    private var processSheet: AnyView {
+        AnyView(NavigationStack {
             List {
                 Section {
                     if engine.presetsLoading {
@@ -3910,7 +3946,7 @@ struct OrcaRootView: View {
                 .presentationDragIndicator(.visible)
                 .preferredColorScheme(.dark)
             }
-        }
+        })
     }
 
     /// Searchable list of system presets (printer / process / filament).
