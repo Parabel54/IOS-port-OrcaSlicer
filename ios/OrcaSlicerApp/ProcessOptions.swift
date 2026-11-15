@@ -381,6 +381,10 @@ struct ProcessSettingsBrowser: View {
                 .lineLimit(1)
 
             switch entry.type {
+            case .bool where entry.value.contains(",") || entry.value.contains(";") || entry.value == "nil":
+                // Vector and nullable values must not be collapsed by a single
+                // toggle: each entry can belong to a different extruder.
+                scalarEditor(entry)
             case .bool:
                 Toggle(isOn: Binding(
                     get: {
@@ -401,7 +405,7 @@ struct ProcessSettingsBrowser: View {
                     if !entry.enumChoices.isEmpty { return entry.enumChoices }
                     return engine.enumChoices(for: entry.key)
                 }()
-                if !choices.isEmpty {
+                if !choices.isEmpty && !entry.value.contains(",") && !entry.value.contains(";") {
                     let current = draftValues[entry.key] ?? entry.value
                     let matched = ProcessOptionCatalog.match(
                         current, in: choices, fallback: choices[0].key
