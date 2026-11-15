@@ -24,11 +24,27 @@ Cloud registration of physical printers remains on the hosted service. Orca Clou
 
 ## Touch interaction
 
-The viewport has explicit Orbit, Pan, Move, Rotate and Select modes, plus Fit. One pan recognizer owns one-finger input; SceneKit's competing default recognizers are disabled. Orbit starts around the selected object or whole-model center, including after model moves. Changing modes cancels the prior gesture before transferring ownership. Pan translates the camera and its target in camera space. A two-finger pinch changes camera distance in every mode and cancels an in-progress object drag.
+The viewport has explicit Orbit, Pan, Move, Rotate and Select modes, plus Fit. One pan recognizer owns one-finger input; SceneKit's competing default recognizers are disabled. Orbit preserves the current framing target, including after panning. Fit explicitly centers the model. Rotation scales with the available viewport width and height, with pitch clamped to avoid flipping. Changing modes cancels the prior gesture before transferring ownership. Pan unprojects screen displacement at the target depth using the actual SceneKit projection, then translates the camera and its target together. A two-finger pinch changes camera distance in every mode, keeps its centroid anchored at the target depth, and cancels an in-progress object drag.
 
 Move projects screen input onto the bed plane and commits through the translation C API. Rotate previews rotation around the object's center and commits through the engine's axis rotation API. Canceled object gestures restore their preview without committing a transform. Selection does not reframe the camera. Geometry revisions refresh the rendered mesh after edits; Fit and successful model imports explicitly request framing.
 
-The controls drawer remains independent of the gesture-mode strip. Its handle can hide, compact or expand the scrollable controls.
+## Adaptive workspace and settings
+
+Prepare and Preview reserve the main area for the viewport and a compact action bar. Objects/tools and preview filtering have separate dismissible inspectors. The old controls drawer and manual duplicate setting editor are no longer in the workspace.
+
+A single settings inspector owns Printer, Filament and Process options. Available bounds of at least 860 × 500 points enable a hideable left sidebar; narrower windows use a resizable sheet. This uses actual window bounds, including iPad multitasking, rather than device identity. The app does not require full-screen presentation.
+
+Option ownership and Basic/Advanced/Expert visibility come from the engine's desktop preset lists and ConfigOptionDef. Internal, read-only and developer options are excluded. Desktop Tab.cpp supplies the page, group and row order through scripts/generate_ios_settings.py; unmapped options retain their engine category under Additional settings. Preset selection is searchable. Process and filament preset saves use the existing catalog APIs.
+
+## G-code post-processing
+
+Configured post_process commands are read from the engine after export. The host resolves supported commands to native hooks and runs them before publishing the output URL for sharing or network upload. Unknown commands fail export; they are never silently skipped or passed to a shell. With no commands, exported bytes remain unchanged.
+
+The Zmod native hook implements ghzserg/zmod_preprocess's MD5 header, filament color/type/tool metadata and optional object-outline simplification. It streams lines with Python-compatible universal newline handling, hashes the resulting bytes and atomically replaces the export. The default tolerance is 0.2 mm; --no-simplify-objects and --simplify-objects are supported. Desktop Python and compiled Zmod entrypoint paths resolve to this implementation. Third-party attribution and the Apache 2.0 license accompany the source and app resources.
+
+The macOS host test compares output byte-for-byte with a vendored upstream reference over ordinary G-code, multicolor metadata, polygons, duplicate headers, non-UTF8 comments and CR/LF inputs. It also checks MD5, repeated execution and rejection of unsupported commands. This validates the native port rather than the ability to execute Python on iOS.
+
+General desktop Python plugin packages, their dependencies and wxWidgets host APIs do not have an iOS runtime. The native Zmod post-processing hook does not provide arbitrary Python/plugin binary compatibility.
 
 ## Platform flags
 

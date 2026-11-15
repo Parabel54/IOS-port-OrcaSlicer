@@ -30,6 +30,8 @@ xcrun --sdk "$SDK" swiftc -typecheck -parse-as-library -swift-version 5 \
   "$ROOT/ios/OrcaSlicerApp/ControlsDrawer.swift" \
   "$ROOT/ios/OrcaSlicerApp/NativePostProcessing.swift"
 
+python3 -m unittest discover -s "$ROOT/scripts/tests" -p test_ios_settings_catalog.py -v
+
 # Run storage and credential-isolation checks with injected secrets on the Mac host.
 TEST_DIR="$(mktemp -d)"
 trap 'rm -rf "$TEST_DIR"' EXIT

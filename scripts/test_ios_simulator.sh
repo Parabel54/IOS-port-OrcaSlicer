@@ -110,3 +110,61 @@ PYTEST
 # Allow the first SwiftUI frame before preserving a diagnostic screenshot.
 sleep 3
 xcrun simctl io "$DEVICE" screenshot "$TEST_DIR/app-launch.png"
+
+# A narrow phone and a large tablet exercise real adaptive SwiftUI layouts.
+ios_test_run 20 xcrun simctl shutdown "$DEVICE"
+ios_test_run 20 xcrun simctl delete "$DEVICE"
+for variant in compact tablet; do
+  if [[ "$variant" == compact ]]; then
+    device_type=com.apple.CoreSimulator.SimDeviceType.iPhone-SE-3rd-generation
+  else
+    device_type=com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch-M4-8GB
+  fi
+  DEVICE="$(ios_test_run 120 xcrun simctl create "OrcaWorkspace-$variant" "$device_type" "$RUNTIME")"
+  ios_test_run 120 xcrun simctl boot "$DEVICE"
+  ios_test_run 240 xcrun simctl bootstatus "$DEVICE" -b
+  ios_test_run 120 xcrun simctl install "$DEVICE" "$APP_BUNDLE"
+  APP_DATA="$(xcrun simctl get_app_container "$DEVICE" com.orcaslicer.ios data)"
+  mkdir -p "$APP_DATA/Documents"
+  cp "$TEST_DIR/orca-project.3mf" "$APP_DATA/Documents/ios-import-smoke.3mf"
+  for presentation in workspace settings landscape; do
+    if [[ "$variant" == compact && "$presentation" == landscape ]]; then continue; fi
+    if [[ "$variant" == tablet && "$presentation" == settings ]]; then continue; fi
+    if [[ "$presentation" != workspace ]]; then
+      ios_test_run 20 xcrun simctl terminate "$DEVICE" com.orcaslicer.ios
+    fi
+    rm -f "$APP_DATA/tmp/orca-document-import-smoke.txt" "$APP_DATA/tmp/orca-workspace-layout.json"
+    workspace_flags=(--test-view-metadata --test-document-import)
+    if [[ "$presentation" == settings ]]; then workspace_flags+=(--test-show-settings); fi
+    if [[ "$presentation" == landscape ]]; then workspace_flags+=(--test-landscape-layout); fi
+    ios_test_run 90 xcrun simctl launch "$DEVICE" com.orcaslicer.ios "${workspace_flags[@]}"
+    python3 - "$APP_DATA" "$variant" "$presentation" <<'PYLAYOUT'
+from pathlib import Path
+import json
+import sys
+import time
+root = Path(sys.argv[1]) / 'tmp'
+deadline = time.monotonic() + 180
+while True:
+    marker = root/'orca-document-import-smoke.txt'
+    geometry = root/'orca-workspace-layout.json'
+    if marker.is_file() and geometry.is_file():
+        layout = json.loads(geometry.read_text())
+        if sys.argv[3] != 'landscape' or layout['width'] > layout['height']:
+            break
+    if time.monotonic() > deadline:
+        raise SystemExit('Responsive workspace did not finish loading/rotating')
+    time.sleep(1)
+if sys.argv[2] == 'compact':
+    assert layout['width'] <= 400 and not layout['sidebar'], layout
+else:
+    assert layout['width'] >= 1000 and layout['sidebar'], layout
+print('PASS: responsive workspace', sys.argv[2:], layout)
+time.sleep(3)
+PYLAYOUT
+    xcrun simctl io "$DEVICE" screenshot "$TEST_DIR/$variant-$presentation.png"
+    cp "$APP_DATA/tmp/orca-workspace-layout.json" "$TEST_DIR/$variant-$presentation.json"
+  done
+  ios_test_run 20 xcrun simctl shutdown "$DEVICE"
+  ios_test_run 20 xcrun simctl delete "$DEVICE"
+done

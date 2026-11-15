@@ -203,7 +203,7 @@ struct OrcaRootView: View {
             ZStack {
                 OrcaTheme.bg.ignoresSafeArea()
                 VStack(spacing: 0) {
-                    headerBar
+                    headerBar(inlineInspector: geo.size.width >= 860 && geo.size.height >= 500)
                     if !engine.automaticProfileLoading {
                         Text("Recovery mode: system profiles are not loaded. Reopen the app to retry startup.")
                             .font(.caption)
@@ -211,7 +211,7 @@ struct OrcaRootView: View {
                     }
                     tabBar
                     if mainTab == .device {
-                        devicePlaceholder.frame(maxWidth: .infinity, maxHeight: .infinity)
+                        NavigationStack { devicePlaceholder }.frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
                         HStack(spacing: 0) {
                             // Available bounds also cover iPad split view and Stage Manager.
@@ -228,6 +228,8 @@ struct OrcaRootView: View {
                         }
                     }
                 }
+                .onAppear { recordWorkspaceLayout(geo.size) }
+                .onChange(of: geo.size) { recordWorkspaceLayout($0) }
             }
         }
         // The C session belongs to the background slice until it finishes.
@@ -257,6 +259,15 @@ struct OrcaRootView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 14))
             }
         })
+    }
+
+    private func recordWorkspaceLayout(_ size: CGSize) {
+        guard ProcessInfo.processInfo.arguments.contains("--test-view-metadata") else { return }
+        let data: [String: Any] = ["width": size.width, "height": size.height,
+                                  "sidebar": size.width >= 860 && size.height >= 500 && sidebarVisible]
+        if let json = try? JSONSerialization.data(withJSONObject: data) {
+            try? json.write(to: FileManager.default.temporaryDirectory.appendingPathComponent("orca-workspace-layout.json"))
+        }
     }
 
     private var primaryPresentations: AnyView {
@@ -403,7 +414,7 @@ struct OrcaRootView: View {
         } message: { Text(documents.errorMessage) }
     }
 
-    private var headerBar: AnyView {
+    private func headerBar(inlineInspector: Bool) -> AnyView {
         AnyView(HStack(spacing: 8) {
             OrcaLogoMark().frame(width: 26, height: 26).accessibilityHidden(true)
             Text("OrcaSlicer").font(.headline).lineLimit(1).minimumScaleFactor(0.75)
@@ -442,7 +453,6 @@ struct OrcaRootView: View {
             }
             .disabled(!engine.canRedo)
             Menu {
-                Button("Show or hide settings sidebar") { sidebarVisible.toggle() }
                 Button("Object settings…") {
                     loadObjectSettingsFields()
                     showObjectSettings = true
@@ -460,7 +470,9 @@ struct OrcaRootView: View {
                     .background(OrcaTheme.elevated)
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
-            Button { showProcess = true } label: {
+            Button {
+                if inlineInspector { sidebarVisible.toggle() } else { showProcess = true }
+            } label: {
                 Image(systemName: "slider.horizontal.3")
                     .font(.system(size: 17, weight: .semibold))
                     .foregroundStyle(OrcaTheme.text)
@@ -3406,6 +3418,18 @@ struct OrcaRootView: View {
                 try? "PASS: app document inbox imported a 3MF model".write(
                     to: FileManager.default.temporaryDirectory.appendingPathComponent("orca-document-import-smoke.txt"),
                     atomically: true, encoding: .utf8)
+            }
+            if ProcessInfo.processInfo.arguments.contains("--test-show-settings") {
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 600_000_000)
+                    showProcess = true
+                }
+            }
+            if ProcessInfo.processInfo.arguments.contains("--test-landscape-layout"),
+               let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
+                scene.requestGeometryUpdate(.iOS(interfaceOrientations: .landscapeRight)) { error in
+                    NSLog("Landscape test failed: %@", error.localizedDescription)
+                }
             }
             processingDocument = false
             importPendingDocuments()
