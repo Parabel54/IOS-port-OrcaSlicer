@@ -657,6 +657,8 @@ struct PlateSceneView: UIViewRepresentable {
             )
             cam.look(at: target)
             view.pointOfView = cam
+            view.defaultCameraController.automaticTarget = false
+            view.defaultCameraController.target = target
         }
 
         func frameCamera(view: SCNView, mesh: MeshGeometry, bedSize: SIMD2<Float>) {
@@ -686,6 +688,8 @@ struct PlateSceneView: UIViewRepresentable {
             )
             cam.look(at: target)
             view.pointOfView = cam
+            view.defaultCameraController.automaticTarget = false
+            view.defaultCameraController.target = target
         }
     }
 }
