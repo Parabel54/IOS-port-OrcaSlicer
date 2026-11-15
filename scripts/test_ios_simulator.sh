@@ -38,10 +38,27 @@ cleanup() {
     ios_test_run 15 xcrun simctl io "$DEVICE" screenshot "$TEST_DIR/failure.png" >/dev/null 2>&1 || true
     ios_test_run 20 xcrun simctl spawn "$DEVICE" log show --last 3m --style compact \
       --predicate 'process == "OrcaSlicer"' > "$TEST_DIR/app-diagnostic.log" 2>&1 || true
-    python3 - "$TEST_DIR" <<'PYDIAG'
+    ios_test_run 20 xcrun simctl spawn "$DEVICE" launchctl list > "$TEST_DIR/simulator-processes.log" 2>&1 || true
+    ios_test_run 20 xcrun simctl spawn "$DEVICE" log show --last 3m --style compact \
+      --predicate 'process == "SpringBoard" OR process == "runningboardd" OR process == "launchd_sim" OR process == "installd"' \
+      > "$TEST_DIR/launcher-diagnostic.log" 2>&1 || true
+    python3 - "$TEST_DIR" "${APP_DATA:-}" "${APP_BUNDLE:-}" <<'PYDIAG'
 from pathlib import Path
+import json
+import plistlib
 import shutil
 import sys
+output = Path(sys.argv[1])
+container = Path(sys.argv[2]) if sys.argv[2] else None
+bundle = Path(sys.argv[3]) if sys.argv[3] else None
+if bundle and (bundle / 'Info.plist').is_file():
+    with (bundle / 'Info.plist').open('rb') as stream:
+        (output / 'built-app-info.json').write_text(json.dumps(plistlib.load(stream), indent=2, default=str))
+if container and container.is_dir():
+    markers = list((container / 'tmp').glob('orca-*-smoke.txt'))
+    (output / 'startup-markers.json').write_text(json.dumps([str(path.relative_to(container)) for path in markers]))
+    for marker in markers:
+        shutil.copy2(marker, output / marker.name)
 for crash in sorted((Path.home() / 'Library/Logs/DiagnosticReports').glob('OrcaSlicer*.ips'), key=lambda p: p.stat().st_mtime)[-3:]:
     shutil.copy2(crash, Path(sys.argv[1]) / crash.name)
 PYDIAG
@@ -60,7 +77,7 @@ ios_test_run 120 xcrun simctl install "$DEVICE" "$APP_BUNDLE"
 APP_DATA="$(xcrun simctl get_app_container "$DEVICE" com.orcaslicer.ios data)"
 mkdir -p "$APP_DATA/Documents"
 cp "$TEST_DIR/orca-project.3mf" "$APP_DATA/Documents/ios-import-smoke.3mf"
-ios_test_run 90 xcrun simctl launch --terminate-running-process "$DEVICE" com.orcaslicer.ios --test-view-metadata --test-document-import \
+ios_test_run 90 xcrun simctl launch "$DEVICE" com.orcaslicer.ios --test-view-metadata --test-document-import \
   | tee "$TEST_DIR/app-launch.log"
 # Wait for the app's full profile startup, not just its initial process spawn.
 APP_DATA="$(xcrun simctl get_app_container "$DEVICE" com.orcaslicer.ios data)"
