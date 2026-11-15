@@ -31,6 +31,7 @@ final class OrcaEngine: ObservableObject {
     @Published var objectMeshes: [MeshGeometry] = []
     @Published var gcodePathNode: SCNNode?
     @Published var gcodeGeometry: GCodePathGeometry?
+    @Published var previewIsReduced = false
     @Published var objectCount: Int = 0
     @Published var objectNames: [String] = []
     @Published var selectedObjectIndex: Int = -1 // -1 = all / none
@@ -1692,11 +1693,20 @@ final class OrcaEngine: ObservableObject {
     @Published var slicePercent: Int = 0
     @Published var slicePhase: String = ""
 
+    @MainActor
     func slice() async -> String {
         #if ORCA_LINKED
         guard let s = session else { return "No session" }
         let out = FileManager.default.temporaryDirectory
-            .appendingPathComponent("plate_1.gcode")
+            .appendingPathComponent("plate_\(UUID().uuidString).gcode")
+        // A failed attempt must never expose the previous job as its result.
+        gcodeURL = nil
+        gcodeGeometry = nil
+        gcodePathNode = nil
+        previewIsReduced = false
+        lastSliceStatsText = ""
+        lastAvgLayerTimeText = ""
+        filamentByRole = []
         await MainActor.run {
             self.slicePercent = 0
             self.slicePhase = "Starting"
@@ -1729,6 +1739,8 @@ final class OrcaEngine: ObservableObject {
             return outPath.withCString { orca_session_slice_to_gcode(sess, $0) }
         }.value
         if rc != 0 {
+            try? FileManager.default.removeItem(at: out)
+            slicePhase = "Failed"
             let err = orca_session_last_error(s).map { String(cString: $0) } ?? "slice failed"
             return "slice rc=\(rc): \(err)"
         }
@@ -1796,8 +1808,36 @@ final class OrcaEngine: ObservableObject {
             } else if let nd = self.getOptionFirst("nozzle_diameter").flatMap(Float.init), nd > 0.05 {
                 defW = nd * 1.1
             }
-            // Cap path points for mobile RAM (ribbons are heavier than lines)
-            if let path = GCodePathGeometry.parse(url: out, maxPoints: 60_000, defaultWidth: defW) {
+            var segments: UnsafeMutablePointer<orca_preview_segment_t>?
+            var count = 0
+            var totalCount = 0
+            if orca_session_export_preview(sess, &segments, &count, &totalCount) == 0,
+               let segments {
+                defer { orca_free(segments) }
+                let records = UnsafeBufferPointer(start: segments, count: count)
+                var paths: [GCodePathGeometry.Segment] = []
+                for move in records {
+                    let start = SCNVector3(move.start_x, move.start_y, move.start_z)
+                    let end = SCNVector3(move.end_x, move.end_y, move.end_z)
+                    let feature = move.travel != 0 ? "Travel" :
+                        String(cString: orca_preview_role_name(move.role))
+                    if let last = paths.last, let previousEnd = last.points.last,
+                       last.feature == feature, last.width == move.width,
+                       last.feedrate == move.feedrate,
+                       previousEnd.x == start.x, previousEnd.y == start.y, previousEnd.z == start.z {
+                        paths[paths.count - 1].points.append(end)
+                    } else {
+                        paths.append(GCodePathGeometry.Segment(points: [start, end],
+                            feature: feature, width: move.width, feedrate: move.feedrate))
+                    }
+                }
+                let zs = paths.flatMap { $0.points.map { $0.z } }
+                let feeds = paths.map { $0.feedrate }.filter { $0 > 0 }
+                let path = GCodePathGeometry(segments: paths,
+                    zMin: zs.min() ?? 0, zMax: zs.max() ?? 0.2,
+                    feedMin: feeds.min() ?? 0, feedMax: feeds.max() ?? 1,
+                    defaultWidth: defW)
+                self.previewIsReduced = totalCount > count
                 self.gcodeGeometry = path
                 self.gcodeZMin = path.zMin
                 self.gcodeZMax = max(path.zMax, path.zMin + 0.2)

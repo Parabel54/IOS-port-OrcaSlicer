@@ -67,6 +67,8 @@ struct orca_session {
     void *      progress_user{nullptr};
     // Last slice stats (from GCodeProcessorResult)
     bool        has_slice_stats{false};
+    std::vector<orca_preview_segment_t> preview_segments;
+    size_t preview_total_segments{0};
     float       last_time_sec{0.f};
     float       last_initial_layer_time_sec{0.f};
     float       last_filament_mm3{0.f};
@@ -440,6 +442,9 @@ int orca_session_slice_to_gcode(orca_session_t *s, const char *gcode_out_path)
     if (!s || !gcode_out_path)
         return -1;
     s->clear_error();
+    s->has_slice_stats = false;
+    s->preview_segments.clear();
+    s->preview_total_segments = 0;
     if (!s->has_model) {
         s->set_error("No model loaded");
         return -2;
@@ -463,6 +468,12 @@ int orca_session_slice_to_gcode(orca_session_t *s, const char *gcode_out_path)
             s->report_progress(12, "Calibration mode active");
         }
 
+        const auto validation = print.validate();
+        if (!validation.string.empty()) {
+            s->set_error(validation.string);
+            return -6;
+        }
+
         // Forward the engine's actual phases rather than freezing at 15%.
         print.set_status_callback([s](const PrintBase::SlicingStatus &status) {
             if (status.percent >= 0)
@@ -479,8 +490,38 @@ int orca_session_slice_to_gcode(orca_session_t *s, const char *gcode_out_path)
             s->set_error("export_gcode returned empty path");
             return -4;
         }
+        // Use the same interpreted motion as the desktop viewer, including arcs,
+        // extrusion modes and coordinate resets. Bound mobile preview memory while
+        // sampling the entire job, rather than truncating its later layers.
+        auto visible_move = [](const GCodeProcessorResult::MoveVertex &move) {
+            return !move.internal_only &&
+                (move.type == EMoveType::Extrude || move.type == EMoveType::Travel);
+        };
+        for (size_t i = 1; i < result.moves.size(); ++i)
+            if (visible_move(result.moves[i]))
+                ++s->preview_total_segments;
+        constexpr size_t preview_budget = 60000;
+        s->preview_segments.reserve(std::min(preview_budget, s->preview_total_segments));
+        size_t ordinal = 0;
+        size_t previous_slot = std::numeric_limits<size_t>::max();
+        for (size_t i = 1; i < result.moves.size(); ++i) {
+            const auto &move = result.moves[i];
+            if (!visible_move(move))
+                continue;
+            const size_t slot = s->preview_total_segments <= preview_budget ? ordinal :
+                size_t(double(ordinal) * (preview_budget - 1) / (s->preview_total_segments - 1));
+            ++ordinal;
+            if (slot == previous_slot)
+                continue;
+            previous_slot = slot;
+            const auto &start = result.moves[i - 1].position;
+            const auto &end = move.position;
+            const bool travel = move.type == EMoveType::Travel;
+            s->preview_segments.push_back({start.x(), start.y(), start.z(),
+                end.x(), end.y(), end.z(), travel ? 0.f : move.width,
+                move.feedrate * 60.f, int(move.extrusion_role), travel ? 1 : 0});
+        }
         // Capture official GCodeProcessor statistics for UI
-        s->has_slice_stats = true;
         s->last_time_sec = result.print_statistics.modes[
             static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal)].time;
         s->last_initial_layer_time_sec = result.initial_layer_time;
@@ -517,6 +558,7 @@ int orca_session_slice_to_gcode(orca_session_t *s, const char *gcode_out_path)
         } catch (...) {
             s->last_layers = 0;
         }
+        s->has_slice_stats = true;
         s->report_progress(100, "Done");
         return 0;
     } catch (const std::exception &ex) {
@@ -526,6 +568,38 @@ int orca_session_slice_to_gcode(orca_session_t *s, const char *gcode_out_path)
         s->set_error("slice: unknown error");
         return -5;
     }
+}
+
+int orca_session_export_preview(orca_session_t *s, orca_preview_segment_t **segments,
+                                size_t *count, size_t *total_count)
+{
+    if (!s || !segments || !count || !total_count)
+        return -1;
+    *segments = nullptr;
+    *count = 0;
+    *total_count = 0;
+    if (!s->has_slice_stats)
+        return -2;
+    if (s->preview_segments.empty())
+        return 0;
+    const size_t bytes = s->preview_segments.size() * sizeof(orca_preview_segment_t);
+    auto *copy = static_cast<orca_preview_segment_t *>(std::malloc(bytes));
+    if (!copy)
+        return -3;
+    std::memcpy(copy, s->preview_segments.data(), bytes);
+    *segments = copy;
+    *count = s->preview_segments.size();
+    *total_count = s->preview_total_segments;
+    return 0;
+}
+
+const char *orca_preview_role_name(int role)
+{
+    if (role < 0 || role >= int(erCount))
+        return "Unknown";
+    thread_local std::string label;
+    label = ExtrusionEntity::role_to_string(static_cast<ExtrusionRole>(role));
+    return label.c_str();
 }
 
 int orca_session_model_bounds(

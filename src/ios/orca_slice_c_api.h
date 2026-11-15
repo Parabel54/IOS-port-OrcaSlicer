@@ -64,6 +64,27 @@ ORCA_API void orca_session_set_progress_callback(
  */
 ORCA_API int orca_session_slice_to_gcode(orca_session_t *s, const char *gcode_out_path);
 
+/** Processed toolpath segment, in mm; feedrate is mm/min for the mobile viewer. */
+typedef struct orca_preview_segment {
+    float start_x, start_y, start_z;
+    float end_x, end_y, end_z;
+    float width, feedrate;
+    int role;
+    int travel;
+} orca_preview_segment_t;
+
+/**
+ * Preview from the last successful slice's official GCodeProcessorResult.
+ * Large results are sampled across the full job to at most 60000 segments.
+ * total_count reports the number before sampling. Free *segments with orca_free().
+ * Returns an error if no successful slice is available.
+ */
+ORCA_API int orca_session_export_preview(
+    orca_session_t *s, orca_preview_segment_t **segments, size_t *count, size_t *total_count);
+
+/** Official feature label; valid until the next call on this thread. */
+ORCA_API const char *orca_preview_role_name(int role);
+
 /**
  * Axis-aligned bounding box of loaded model (mm).
  * @return 0 on success

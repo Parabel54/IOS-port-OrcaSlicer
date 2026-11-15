@@ -16,6 +16,9 @@ the iOS/headless dependency path. Normal desktop configuration retains upstream 
 - Remove a previous developer's signing team as the generator default.
 - Require a nonempty SDK-specific engine archive and bundled profiles for CI builds.
 - Reject missing core archives during engine bundling.
+
+The app clears stale G-code before a new slice and disables editing while the shared C session is slicing. Print validation runs before processing. Preview comes from the official GCodeProcessorResult, with a bounded sample across the entire job and an explicit simplified-preview notice for large models. CI exercises the simulator C ABI (3MF import, slice, preview, G-code export, invalid-config rejection), caches dependencies after they build successfully, and packages unsigned apps. The runtime smoke test has not yet passed.
+
 - Add unsigned device/simulator build workflow: `.github/workflows/ios-engine.yml`.
 
 ## Verification

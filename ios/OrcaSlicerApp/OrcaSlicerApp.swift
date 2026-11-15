@@ -175,6 +175,8 @@ struct OrcaRootView: View {
                 }
             }
         }
+        // The C session belongs to the background slice until it finishes.
+        .disabled(isSlicing)
         .sheet(isPresented: $showProcess) {
             processSheet
                 .presentationDetents([.medium, .large])
@@ -1649,6 +1651,11 @@ struct OrcaRootView: View {
             .buttonStyle(.plain)
             .disabled(!engine.hasModel || isSlicing)
 
+            if engine.previewIsReduced && engine.gcodeURL != nil {
+                Text("Preview simplified for large models")
+                    .font(.caption)
+                    .foregroundStyle(OrcaTheme.muted)
+            }
             if !engine.lastSliceStatsText.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(engine.lastSliceStatsText)
@@ -4072,6 +4079,7 @@ struct OrcaRootView: View {
     }
 
     private func sliceNow() {
+        guard !isSlicing else { return }
         status = ""
         isSlicing = true
         Task {

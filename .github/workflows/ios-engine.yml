@@ -32,8 +32,20 @@ jobs:
         run: python3 -m unittest discover -s scripts/tests -p test_ios_project.py -v
       - name: Install build tools
         run: brew install cmake autoconf automake libtool pkg-config
+      - name: Restore SDK dependencies
+        id: deps-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: deps/build-ios-${{ matrix.sdk }}-arm64
+          key: ios-deps-${{ runner.os }}-${{ runner.arch }}-${{ matrix.sdk }}-${{ hashFiles('deps/**', 'cmake/**', 'scripts/build_ios_deps.sh') }}
       - name: Build dependencies
         run: bash scripts/build_ios_deps.sh "${{ matrix.sdk }}" arm64
+      - name: Save SDK dependencies
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: deps/build-ios-${{ matrix.sdk }}-arm64
+          key: ${{ steps.deps-cache.outputs.cache-primary-key }}
       - name: Build and bundle engine
         run: bash scripts/build_ios_engine_after_deps.sh "${{ matrix.sdk }}" arm64
       - name: Require linked engine and current profiles
@@ -44,6 +56,23 @@ jobs:
             -sdk "${{ matrix.sdk }}" -configuration Release \
             -derivedDataPath build-ios-app ARCHS=arm64 \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+      - name: Exercise simulator engine
+        if: matrix.sdk == 'iphonesimulator'
+        run: bash scripts/test_ios_simulator.sh
+      - name: Package unsigned app
+        env:
+          IOS_SDK: ${{ matrix.sdk }}
+        run: |
+          mkdir -p build-artifacts
+          ditto -c -k --sequesterRsrc --keepParent \
+            "build-ios-app/Build/Products/Release-${IOS_SDK}/OrcaSlicer.app" \
+            "build-artifacts/OrcaSlicer-${IOS_SDK}.zip"
+      - name: Preserve unsigned app
+        uses: actions/upload-artifact@v4
+        with:
+          name: OrcaSlicer-${{ matrix.sdk }}
+          path: build-artifacts/
+          if-no-files-found: error
       - name: Preserve build logs
         if: always()
         uses: actions/upload-artifact@v4

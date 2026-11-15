@@ -16,10 +16,8 @@ LOG_DIR="${ROOT}/build_logs"
 mkdir -p "$LOG_DIR" "$BUILD_DIR"
 
 if [[ "$TARGET" == "iphonesimulator" ]]; then
-  PLATFORM=OS64SIMULATOR
   SYSROOT=iphonesimulator
 else
-  PLATFORM=OS64
   SYSROOT=iphoneos
 fi
 
@@ -48,4 +46,4 @@ cmake --build "$BUILD_DIR" --target deps -j "$(sysctl -n hw.ncpu)" \
   2>&1 | tee "${LOG_DIR}/ios_deps_build.log"
 
 echo "DEPS OK → ${BUILD_DIR}/OrcaSlicer_dep/usr/local"
-ls -la "${BUILD_DIR}/OrcaSlicer_dep/usr/local/lib" | head -40
+find "${BUILD_DIR}/OrcaSlicer_dep/usr/local/lib" -maxdepth 1 -type f -print
