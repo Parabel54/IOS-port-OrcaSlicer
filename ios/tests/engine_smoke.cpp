@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <iterator>
 #include <memory>
@@ -24,10 +25,19 @@ int main(int argc, char **argv)
             std::fprintf(stderr, "%s: %s\n", message, orca_session_last_error(session.get()));
         return condition;
     };
+    if (!require(orca_session_set_option(session.get(), "layer_height", "0.16") == 0, "set project layer height"))
+        return 4;
     if (!require(orca_session_add_box(session.get(), "Smoke cube", 20, 20, 20) >= 0, "create cube") ||
         !require(orca_session_repair_mesh(session.get(), 0) == 0, "repair cube through current engine API") ||
         !require(orca_session_save_3mf(session.get(), project.c_str()) == 0, "save project") ||
         !require(orca_session_load_model(session.get(), project.c_str()) == 0, "import project"))
+        return 4;
+    char loaded_height[64]{};
+    if (!require(orca_session_object_count(session.get()) == 1, "project retains its model") ||
+        !require(orca_session_get_option(session.get(), "layer_height", loaded_height, sizeof(loaded_height)) == 0,
+                 "read restored project setting") ||
+        !require(std::fabs(std::strtof(loaded_height, nullptr) - 0.16f) < 0.0001f,
+                 "project retains its layer height"))
         return 4;
     const char *options[][2] = {
         {"layer_height", "0.2"}, {"wall_loops", "2"},

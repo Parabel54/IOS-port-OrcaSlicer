@@ -28,6 +28,7 @@
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Format/3mf.hpp"
+#include "libslic3r/miniz_extension.hpp"
 // Generated into build dir as libslic3r_version.h (include path via libslic3r target)
 #include "libslic3r_version.h"
 #include "libslic3r/PresetBundle.hpp"
@@ -285,6 +286,13 @@ extern "C" {
 orca_session_t *orca_session_create(const char *resources_path)
 {
     try {
+        // The desktop bootstrap sets this before any model is created. The mobile
+        // host must do the same: 3MF backup/extraction cannot write to filesystem root.
+        if (temporary_dir().empty()) {
+            const fs::path temporary = fs::temp_directory_path() / "OrcaSlicer";
+            fs::create_directories(temporary);
+            set_temporary_dir(temporary.string());
+        }
         auto *s = new orca_session();
         if (resources_path && *resources_path)
             s->resources_path = resources_path;
@@ -317,11 +325,36 @@ static int load_model_impl(orca_session_t *s, const char *path, bool append)
     try {
         DynamicPrintConfig  file_config;
         ConfigSubstitutionContext substitutions(ForwardCompatibilitySubstitutionRule::EnableSilent);
-        Model incoming = Model::read_from_file(
-            std::string(path),
-            &file_config,
-            &substitutions,
-            LoadStrategy::AddDefaultInstances);
+        Model incoming;
+        std::string extension = fs::path(path).extension().string();
+        std::transform(extension.begin(), extension.end(), extension.begin(),
+            [](unsigned char c) { return char(std::tolower(c)); });
+        bool slic3r_archive = false;
+        if (extension == ".3mf") {
+            mz_zip_archive archive{};
+            if (open_zip_reader(&archive, path)) {
+                // store_3mf (used by project saves and undo) writes this format.
+                // read_from_file routes every 3MF through the Orca/Bambu reader,
+                // which does not load the Slic3r model/config entries correctly.
+                slic3r_archive = mz_zip_reader_locate_file(&archive,
+                    "Metadata/Slic3r_PE_model.config", nullptr, 0) >= 0;
+                close_zip_reader(&archive);
+            }
+        }
+        if (slic3r_archive) {
+            if (!load_3mf(path, file_config, substitutions, &incoming, true)) {
+                s->set_error("Unable to read Slic3r 3MF project");
+                if (!append)
+                    s->has_model = false;
+                return -3;
+            }
+            incoming.add_default_instances();
+            for (ModelObject *object : incoming.objects)
+                object->input_file = path;
+        } else {
+            incoming = Model::read_from_file(std::string(path), &file_config,
+                &substitutions, LoadStrategy::AddDefaultInstances);
+        }
         if (incoming.objects.empty()) {
             s->set_error("Model has no objects after load");
             if (!append) {
