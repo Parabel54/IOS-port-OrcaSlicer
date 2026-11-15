@@ -21,6 +21,16 @@ final class WorkspaceUITests: XCTestCase {
         XCTAssertTrue(app.buttons["add-primitive"].waitForExistence(timeout: 10))
         app.buttons["add-primitive"].tap()
         XCTAssertTrue(slice.waitForExistence(timeout: 10))
+        app.buttons["Objects and tools"].tap()
+        XCTAssertTrue(app.buttons["mesh-tools"].waitForExistence(timeout: 10))
+        app.buttons["mesh-tools"].tap()
+        XCTAssertTrue(app.buttons["repair-mesh"].waitForExistence(timeout: 10))
+        app.buttons["repair-mesh"].tap()
+        let edited = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            app.state == .runningForeground && slice.exists && slice.isEnabled && slice.isHittable
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [edited], timeout: 180), .completed,
+                       "Native mesh editing must finish and dismiss its inspector")
         XCUIDevice.shared.orientation = .landscapeRight
         let landscape = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             app.state == .runningForeground && app.frame.width > app.frame.height

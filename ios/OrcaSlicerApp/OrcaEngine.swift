@@ -13,7 +13,8 @@ final class OrcaEngine: ObservableObject {
     @Published var modelName: String?
     @Published var hasModel = false
     @Published private(set) var lastModelImportSucceeded = false
-    @Published private(set) var modelImporting = false
+    @Published private(set) var sessionBusy = false
+    @Published private(set) var sessionBusyMessage = "Importing…"
     @Published var gcodeURL: URL?
     @Published var lastMessage = ""
     @Published var lastSliceTimeSec: Float = 0
@@ -228,7 +229,7 @@ final class OrcaEngine: ObservableObject {
         gcodeGeometry = nil
         previewLayerHeights = []
         gcodeURL = nil
-        if let s = session, !presetsLoading, !sliceRunning, !modelImporting {
+        if let s = session, !presetsLoading, !sliceRunning, !sessionBusy {
             orca_session_purge_option_caches(s)
         }
         lastMessage = "Freed preview/settings caches (memory pressure)"
@@ -622,11 +623,12 @@ final class OrcaEngine: ObservableObject {
 
     @MainActor
     func importCloudProfiles(_ profiles: [OrcaCloudProfile], owner: String, adoptedIDs: Set<String> = []) async -> Bool {
-        guard !modelImporting, !presetsLoading, !sliceRunning, startupFinished else { return false }
+        guard !sessionBusy, !presetsLoading, !sliceRunning, startupFinished else { return false }
         #if ORCA_LINKED
         guard let session else { return false }
-        modelImporting = true
-        defer { modelImporting = false }
+        sessionBusyMessage = "Importing…"
+        sessionBusy = true
+        defer { sessionBusy = false }
         do {
             let records = try profiles.map { profile -> [String: Any] in
                 var record = try profile.record()
@@ -658,7 +660,7 @@ final class OrcaEngine: ObservableObject {
 
     func exportLocalCloudProfiles() throws -> [OrcaCloudProfile] {
         #if ORCA_LINKED
-        guard let session, !modelImporting, !presetsLoading, !sliceRunning else { throw OrcaCloudError.unavailable }
+        guard let session, !sessionBusy, !presetsLoading, !sliceRunning else { throw OrcaCloudError.unavailable }
         let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".json")
         defer { try? FileManager.default.removeItem(at: path) }
         guard path.path.withCString({ orca_session_export_user_profiles(session, $0) }) >= 0,
@@ -676,14 +678,15 @@ final class OrcaEngine: ObservableObject {
     @MainActor
     @discardableResult
     func importConfigJSON(url: URL, asUserPreset kind: Int? = nil) async -> Bool {
-        guard !modelImporting, !presetsLoading, !sliceRunning else { return false }
+        guard !sessionBusy, !presetsLoading, !sliceRunning else { return false }
         #if ORCA_LINKED
         guard let s = session else { return false }
         let accessed = url.startAccessingSecurityScopedResource()
         defer { if accessed { url.stopAccessingSecurityScopedResource() } }
         guard let dest = copyToTemp(url) else { return false }
-        modelImporting = true
-        defer { modelImporting = false }
+        sessionBusyMessage = "Importing…"
+        sessionBusy = true
+        defer { sessionBusy = false }
         let bits = UInt(bitPattern: s)
         do {
             let (result, catalog) = try await Task.detached(priority: .userInitiated) { () throws -> (Int32, Bool) in
@@ -768,53 +771,6 @@ final class OrcaEngine: ObservableObject {
             meshHealthText = "Non-manifold · \(openEdges) open edges · \(facets) facets"
         }
         lastMessage = meshHealthText
-        return true
-        #else
-        return false
-        #endif
-    }
-
-    @discardableResult
-    func repairMesh() -> Bool {
-        #if ORCA_LINKED
-        guard let s = session, hasModel else { return false }
-        let idx = selectedObjectIndex >= 0 ? Int32(selectedObjectIndex) : Int32(-1)
-        let rc = orca_session_repair_mesh(s, idx)
-        if rc != 0 {
-            lastMessage = orca_session_last_error(s).map { String(cString: $0) } ?? "repair failed"
-            _ = refreshMeshHealth()
-            return false
-        }
-        refreshMesh()
-        refreshBounds()
-        refreshModelInfo()
-        _ = refreshMeshHealth()
-        lastMessage = "Repair done · \(meshHealthText)"
-        return true
-        #else
-        return false
-        #endif
-    }
-
-    /// Horizontal plane cut at world Z (mm). keep both halves by default.
-    @discardableResult
-    func cutObjectZ(_ zMm: Float, keepUpper: Bool = true, keepLower: Bool = true) -> Bool {
-        #if ORCA_LINKED
-        guard let s = session, hasModel else { return false }
-        let idx = selectedObjectIndex >= 0 ? selectedObjectIndex : 0
-        let rc = orca_session_cut_object_z(
-            s, Int32(idx), zMm, keepUpper ? 1 : 0, keepLower ? 1 : 0
-        )
-        if rc < 0 {
-            lastMessage = orca_session_last_error(s).map { String(cString: $0) } ?? "cut failed"
-            return false
-        }
-        selectedObjectIndex = -1
-        refreshObjectList()
-        refreshMesh()
-        refreshBounds()
-        refreshModelInfo()
-        lastMessage = String(format: "Cut at Z=%.2f mm → %d object(s)", zMm, objectCount)
         return true
         #else
         return false
@@ -1040,10 +996,11 @@ final class OrcaEngine: ObservableObject {
     /// thread while controls and memory-pressure native cache mutation are paused.
     @MainActor
     func loadDocumentModel(url: URL, append: Bool, includeSettings: Bool = true) async -> Bool {
-        guard !modelImporting, !presetsLoading, !sliceRunning else { return false }
-        modelImporting = true
+        guard !sessionBusy, !presetsLoading, !sliceRunning else { return false }
+        sessionBusyMessage = "Importing…"
+        sessionBusy = true
         lastModelImportSucceeded = false
-        defer { modelImporting = false }
+        defer { sessionBusy = false }
         #if ORCA_LINKED
         guard let session else { lastMessage = "No session"; return false }
         let bits = UInt(bitPattern: session)
@@ -1939,6 +1896,7 @@ final class OrcaEngine: ObservableObject {
         guard let s = session else { return "No session" }
         guard !sliceRunning else { return "A slice is already running" }
         guard !presetsLoading else { return "Wait for printer profiles to finish loading" }
+        guard !sessionBusy else { return "Wait for the current model operation to finish" }
         sliceRunning = true
         defer { sliceRunning = false }
         let out = FileManager.default.temporaryDirectory
@@ -2318,6 +2276,12 @@ final class OrcaEngine: ObservableObject {
             // Don't wipe existing stack if this push fails
             return
         }
+        recordUndoSnapshot(url, label: label)
+        // Don't stomp lastMessage (caller sets "Moved…" etc.)
+        #endif
+    }
+
+    private func recordUndoSnapshot(_ url: URL, label: String) {
         undoStack.append(UndoEntry(url: url, label: label))
         while undoStack.count > maxUndo {
             let old = undoStack.removeFirst()
@@ -2327,8 +2291,6 @@ final class OrcaEngine: ObservableObject {
         for e in redoStack { try? FileManager.default.removeItem(at: e.url) }
         redoStack.removeAll()
         refreshUndoFlags()
-        // Don't stomp lastMessage (caller sets "Moved…" etc.)
-        #endif
     }
 
     func undo() {
@@ -2712,101 +2674,85 @@ final class OrcaEngine: ObservableObject {
         #endif
     }
 
-    // MARK: - wx-parity W2: mesh boolean / simplify / plane cut
-
-    /// op: 0=union, 1=difference (A−B), 2=intersection. Deletes B by default.
-    @discardableResult
-    func meshBoolean(objectA: Int? = nil, objectB: Int? = nil, op: Int, deleteB: Bool = true) -> Bool {
-        #if ORCA_LINKED
-        guard let s = session, hasModel, objectCount >= 2 else {
-            lastMessage = "Boolean needs ≥2 objects"
-            return false
-        }
-        let a = objectA ?? (selectedObjectIndex >= 0 ? selectedObjectIndex : 0)
-        var b = objectB ?? booleanOtherObjectIndex
-        if b < 0 || b == a {
-            b = (a + 1) % objectCount
-        }
-        if b == a {
-            lastMessage = "Boolean: pick a different second object"
-            return false
-        }
-        pushUndoSnapshot(label: "mesh-boolean-\(op)")
-        let rc = orca_session_mesh_boolean(s, Int32(a), Int32(b), Int32(op), deleteB ? 1 : 0)
-        if rc != 0 {
-            lastMessage = orca_session_last_error(s).map { String(cString: $0) } ?? "boolean failed"
-            return false
-        }
-        selectedObjectIndex = min(a, objectCount - 2) // B deleted may shift indices
-        refreshObjectList()
-        refreshMesh()
-        refreshBounds()
-        refreshModelInfo()
-        let opName = op == 0 ? "Union" : (op == 1 ? "Difference" : "Intersect")
-        lastMessage = "\(opName) → \(objectCount) object(s)"
-        return true
-        #else
-        return false
-        #endif
+    enum MeshEdit: Sendable {
+        case repair
+        case simplify(Int)
+        case cut(position: Float, axis: Int, upper: Bool, lower: Bool)
+        case boolean(other: Int, operation: Int, removeOther: Bool)
     }
 
-    /// Simplify selected object (targetFaces 0 = ~50%).
+    /// The same session gate used by imports excludes slicing, preset imports
+    /// and memory-pressure mutation while a native mesh algorithm is running.
+    @MainActor
     @discardableResult
-    func simplifyMesh(targetFaces: Int = 0) -> Bool {
+    func editMesh(_ edit: MeshEdit) async -> Bool {
+        guard !sessionBusy, !sliceRunning, !presetsLoading, hasModel else { return false }
         #if ORCA_LINKED
-        guard let s = session, hasModel else { return false }
-        let idx = selectedObjectIndex >= 0 ? selectedObjectIndex : 0
-        pushUndoSnapshot(label: "simplify-mesh")
-        let n = orca_session_simplify_mesh(s, Int32(idx), Int32(targetFaces))
-        if n < 0 {
-            lastMessage = orca_session_last_error(s).map { String(cString: $0) } ?? "simplify failed"
+        guard let session else { return false }
+        let index = selectedObjectIndex
+        if case .repair = edit { /* Repair also supports the whole plate. */ }
+        else if !objectNames.indices.contains(index) {
+            lastMessage = "Select one object first"; return false
+        }
+        switch edit {
+        case .simplify(let target):
+            guard target >= 0 && target <= Int(Int32.max) else { lastMessage = "Invalid triangle count"; return false }
+        case .cut(let position, let axis, let upper, let lower):
+            guard position.isFinite, (0...2).contains(axis), upper || lower else { lastMessage = "Choose a valid cut plane and at least one half"; return false }
+        case .boolean(let other, let operation, _):
+            guard objectNames.indices.contains(other), other != index, (0...2).contains(operation) else {
+                lastMessage = "Choose two different objects and a valid operation"; return false
+            }
+        case .repair: break
+        }
+        sessionBusyMessage = "Updating model…"
+        sessionBusy = true
+        defer { sessionBusy = false }
+        let snapshot = undoDir().appendingPathComponent("mesh_\(UUID().uuidString).3mf")
+        let bits = UInt(bitPattern: session)
+        let result = await Task.detached(priority: .userInitiated) {
+            let s = OpaquePointer(bitPattern: bits)!
+            let saved = snapshot.path.withCString { orca_session_snapshot(s, $0) }
+            let bytes = (try? snapshot.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+            guard saved == 0 && bytes > 64 else {
+                return (Int32(-1), "Could not prepare an undo snapshot; the model was not changed.", false)
+            }
+            let code: Int32
+            switch edit {
+            case .repair: code = orca_session_repair_mesh(s, Int32(index))
+            case .simplify(let target): code = orca_session_simplify_mesh(s, Int32(index), Int32(target))
+            case .cut(let position, let axis, let upper, let lower):
+                var point = SIMD3<Float>(repeating: 0), normal = SIMD3<Float>(repeating: 0)
+                point[axis] = position; normal[axis] = 1
+                code = orca_session_cut_object_plane(s, Int32(index), point.x, point.y, point.z,
+                    normal.x, normal.y, normal.z, upper ? 1 : 0, lower ? 1 : 0)
+            case .boolean(let other, let operation, let removeOther):
+                code = orca_session_mesh_boolean(s, Int32(index), Int32(other), Int32(operation), removeOther ? 1 : 0)
+            }
+            let error = orca_session_last_error(s).map { String(cString: $0) } ?? ""
+            var restoreFailed = false
+            if code < 0 {
+                restoreFailed = snapshot.path.withCString { orca_session_restore_snapshot(s, $0) } != 0
+            }
+            return (code, error.isEmpty ? "Mesh operation failed" : error, restoreFailed)
+        }.value
+        if result.0 >= 0 || result.2 { recordUndoSnapshot(snapshot, label: "mesh-edit") }
+        else { try? FileManager.default.removeItem(at: snapshot) }
+        if result.0 >= 0, case .boolean(let other, _, let removeOther) = edit {
+            selectedObjectIndex = index - (removeOther && other < index ? 1 : 0)
+        } else if result.0 >= 0, case .cut = edit { selectedObjectIndex = -1 }
+        refreshObjectList()
+        hasModel = objectCount > 0
+        refreshMesh(); refreshBounds(); refreshModelInfo()
+        if result.0 < 0 {
+            lastMessage = result.1 + (result.2 ? " The previous model could not be restored; its snapshot is available in Undo." : "")
             return false
         }
-        refreshMesh()
-        refreshBounds()
-        refreshModelInfo()
         _ = refreshMeshHealth()
-        lastMessage = "Simplified → \(n) triangles"
+        lastMessage = "Updated model · \(objectCount) objects"
         return true
         #else
-        return false
-        #endif
-    }
-
-    /// Plane cut with arbitrary normal (world mm). Default normal = +Z (horizontal).
-    @discardableResult
-    func cutObjectPlane(
-        point: SIMD3<Float>,
-        normal: SIMD3<Float> = SIMD3(0, 0, 1),
-        keepUpper: Bool = true,
-        keepLower: Bool = true
-    ) -> Bool {
-        #if ORCA_LINKED
-        guard let s = session, hasModel else { return false }
-        let idx = selectedObjectIndex >= 0 ? selectedObjectIndex : 0
-        pushUndoSnapshot(label: "cut-plane")
-        let rc = orca_session_cut_object_plane(
-            s, Int32(idx),
-            point.x, point.y, point.z,
-            normal.x, normal.y, normal.z,
-            keepUpper ? 1 : 0, keepLower ? 1 : 0
-        )
-        if rc < 0 {
-            lastMessage = orca_session_last_error(s).map { String(cString: $0) } ?? "plane cut failed"
-            return false
-        }
-        selectedObjectIndex = -1
-        refreshObjectList()
-        refreshMesh()
-        refreshBounds()
-        refreshModelInfo()
-        lastMessage = String(
-            format: "Plane cut n=(%.1f,%.1f,%.1f) → %d object(s)",
-            normal.x, normal.y, normal.z, objectCount
-        )
-        return true
-        #else
-        return false
+        lastMessage = "Engine not linked"; return false
         #endif
     }
 

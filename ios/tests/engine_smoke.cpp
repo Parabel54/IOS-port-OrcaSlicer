@@ -20,15 +20,17 @@ int main(int argc, char **argv)
         session(orca_session_create(argv[2]), orca_session_destroy);
     if (!session)
         return 3;
+    orca_session_t *diagnostic_session = session.get();
     auto require = [&](bool condition, const char *message) {
         if (!condition)
-            std::fprintf(stderr, "%s: %s\n", message, orca_session_last_error(session.get()));
+            std::fprintf(stderr, "%s: %s\n", message, orca_session_last_error(diagnostic_session));
         return condition;
     };
     // All desktop primitives must be real, bed-placed engine objects.
     for (int kind = 0; kind < 6; ++kind) {
         std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
             shape(orca_session_create(argv[2]), orca_session_destroy);
+        diagnostic_session = shape.get();
         float b[6]{};
         if (!require(orca_session_add_primitive(shape.get(), kind, 20, 8, 12) == 0, "add primitive") ||
             !require(orca_session_model_bounds(shape.get(), b, b+1, b+2, b+3, b+4, b+5) == 0,
@@ -39,6 +41,7 @@ int main(int argc, char **argv)
     {
         std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
             shape(orca_session_create(argv[2]), orca_session_destroy);
+        diagnostic_session = shape.get();
         float b[6]{};
         if (!require(orca_session_add_primitive(shape.get(), 0, 20, 10, 8) == 0, "scale fixture") ||
             !require(orca_session_translate_object(shape.get(), 0, 15, -7, 0) == 0, "off-center fixture") ||
@@ -54,6 +57,7 @@ int main(int argc, char **argv)
     {
         std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
             small(orca_session_create(argv[2]), orca_session_destroy);
+        diagnostic_session = small.get();
         float b[6]{};
         if (!require(orca_session_add_primitive(small.get(), 0, 0.2f, 0.3f, 0.4f) == 0, "small primitive cube") ||
             !require(orca_session_model_bounds(small.get(), b, b+1, b+2, b+3, b+4, b+5) == 0, "small cube bounds") ||
@@ -65,6 +69,7 @@ int main(int argc, char **argv)
              "Voron_Design_Cube_v7.drc", "Stanford_Bunny.drc", "Orca_stringhell.drc"}) {
         std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
             handy(orca_session_create(argv[2]), orca_session_destroy);
+        diagnostic_session = handy.get();
         const std::string path = std::string(argv[2]) + "/handy_models/" + file;
         char height[64]{};
         if (!require(orca_session_set_option(handy.get(), "layer_height", "0.16") == 0, "handy model settings fixture") ||
@@ -73,6 +78,41 @@ int main(int argc, char **argv)
                      std::fabs(std::strtof(height, nullptr) - 0.16f) < 0.001f, "handy model preserves settings") ||
             !require(orca_session_object_count(handy.get()) > 0, "handy model contains geometry")) return 4;
     }
+    {
+        std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+            edited(orca_session_create(argv[2]), orca_session_destroy);
+        diagnostic_session = edited.get();
+        int facets = 0, edges = 0, parts = 0;
+        float volume = 0;
+        if (!require(orca_session_add_primitive(edited.get(), 1, 20, 20, 20) == 0, "simplify fixture") ||
+            !require(orca_session_mesh_stats(edited.get(), 0, &facets, &edges, &parts, &volume) == 0, "initial cylinder facets")) return 4;
+        const int before = facets;
+        if (!require(orca_session_simplify_mesh(edited.get(), 0, 64) > 0, "simplify native mesh") ||
+            !require(orca_session_mesh_stats(edited.get(), 0, &facets, &edges, &parts, &volume) == 0 && facets < before,
+                     "simplify reduces the actual mesh")) return 4;
+    }
+    {
+        std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+            edited(orca_session_create(argv[2]), orca_session_destroy);
+        diagnostic_session = edited.get();
+        if (!require(orca_session_add_primitive(edited.get(), 0, 20, 20, 20) == 0, "cut fixture") ||
+            !require(orca_session_cut_object_plane(edited.get(), 0, 0, 0, 10, 0, 0, 1, 1, 1) == 2,
+                     "plane cut retains two halves") ||
+            !require(orca_session_object_count(edited.get()) == 2, "cut output object count")) return 4;
+    }
+    {
+        std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+            edited(orca_session_create(argv[2]), orca_session_destroy);
+        diagnostic_session = edited.get();
+        if (!require(orca_session_add_primitive(edited.get(), 0, 20, 20, 20) == 0, "boolean A") ||
+            !require(orca_session_add_primitive(edited.get(), 0, 20, 20, 20) == 1, "boolean B") ||
+            !require(orca_session_rotate_object_z(edited.get(), 1, 15) == 0, "boolean rotated operand") ||
+            !require(orca_session_translate_object(edited.get(), 1, 8, 0, 4) == 0, "boolean overlapping operand") ||
+            !require(orca_session_mesh_boolean(edited.get(), 0, 1, 0, 1) == 0, "native mesh union") ||
+            !require(orca_session_object_count(edited.get()) == 1, "boolean removes the chosen operand")) return 4;
+    }
+    std::printf("PASS: native simplify, plane cut and overlapping mesh union\n");
+    diagnostic_session = session.get();
     int scope = -1;
     if (!require(orca_session_option_presentation("layer_height", &scope) >= 0 && scope == 0, "process option ownership") ||
         !require(orca_session_option_presentation("filament_type", &scope) >= 0 && scope == 1, "filament option ownership") ||

@@ -237,7 +237,7 @@ struct OrcaRootView: View {
                             VStack(spacing: 0) {
                                 plateStage
                                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                                    .allowsHitTesting(!isSlicing && !engine.presetsLoading && !engine.modelImporting)
+                                    .allowsHitTesting(!isSlicing && !engine.presetsLoading && !engine.sessionBusy)
                                 if mainTab == .preview && !engine.previewLayerHeights.isEmpty {
                                     previewLayerBar.padding(.horizontal, 12).padding(.vertical, 6)
                                         .background(OrcaTheme.panel)
@@ -252,7 +252,7 @@ struct OrcaRootView: View {
             }
         }
         // The C session belongs to the background slice until it finishes.
-        .disabled(isSlicing || engine.presetsLoading || engine.modelImporting)
+        .disabled(isSlicing || engine.presetsLoading || engine.sessionBusy)
         .overlay {
             if isSlicing {
                 VStack(spacing: 14) {
@@ -266,8 +266,8 @@ struct OrcaRootView: View {
                 .padding(24)
                 .background(OrcaTheme.panel)
                 .clipShape(RoundedRectangle(cornerRadius: 14))
-            } else if engine.modelImporting {
-                ProgressView("Importing…")
+            } else if engine.sessionBusy {
+                ProgressView(engine.sessionBusyMessage)
                     .padding(24)
                     .background(OrcaTheme.panel)
                     .clipShape(RoundedRectangle(cornerRadius: 14))
@@ -300,20 +300,27 @@ struct OrcaRootView: View {
                 .presentationDragIndicator(.visible)
                 .preferredColorScheme(.dark)
         }
-        .sheet(isPresented: $showPlateInspector) {
+        .sheet(isPresented: $showPlateInspector, onDismiss: { importPendingDocuments(); importCloudPresetsIfReady() }) {
             NavigationStack {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
                         plateTabsRow
                         objectPickerRow
+                        NavigationLink("Mesh tools") {
+                            MeshToolsPanel(engine: engine) {
+                                status = engine.lastMessage
+                                showPlateInspector = false
+                            }
+                        }.buttonStyle(.bordered).disabled(!engine.hasModel).accessibilityIdentifier("mesh-tools")
                         transformEditor
                         plateToolsRow
                     }.padding()
                 }
                 .navigationTitle("Objects and tools")
                 .navigationBarTitleDisplayMode(.inline)
-                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showPlateInspector = false } } }
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showPlateInspector = false }.disabled(engine.sessionBusy) } }
             }.presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
+                .interactiveDismissDisabled(engine.sessionBusy)
         }
         .sheet(isPresented: $showModelLibrary) { modelLibrary }
         .sheet(isPresented: $showPreviewControls) {
@@ -428,7 +435,7 @@ struct OrcaRootView: View {
         }
         .onChange(of: cloudAccount.busy) { busy in if !busy { importCloudPresetsIfReady() } }
         .onChange(of: cloudAccount.profileRevision) { _ in importCloudPresetsIfReady() }
-        .onChange(of: engine.modelImporting) { importing in if !importing { importPendingDocuments(); importCloudPresetsIfReady() } }
+        .onChange(of: engine.sessionBusy) { importing in if !importing { importPendingDocuments(); importCloudPresetsIfReady() } }
         .onChange(of: documents.pending.count) { _ in importPendingDocuments() }
         .onChange(of: engine.presetsLoading) { _ in importPendingDocuments() }
         .onChange(of: engine.startupFinished) { _ in
@@ -1971,7 +1978,7 @@ struct OrcaRootView: View {
                         .font(.subheadline.weight(.semibold)).lineLimit(1)
                         .frame(maxWidth: .infinity, minHeight: 44)
                 }.buttonStyle(.borderedProminent).tint(OrcaTheme.accent)
-                    .disabled(!engine.hasModel || isSlicing || engine.modelImporting)
+                    .disabled(!engine.hasModel || isSlicing || engine.sessionBusy)
                     .accessibilityIdentifier("slice-plate")
             }
         }.padding(.horizontal, 8))
@@ -3579,7 +3586,7 @@ struct OrcaRootView: View {
     private func importCloudPresetsIfReady() {
         guard let owner = cloudAccount.ownerID, cloudPresetRevision != cloudAccount.profileRevision,
               !cloudAccount.busy, !processingDocument, !isSlicing, !engine.presetsLoading,
-              !engine.modelImporting, engine.startupFinished, !editingModalPresented else { return }
+              !engine.sessionBusy, engine.startupFinished, !editingModalPresented else { return }
         let revision = cloudAccount.profileRevision
         let profiles = cloudAccount.profiles
         guard cloudAccount.lastSynced != nil else { return }
@@ -3592,7 +3599,7 @@ struct OrcaRootView: View {
     }
 
     private func importPendingDocuments() {
-        guard !processingDocument, !isSlicing, !engine.presetsLoading, !engine.modelImporting, engine.startupFinished, !editingModalPresented,
+        guard !processingDocument, !isSlicing, !engine.presetsLoading, !engine.sessionBusy, engine.startupFinished, !editingModalPresented,
               let document = documents.takeNext() else { return }
         processingDocument = true
         Task { @MainActor in
@@ -3629,6 +3636,103 @@ struct OrcaRootView: View {
         }
     }
 
+}
+
+private struct MeshToolsPanel: View {
+    @ObservedObject var engine: OrcaEngine
+    var onComplete: () -> Void
+    @State private var targetFaces = "0"
+    @State private var cutAxis = 2
+    @State private var cutPosition = "0"
+    @State private var keepUpper = true
+    @State private var keepLower = true
+    @State private var otherObject = -1
+    @State private var booleanOperation = 0
+    @State private var removeOther = true
+    @State private var failure: String?
+
+    private var hasSelection: Bool { engine.objectNames.indices.contains(engine.selectedObjectIndex) }
+    private var secondObject: Int {
+        if engine.objectNames.indices.contains(otherObject), otherObject != engine.selectedObjectIndex { return otherObject }
+        return engine.objectNames.indices.first(where: { $0 != engine.selectedObjectIndex }) ?? -1
+    }
+
+    var body: some View {
+        Form {
+            Section("Selection") {
+                Picker("Object", selection: $engine.selectedObjectIndex) {
+                    Text("All objects").tag(-1)
+                    ForEach(Array(engine.objectNames.enumerated()), id: \.offset) { i, name in Text(name).tag(i) }
+                }
+                if !hasSelection { Text("Select one object for simplify, cut and boolean operations.").font(.caption) }
+            }
+            Section("Repair") {
+                Button(hasSelection ? "Repair selected object" : "Repair all objects") { run(.repair) }.accessibilityIdentifier("repair-mesh")
+                Text("Repair uses the engine's mesh repair tools. It cannot reconstruct every damaged model.").font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Simplify") {
+                TextField("Triangles per part (0 = half)", text: $targetFaces).keyboardType(.numberPad)
+                Button("Simplify selected object") {
+                    guard let target = Int(targetFaces), target == 0 || (target >= 4 && target <= Int(Int32.max)) else {
+                        failure = "Enter 0 or a triangle count of at least 4."; return
+                    }
+                    run(.simplify(target))
+                }
+            }.disabled(!hasSelection)
+            Section("Cut") {
+                Picker("Plane axis", selection: $cutAxis) { Text("X").tag(0); Text("Y").tag(1); Text("Z").tag(2) }
+                    .pickerStyle(.segmented)
+                TextField("Plane position (mm)", text: $cutPosition).keyboardType(.numbersAndPunctuation)
+                Toggle("Keep upper half", isOn: $keepUpper)
+                Toggle("Keep lower half", isOn: $keepLower)
+                Button("Cut selected object") {
+                    guard let position = Float(cutPosition), position.isFinite else { failure = "Enter a valid plane position."; return }
+                    run(.cut(position: position, axis: cutAxis, upper: keepUpper, lower: keepLower))
+                }.disabled(!keepUpper && !keepLower)
+            }.disabled(!hasSelection)
+            Section("Boolean") {
+                Picker("Second object", selection: Binding(get: { secondObject }, set: { otherObject = $0 })) {
+                    ForEach(Array(engine.objectNames.enumerated()).filter { $0.offset != engine.selectedObjectIndex }, id: \.offset) { i, name in
+                        Text(name).tag(i)
+                    }
+                }
+                Picker("Operation", selection: $booleanOperation) {
+                    Text("Union").tag(0); Text("Subtract").tag(1); Text("Intersect").tag(2)
+                }.pickerStyle(.segmented)
+                Toggle("Remove second object", isOn: $removeOther)
+                Button("Apply boolean") { run(.boolean(other: secondObject, operation: booleanOperation, removeOther: removeOther)) }
+                Text("Subtract removes the second object's volume from the selected object.").font(.caption).foregroundStyle(.secondary)
+            }.disabled(!hasSelection || engine.objectCount < 2)
+        }
+        .disabled(engine.sessionBusy)
+        .navigationTitle("Mesh tools").navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(engine.sessionBusy)
+        .overlay {
+            if engine.sessionBusy {
+                ProgressView(engine.sessionBusyMessage).padding(24)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+            }
+        }
+        .onAppear { setCutMiddle() }
+        .onChange(of: cutAxis) { _ in setCutMiddle() }
+        .onChange(of: engine.selectedObjectIndex) { _ in setCutMiddle() }
+        .alert("Mesh operation failed", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: { Text(failure ?? "") }
+    }
+
+    private func setCutMiddle() {
+        guard engine.objectMeshes.indices.contains(engine.selectedObjectIndex) else { return }
+        let mesh = engine.objectMeshes[engine.selectedObjectIndex]
+        cutPosition = String(format: "%.3f", (mesh.min[cutAxis] + mesh.max[cutAxis]) * 0.5)
+    }
+
+    private func run(_ edit: OrcaEngine.MeshEdit) {
+        Task { @MainActor in
+            if await engine.editMesh(edit) { onComplete() }
+            else { failure = engine.lastMessage }
+        }
+    }
 }
 
 private struct OrcaLogoMark: View {
