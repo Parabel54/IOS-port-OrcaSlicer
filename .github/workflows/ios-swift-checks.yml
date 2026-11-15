@@ -1,0 +1,28 @@
+name: iOS Swift and API checks
+on:
+  pull_request:
+    paths:
+      - 'ios/**'
+      - 'src/ios/orca_slice_c_api.h'
+      - 'scripts/check_ios_swift.sh'
+      - 'scripts/tests/test_ios*.py'
+      - '.github/workflows/ios-swift-checks.yml'
+concurrency:
+  group: ios-swift-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: macos-15
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk: [iphoneos, iphonesimulator]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check project generation and preset layout
+        run: python3 -m unittest discover -s scripts/tests -p 'test_ios*.py' -v
+      - name: Check Swift, C interface and host fixtures
+        run: bash scripts/check_ios_swift.sh "${{ matrix.sdk }}"

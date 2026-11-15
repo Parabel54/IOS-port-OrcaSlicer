@@ -48,7 +48,7 @@ General desktop Python plugin packages, their dependencies and wxWidgets host AP
 
 ## Platform flags
 
-The UI target supports iPhone and iPad with separate iPhone and simulator engine paths. An absent device engine never falls back to the simulator archive. `ORCA_LINKED` is SDK-specific and generated only for the corresponding available archive. CI requires a real archive, builds both SDKs and audits each final app's Mach-O platform, dynamic dependencies and bundled resources. About displays the build revision for installation diagnosis.
+The UI target supports iPhone and iPad with separate iPhone and simulator engine paths. An absent device engine never falls back to the simulator archive. `ORCA_LINKED` is SDK-specific and generated only for the corresponding available archive. CI requires a real archive, builds both SDKs and audits each final app's Mach-O platform, dynamic dependencies and bundled resources. About displays the build revision for installation diagnosis. An independent Swift/API workflow checks both SDK targets and host protocol fixtures while native engine builds are running.
 
 
 ## Model library and transforms
