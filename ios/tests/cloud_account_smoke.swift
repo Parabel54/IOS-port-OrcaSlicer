@@ -94,7 +94,7 @@ struct CloudAccountSmoke {
         authentication.suspend = true
         let canceled = OrcaCloudAccount(api: api, credentials: credentials, authentication: authentication)
         let canceledTask = Task { await canceled.signIn(provider: "google") }
-        for _ in 0..<100 where authentication.pending == nil { try await Task.sleep(nanoseconds: 1_000_000) }
+        for _ in 0..<2000 where authentication.pending == nil { try await Task.sleep(nanoseconds: 1_000_000) }
         precondition(authentication.pending != nil)
         canceled.cancelSignIn()
         await canceledTask.value
@@ -109,11 +109,52 @@ struct CloudAccountSmoke {
         }
         let loggingOut = OrcaCloudAccount(api: api, credentials: credentials, authentication: FixtureAuthentication())
         let login = Task { await loggingOut.signIn(provider: "google") }
-        for _ in 0..<100 where !fetchingPrinters { try await Task.sleep(nanoseconds: 1_000_000) }
+        for _ in 0..<2000 where !fetchingPrinters { try await Task.sleep(nanoseconds: 1_000_000) }
         precondition(fetchingPrinters && loggingOut.signedIn)
         await loggingOut.signOut()
         await login.value
         precondition(!loggingOut.signedIn && loggingOut.printers.isEmpty && stored == nil && !loggingOut.busy)
+        stored = nil
+        AccountFixtureProtocol.handler = { request in
+            if request.url!.path.hasSuffix("settings") {
+                return (200, Data(#"{"external":{"google":true,"github":true,"email":true,"phone":true},"saml_enabled":true}"#.utf8), 0)
+            }
+            return (200, request.url!.path.hasSuffix("token") ? token : printerList, 0)
+        }
+        let email = OrcaCloudAccount(api: api, credentials: credentials, authentication: FixtureAuthentication())
+        await email.loadLoginMethods()
+        precondition(email.emailEnabled && email.phoneEnabled && email.ssoEnabled && email.providers.count == 2)
+        await email.signIn(email: "test@example.invalid", password: "fixture-password")
+        precondition(email.signedIn && !stored!.contains("fixture-password"))
+        stored = nil
+        AccountFixtureProtocol.handler = { request in
+            if request.url!.path.hasSuffix("otp") { return (200, Data("{}".utf8), 0) }
+            if request.url!.path.hasSuffix("verify") { return (200, token, 0) }
+            return (200, printerList, 0)
+        }
+        let sms = OrcaCloudAccount(api: api, credentials: credentials, authentication: FixtureAuthentication())
+        await sms.requestSMS(phone: "+12025550123")
+        precondition(sms.pendingPhone != nil && !sms.signedIn && stored == nil)
+        await sms.verifyCode("123456")
+        precondition(sms.signedIn && sms.pendingPhone == nil && stored != nil)
+
+        stored = nil
+        let unverified = Data(#"{"access_token":"provisional-token","refresh_token":"provisional-refresh","expires_at":4102444800,"user":{"id":"user-one","factors":[{"id":"00000000-0000-4000-8000-000000000001","factor_type":"totp","status":"verified"}]}}"#.utf8)
+        let verified = Data(#"{"access_token":"e30.eyJhYWwiOiJhYWwyIn0.signature","refresh_token":"verified-refresh","expires_at":4102444800}"#.utf8)
+        AccountFixtureProtocol.handler = { request in
+            if request.url!.path.hasSuffix("token") { return (200, unverified, 0) }
+            if request.url!.path.hasSuffix("challenge") { return (200, Data(#"{"id":"challenge-1"}"#.utf8), 0) }
+            if request.url!.path.hasSuffix("verify") { return (200, verified, 0) }
+            return (200, printerList, 0)
+        }
+        let mfa = OrcaCloudAccount(api: api, credentials: credentials, authentication: FixtureAuthentication())
+        await mfa.signIn(provider: "google")
+        precondition(mfa.needsMFACode && !mfa.signedIn && stored == nil)
+        await mfa.verifyCode("123456")
+        precondition(mfa.signedIn && !mfa.needsMFACode && stored!.contains("verified-refresh"))
+        let mfaRestored = OrcaCloudAccount(api: api, credentials: credentials, authentication: FixtureAuthentication())
+        precondition(mfaRestored.signedIn)
+        print("PASS: native login capabilities, email/SMS flows and no session persistence before MFA verification")
         print("PASS: account restore/sync, token rotation, 401 retry, transient failure, expired-session cleanup, cancel and logout races")
     }
 }

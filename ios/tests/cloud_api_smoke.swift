@@ -99,6 +99,61 @@ struct CloudAPISmoke {
             return (204, Data())
         }
         try await api.logout(accessToken: "fixture-access")
+        CloudFixtureProtocol.handler = { request in
+            precondition(request.url!.path == "/auth/v1/settings")
+            return (200, Data(#"{"external":{"apple":true,"facebook":true,"github":true,"google":true,"email":true,"phone":false,"discord":false},"saml_enabled":false}"#.utf8))
+        }
+        let methods = try await api.authMethods()
+        precondition(Set(methods.providers.map(\.id)) == ["apple", "facebook", "github", "google"])
+        precondition(methods.external["email"] == true && methods.external["phone"] == false)
+        for provider in methods.providers {
+            let url = try pkce.authorizationURL(provider: provider.id)
+            precondition(URLComponents(url: url, resolvingAgainstBaseURL: false)!.queryItems!.first?.value == provider.id)
+        }
+        let simpleSession = Data(#"{"access_token":"fixture-access","refresh_token":"fixture-refresh","expires_in":3600,"user":{"id":"account-1"}}"#.utf8)
+        CloudFixtureProtocol.handler = { request in
+            let body = try JSONSerialization.jsonObject(with: requestBody(request)) as! [String: String]
+            precondition(body["email"] == "person@example.invalid" && body["password"] == "fixture-password")
+            precondition(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!.first?.value == "password")
+            return (200, simpleSession)
+        }
+        _ = try await api.password(email: "person@example.invalid", password: "fixture-password")
+        CloudFixtureProtocol.handler = { request in
+            let body = try JSONSerialization.jsonObject(with: requestBody(request)) as! [String: Any]
+            precondition(request.url!.path == "/auth/v1/otp" && body["phone"] as? String == "+12025550123")
+            precondition(body["create_user"] as? Bool == false && body["channel"] as? String == "sms")
+            return (200, Data("{}".utf8))
+        }
+        try await api.sendSMS(phone: "+12025550123")
+        CloudFixtureProtocol.handler = { request in
+            let body = try JSONSerialization.jsonObject(with: requestBody(request)) as! [String: String]
+            precondition(request.url!.path == "/auth/v1/verify" && body["type"] == "sms" && body["token"] == "123456")
+            return (200, simpleSession)
+        }
+        _ = try await api.verifySMS(phone: "+12025550123", code: "123456")
+        CloudFixtureProtocol.handler = { request in
+            let body = try JSONSerialization.jsonObject(with: requestBody(request)) as! [String: Any]
+            precondition(request.url!.path == "/auth/v1/sso" && body["domain"] as? String == "example.invalid")
+            precondition(body["code_challenge"] as? String == pkce.challenge && body["skip_http_redirect"] as? Bool == true)
+            return (200, Data(#"{"url":"https://idp.example.invalid/authorize"}"#.utf8))
+        }
+        let sso = try await api.singleSignOn(domain: "example.invalid", pkce: pkce)
+        precondition(sso.host == "idp.example.invalid")
+        let factor = OrcaMFAFactor(id: "00000000-0000-4000-8000-000000000001", factor_type: "totp", status: "verified", friendly_name: nil)
+        CloudFixtureProtocol.handler = { request in
+            precondition(request.url!.path == "/auth/v1/factors/\(factor.id)/challenge")
+            precondition(request.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-access")
+            return (200, Data(#"{"id":"challenge-1"}"#.utf8))
+        }
+        let challenge = try await api.challenge(factor: factor, session: account)
+        CloudFixtureProtocol.handler = { request in
+            let body = try JSONSerialization.jsonObject(with: requestBody(request)) as! [String: String]
+            precondition(request.url!.path == "/auth/v1/factors/\(factor.id)/verify" && body["challenge_id"] == challenge && body["code"] == "123456")
+            return (200, Data(#"{"access_token":"mfa-access","refresh_token":"mfa-refresh","expires_in":3600}"#.utf8))
+        }
+        let mfa = try await api.verifyMFA(factor: factor, challenge: challenge, code: "123456", session: account)
+        precondition(mfa.user.id == account.user.id && mfa.refresh_token == "mfa-refresh")
+        print("PASS: enabled-provider discovery, email/password, SMS, organization SSO and MFA protocol requests")
         print("PASS: native PKCE, callback validation, token exchange/rotation, absolute expiry, printer sync and HTTP failures")
     }
 }

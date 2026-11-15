@@ -11,7 +11,7 @@ enum OrcaCloudEndpoints {
 }
 
 enum OrcaCloudError: LocalizedError, Equatable {
-    case invalidResponse, http(Int), invalidCallback, cancelled, timedOut, storage, unavailable
+    case invalidResponse, http(Int), invalidCallback, cancelled, timedOut, storage, unavailable, verificationUnavailable
     var errorDescription: String? {
         switch self {
         case .invalidResponse: return String(localized: "Orca Cloud returned an invalid response.")
@@ -20,6 +20,7 @@ enum OrcaCloudError: LocalizedError, Equatable {
         case .cancelled: return String(localized: "Sign-in was canceled.")
         case .timedOut: return String(localized: "Sign-in timed out. Try again.")
         case .storage: return String(localized: "The cloud session could not be saved in Keychain.")
+        case .verificationUnavailable: return String(localized: "This account requires a verification method that is not available in the native app. Use a configured authenticator or SMS factor.")
         case .unavailable: return String(localized: "The sign-in browser or local callback port is unavailable. Close any other sign-in and try again.")
         }
     }
@@ -47,7 +48,7 @@ struct OrcaPKCE {
     }
     var challenge: String { Data(SHA256.hash(data: Data(verifier.utf8))).base64URL }
     func authorizationURL(provider: String) throws -> URL {
-        guard ["google", "github"].contains(provider) else { throw OrcaCloudError.unavailable }
+        guard !provider.isEmpty, provider.count <= 128, provider.unicodeScalars.allSatisfy({ (97...122).contains($0.value) || (48...57).contains($0.value) || "_-:.".unicodeScalars.contains($0) }) else { throw OrcaCloudError.unavailable }
         var redirect = URLComponents(string: "http://localhost:\(port)/callback")!
         redirect.queryItems = [URLQueryItem(name: "orca_state", value: state)]
         var authorization = URLComponents(url: OrcaCloudEndpoints.auth.appendingPathComponent("auth/v1/authorize"), resolvingAgainstBaseURL: false)!
@@ -90,11 +91,13 @@ struct OrcaCloudSession: Codable {
         let id: String
         let email: String?
         let user_metadata: [String: String]?
+        let factors: [OrcaMFAFactor]?
         // Metadata may include booleans/nested identities. Read only display fields.
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             id = try container.decode(String.self, forKey: .id)
             email = try container.decodeIfPresent(String.self, forKey: .email)
+            factors = try container.decodeIfPresent([OrcaMFAFactor].self, forKey: .factors)
             if let metadata = try? container.nestedContainer(keyedBy: DisplayKey.self, forKey: .user_metadata) {
                 var values: [String: String] = [:]
                 for key in metadata.allKeys {
@@ -117,6 +120,16 @@ struct OrcaCloudSession: Codable {
     let user: User
     var displayName: String {
         user.user_metadata?["display_name"] ?? user.user_metadata?["full_name"] ?? user.user_metadata?["name"] ?? user.email ?? String(localized: "Orca Cloud account")
+    }
+    var needsMFA: Bool {
+        guard user.factors?.contains(where: { $0.status == "verified" }) == true else { return false }
+        let components = access_token.split(separator: ".")
+        guard components.count == 3 else { return true }
+        var payload = String(components[1]).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        payload += String(repeating: "=", count: (4 - payload.count % 4) % 4)
+        guard let data = Data(base64Encoded: payload),
+              let claims = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return true }
+        return claims["aal"] as? String != "aal2"
     }
     var expiry: Date {
         Date(timeIntervalSince1970: expires_at ?? 0)
@@ -142,9 +155,87 @@ struct OrcaCloudPrinter: Decodable, Identifiable, Equatable {
     var jobState: String? { status_snapshot?.status?.job?.state }
 }
 
+struct OrcaLoginProvider: Identifiable, Equatable {
+    let id: String
+    var name: String {
+        switch id {
+        case "google": return "Google"
+        case "github": return "GitHub"
+        case "apple": return "Apple"
+        case "azure": return "Microsoft"
+        case "linkedin", "linkedin_oidc": return "LinkedIn"
+        case "gitlab": return "GitLab"
+        case "keycloak": return "Keycloak"
+        case "workos": return "WorkOS"
+        default: return id.replacingOccurrences(of: "_", with: " ").capitalized
+        }
+    }
+}
+
+struct OrcaAuthMethods: Decodable {
+    let external: [String: Bool]
+    let saml_enabled: Bool?
+    var providers: [OrcaLoginProvider] {
+        external.filter { $0.value && $0.key != "email" && $0.key != "phone" }
+            .map { OrcaLoginProvider(id: $0.key) }.sorted { $0.name < $1.name }
+    }
+}
+
+struct OrcaMFAFactor: Codable {
+    let id: String
+    let factor_type: String
+    let status: String
+    let friendly_name: String?
+}
+
 struct OrcaCloudAPI {
     let session: URLSession
     init(session: URLSession = .shared) { self.session = session }
+
+    func authMethods() async throws -> OrcaAuthMethods {
+        let request = URLRequest(url: OrcaCloudEndpoints.auth.appendingPathComponent("auth/v1/settings"))
+        return try JSONDecoder().decode(OrcaAuthMethods.self, from: await perform(request))
+    }
+    func password(email: String, password: String) async throws -> OrcaCloudSession {
+        try await token(grant: "password", body: ["email": email, "password": password])
+    }
+    func sendSMS(phone: String) async throws {
+        _ = try await authenticatedPost("auth/v1/otp", body: ["phone": phone, "create_user": false, "channel": "sms"])
+    }
+    func verifySMS(phone: String, code: String) async throws -> OrcaCloudSession {
+        try decodeSession(await authenticatedPost("auth/v1/verify", body: ["phone": phone, "token": code, "type": "sms"]))
+    }
+    func singleSignOn(domain: String, pkce: OrcaPKCE) async throws -> URL {
+        let redirect = "http://localhost:\(pkce.port)/callback?orca_state=\(pkce.state)"
+        let data = try await authenticatedPost("auth/v1/sso", body: ["domain": domain, "redirect_to": redirect,
+            "code_challenge": pkce.challenge, "code_challenge_method": "s256", "skip_http_redirect": true])
+        struct Response: Decodable { let url: String }
+        let response = try JSONDecoder().decode(Response.self, from: data)
+        guard let url = URL(string: response.url), url.scheme == "https", url.host != nil,
+              url.user == nil, url.password == nil else { throw OrcaCloudError.invalidResponse }
+        return url
+    }
+    func challenge(factor: OrcaMFAFactor, session: OrcaCloudSession) async throws -> String {
+        guard UUID(uuidString: factor.id) != nil else { throw OrcaCloudError.invalidResponse }
+        let data = try await authenticatedPost("auth/v1/factors/\(factor.id)/challenge", body: factor.factor_type == "phone" ? ["channel": "sms"] : [:], accessToken: session.access_token)
+        struct Response: Decodable { let id: String }
+        let challenge = try JSONDecoder().decode(Response.self, from: data).id
+        guard !challenge.isEmpty else { throw OrcaCloudError.invalidResponse }
+        return challenge
+    }
+    func verifyMFA(factor: OrcaMFAFactor, challenge: String, code: String, session: OrcaCloudSession) async throws -> OrcaCloudSession {
+        guard UUID(uuidString: factor.id) != nil else { throw OrcaCloudError.invalidResponse }
+        let data = try await authenticatedPost("auth/v1/factors/\(factor.id)/verify", body: ["challenge_id": challenge, "code": code], accessToken: session.access_token)
+        return try decodeSession(data, fallbackUser: session.user)
+    }
+    private func authenticatedPost(_ path: String, body: [String: Any], accessToken: String? = nil) async throws -> Data {
+        var request = URLRequest(url: OrcaCloudEndpoints.auth.appendingPathComponent(path))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let accessToken { request.setValue("Bearer " + accessToken, forHTTPHeaderField: "Authorization") }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        return try await perform(request)
+    }
 
     func exchange(code: String, verifier: String) async throws -> OrcaCloudSession {
         try await token(grant: "pkce", body: ["auth_code": code, "code_verifier": verifier])
@@ -161,16 +252,25 @@ struct OrcaCloudAPI {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(body)
         let data = try await perform(request)
-        let decoded = try JSONDecoder().decode(OrcaCloudSession.self, from: data)
-        guard !decoded.access_token.isEmpty, !decoded.refresh_token.isEmpty, !decoded.user.id.isEmpty else {
-            throw OrcaCloudError.invalidResponse
+        return try decodeSession(data)
+    }
+    private func decodeSession(_ data: Data, fallbackUser: OrcaCloudSession.User? = nil) throws -> OrcaCloudSession {
+        struct Response: Decodable {
+            let access_token: String
+            let refresh_token: String
+            let expires_at: Double?
+            let expires_in: Double?
+            let user: OrcaCloudSession.User?
         }
-        // Persist absolute expiry; expires_in alone would reset its lifetime on relaunch.
+        let decoded = try JSONDecoder().decode(Response.self, from: data)
+        guard !decoded.access_token.isEmpty, !decoded.refresh_token.isEmpty,
+              let user = decoded.user ?? fallbackUser, !user.id.isEmpty else { throw OrcaCloudError.invalidResponse }
         let absolute = decoded.expires_at ?? Date().timeIntervalSince1970 + (decoded.expires_in ?? 0)
         guard absolute.isFinite else { throw OrcaCloudError.invalidResponse }
         return OrcaCloudSession(access_token: decoded.access_token, refresh_token: decoded.refresh_token,
-                                expires_at: absolute, expires_in: decoded.expires_in, user: decoded.user)
+                                expires_at: absolute, expires_in: decoded.expires_in, user: user)
     }
+
     func printers(accessToken: String) async throws -> [OrcaCloudPrinter] {
         var request = URLRequest(url: OrcaCloudEndpoints.api.appendingPathComponent("api/v1/printers"))
         request.setValue("Bearer " + accessToken, forHTTPHeaderField: "Authorization")

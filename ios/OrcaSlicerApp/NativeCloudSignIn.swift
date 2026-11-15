@@ -10,10 +10,21 @@ final class NativeCloudSignIn: NSObject, ASWebAuthenticationPresentationContextP
     private var continuation: CheckedContinuation<(code: String, verifier: String), Error>?
     private var timeout: Task<Void, Never>?
 
+    private var flowID: UUID?
+
     func signIn(provider: String) async throws -> (code: String, verifier: String) {
+        try await authorize { try $0.authorizationURL(provider: provider) }
+    }
+
+    func signInSSO(domain: String) async throws -> (code: String, verifier: String) {
+        try await authorize { try await OrcaCloudAPI().singleSignOn(domain: domain, pkce: $0) }
+    }
+
+    private func authorize(makeURL: @escaping (OrcaPKCE) async throws -> URL) async throws -> (code: String, verifier: String) {
         guard continuation == nil else { throw OrcaCloudError.unavailable }
         let pkce = try OrcaPKCE()
-        let url = try pkce.authorizationURL(provider: provider)
+        let identifier = UUID()
+        flowID = identifier
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 self.continuation = continuation
@@ -21,42 +32,48 @@ final class NativeCloudSignIn: NSObject, ASWebAuthenticationPresentationContextP
                     let server = try OrcaOAuthLoopbackServer(pkce: pkce)
                     self.server = server
                     server.start(onReady: { [weak self] in
-                        Task { @MainActor in self?.openBrowser(url: url) }
+                        Task { @MainActor in
+                            do {
+                                let url = try await makeURL(pkce)
+                                self?.openBrowser(url: url, identifier: identifier)
+                            } catch { self?.finish(.failure(error), identifier: identifier) }
+                        }
                     }, onCode: { [weak self] code in
-                        Task { @MainActor in self?.finish(.success((code, pkce.verifier))) }
+                        Task { @MainActor in self?.finish(.success((code, pkce.verifier)), identifier: identifier) }
                     }, onFailure: { [weak self] in
-                        Task { @MainActor in self?.finish(.failure(OrcaCloudError.unavailable)) }
+                        Task { @MainActor in self?.finish(.failure(OrcaCloudError.unavailable), identifier: identifier) }
                     })
                     timeout = Task { [weak self] in
                         do { try await Task.sleep(nanoseconds: 300_000_000_000) }
                         catch { return }
-                        self?.finish(.failure(OrcaCloudError.timedOut))
+                        self?.finish(.failure(OrcaCloudError.timedOut), identifier: identifier)
                     }
-                } catch { finish(.failure(error)) }
+                } catch { finish(.failure(error), identifier: identifier) }
             }
         } onCancel: {
-            Task { @MainActor in self.cancel() }
+            Task { @MainActor in self.finish(.failure(OrcaCloudError.cancelled), identifier: identifier) }
         }
     }
 
-    func cancel() { finish(.failure(OrcaCloudError.cancelled)) }
+    func cancel() {
+        if let flowID { finish(.failure(OrcaCloudError.cancelled), identifier: flowID) }
+    }
 
-    private func openBrowser(url: URL) {
-        guard continuation != nil else { return }
-        // Match the desktop loopback redirect already registered with the service;
-        // no unregistered iOS URL scheme is substituted for that redirect.
+    private func openBrowser(url: URL, identifier: UUID) {
+        guard flowID == identifier, continuation != nil else { return }
         let browser = ASWebAuthenticationSession(url: url, callbackURLScheme: nil) { [weak self] _, _ in
-            Task { @MainActor in self?.finish(.failure(OrcaCloudError.cancelled)) }
+            Task { @MainActor in self?.finish(.failure(OrcaCloudError.cancelled), identifier: identifier) }
         }
         browser.presentationContextProvider = self
         browser.prefersEphemeralWebBrowserSession = false
         self.browser = browser
-        if !browser.start() { finish(.failure(OrcaCloudError.unavailable)) }
+        if !browser.start() { finish(.failure(OrcaCloudError.unavailable), identifier: identifier) }
     }
 
-    private func finish(_ result: Result<(code: String, verifier: String), Error>) {
-        guard let continuation else { return }
-        self.continuation = nil // Browser cancellation must not complete a consumed flow.
+    private func finish(_ result: Result<(code: String, verifier: String), Error>, identifier: UUID) {
+        guard flowID == identifier, let continuation else { return }
+        self.continuation = nil
+        flowID = nil
         timeout?.cancel()
         timeout = nil
         server?.cancel()
