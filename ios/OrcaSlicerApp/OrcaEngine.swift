@@ -1862,7 +1862,8 @@ final class OrcaEngine: ObservableObject {
                     paths.append(GCodePathGeometry.Segment(points: [start, end],
                         feature: feature, width: move.width, feedrate: move.feedrate))
                 }
-                let zs = paths.flatMap { $0.points.map { $0.z } }
+                // Parking and homing travels are not printable layer heights.
+                let zs = records.filter { $0.travel == 0 }.flatMap { [$0.start_z, $0.end_z] }
                 let feeds = paths.map { $0.feedrate }.filter { $0 > 0 }
                 let path = GCodePathGeometry(segments: paths,
                     zMin: zs.min() ?? 0, zMax: zs.max() ?? 0.2,
