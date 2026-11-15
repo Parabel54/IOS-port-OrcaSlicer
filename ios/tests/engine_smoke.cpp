@@ -51,6 +51,15 @@ int main(int argc, char **argv)
                      std::fabs((b[1]+b[4])*0.5-center_y) < 0.01, "scaled dimensions and stable center") ||
             !require(orca_session_scale_object_axes(shape.get(), 0, -1, 1, 1) != 0, "reject negative scale")) return 4;
     }
+    {
+        std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+            small(orca_session_create(argv[2]), orca_session_destroy);
+        float b[6]{};
+        if (!require(orca_session_add_primitive(small.get(), 0, 0.2f, 0.3f, 0.4f) == 0, "small primitive cube") ||
+            !require(orca_session_model_bounds(small.get(), b, b+1, b+2, b+3, b+4, b+5) == 0, "small cube bounds") ||
+            !require(std::fabs(b[3]-b[0]-0.2f) < 0.001f && std::fabs(b[4]-b[1]-0.3f) < 0.001f &&
+                     std::fabs(b[5]-b[2]-0.4f) < 0.001f, "primitive dimensions are not clamped by legacy text plate limits")) return 4;
+    }
     for (const char *file : {"3DBenchy.drc", "calicat.drc", "OrcaCube_v2.drc", "OrcaPlug_v2.drc",
              "OrcaSliced.3mf", "OrcaBadge.3mf", "OrcaToleranceTest.drc", "ksr_fdmtest_v4.drc",
              "Voron_Design_Cube_v7.drc", "Stanford_Bunny.drc", "Orca_stringhell.drc"}) {

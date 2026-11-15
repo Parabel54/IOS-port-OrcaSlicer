@@ -2782,7 +2782,6 @@ int orca_session_add_primitive(orca_session_t *s, int kind, float x, float y, fl
     if (!s || kind < 0 || kind > 5 || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) ||
         x <= 0 || y <= 0 || z <= 0)
         return -1;
-    if (kind == 0) return orca_session_add_box(s, "Cube", x, y, z);
     s->clear_error();
     try {
         ensure_default_config(s);
@@ -2792,7 +2791,8 @@ int orca_session_add_primitive(orca_session_t *s, int kind, float x, float y, fl
         };
         TriangleMesh mesh;
         const double radius = 0.5 * x;
-        if (kind == 1 || kind == 5) mesh = TriangleMesh(its_make_cylinder(radius, z, step(radius)));
+        if (kind == 0) mesh = TriangleMesh(its_make_cube(x, y, z));
+        else if (kind == 1 || kind == 5) mesh = TriangleMesh(its_make_cylinder(radius, z, step(radius)));
         else if (kind == 2) mesh = TriangleMesh(its_make_sphere(radius, step(radius)));
         else if (kind == 3) mesh = TriangleMesh(its_make_cone(radius, z, step(radius)));
         else {
