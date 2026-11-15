@@ -330,15 +330,15 @@ struct OrcaRootView: View {
             }
         }
         .onAppear {
-            if ProcessInfo.processInfo.arguments.contains("--test-document-import"), !didTestImport {
-                didTestImport = true
-                requestDocumentPicker(.model(append: false))
-            }
             importPendingDocuments()
+            testDocumentPickerWhenReady()
         }
         .onChange(of: documents.pending.count) { _ in importPendingDocuments() }
         .onChange(of: engine.presetsLoading) { _ in importPendingDocuments() }
-        .onChange(of: engine.startupFinished) { _ in importPendingDocuments() }
+        .onChange(of: engine.startupFinished) { _ in
+            importPendingDocuments()
+            testDocumentPickerWhenReady()
+        }
         .onChange(of: isSlicing) { _ in importPendingDocuments() }
         .alert("Import failed", isPresented: Binding(get: { !documents.errorMessage.isEmpty }, set: { if !$0 { documents.errorMessage = "" } })) {
             Button("OK", role: .cancel) { documents.errorMessage = "" }
@@ -4399,6 +4399,16 @@ struct OrcaRootView: View {
             #endif
         } else {
             status = err?.localizedDescription ?? engine.lastMessage
+        }
+    }
+
+    private func testDocumentPickerWhenReady() {
+        guard ProcessInfo.processInfo.arguments.contains("--test-document-import"), !didTestImport,
+              engine.startupFinished, !engine.presetsLoading else { return }
+        didTestImport = true
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            requestDocumentPicker(.model(append: false))
         }
     }
 

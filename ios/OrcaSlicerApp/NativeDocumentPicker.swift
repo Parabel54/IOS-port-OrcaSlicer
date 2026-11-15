@@ -15,11 +15,11 @@ struct NativeDocumentPicker: UIViewControllerRepresentable {
         picker.allowsMultipleSelection = false
         picker.delegate = context.coordinator
         if ProcessInfo.processInfo.arguments.contains("--test-document-import"), !settingsOnly {
-            picker.testPresentation = { [weak picker] in
+            picker.testPresentation = {
                 let marker = FileManager.default.temporaryDirectory.appendingPathComponent("orca-document-picker-smoke.txt")
                 try? "PASS: native document picker presented".write(to: marker, atomically: true, encoding: .utf8)
                 let fixture = StartupRecovery().dataDirectory.deletingLastPathComponent().appendingPathComponent("ios-import-smoke.3mf")
-                picker?.dismiss(animated: false) { context.coordinator.completion(fixture) }
+                DispatchQueue.main.async { context.coordinator.completion(fixture) }
             }
         }
         return picker
@@ -41,7 +41,7 @@ private final class ImportDocumentPickerController: UIDocumentPickerViewControll
     var testPresentation: (() -> Void)?
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        guard presentingViewController != nil, let testPresentation else { return }
+        guard view.window != nil, let testPresentation else { return }
         self.testPresentation = nil
         testPresentation()
     }
