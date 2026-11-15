@@ -33,6 +33,8 @@ jobs:
           submodules: recursive
       - name: Check project generation
         run: python3 -m unittest discover -s scripts/tests -p test_ios_project.py -v
+      - name: Check Swift and C interface
+        run: bash scripts/check_ios_swift.sh "${{ matrix.sdk }}"
       - name: Install build tools
         run: brew install cmake autoconf automake libtool pkg-config
       - name: Restore SDK dependencies
