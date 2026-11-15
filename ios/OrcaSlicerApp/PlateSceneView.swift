@@ -63,6 +63,7 @@ struct PlateSceneView: UIViewRepresentable {
     var selectedObjectIndex: Int = -1
     var gcodeNode: SCNNode? = nil
     var showGCode: Bool = false
+    var showShell: Bool = false
     var bedSize: SIMD2<Float> = SIMD2(220, 220)
     /// Optional machine bed texture / cover PNG path (from system profiles)
     var bedTexturePath: String? = nil
@@ -312,7 +313,10 @@ struct PlateSceneView: UIViewRepresentable {
             context.coordinator.lastPreviewID = previewID
             context.coordinator.lastShowGCode = showGCode
         }
-        content.childNode(withName: "model", recursively: false)?.isHidden = showGCode
+        if let model = content.childNode(withName: "model", recursively: false) {
+            model.isHidden = showGCode && !showShell
+            model.opacity = showGCode ? 0.15 : 1
+        }
 
         // Paint overlay (support/seam/mmu/fuzzy facets)
         content.childNode(withName: "paintOverlay", recursively: false)?.removeFromParentNode()
@@ -1138,6 +1142,7 @@ struct GCodePathGeometry {
     }
 
     struct Metrics: Equatable {
+        var massPerMM: Float = 0
         var actualSpeed: Float = 0
         var flow: Float = 0
         var actualFlow: Float = 0
@@ -1175,7 +1180,11 @@ struct GCodePathGeometry {
     /// Default line width when WIDTH comment missing (from nozzle / line_width)
     var defaultWidth: Float = 0.45
     var metricRanges: [ColorMode: ClosedRange<Float>] = [:]
-    var features: [String] { Array(Set(segments.filter { $0.kind == .extrude }.map(\.feature))).sorted() }
+    var featureNames: [String] = []
+    var toolIDs: [Int] = []
+    var filamentIDs: [Int] = []
+    var centerOfGravity: SCNVector3?
+    var features: [String] { featureNames }
     var moveCount: Int { (segments.last?.lastMove ?? -1) + 1 }
 
     /// Feature group used by preview toggles (wall / infill / support / travel / other).
@@ -1269,7 +1278,7 @@ struct GCodePathGeometry {
         }
         return GCodePathGeometry(
             segments: out, zMin: zMin, zMax: zMax,
-            feedMin: feedMin, feedMax: feedMax, widthRange: widthRange, layerHeightRange: layerHeightRange, defaultWidth: defaultWidth, metricRanges: metricRanges
+            feedMin: feedMin, feedMax: feedMax, widthRange: widthRange, layerHeightRange: layerHeightRange, defaultWidth: defaultWidth, metricRanges: metricRanges, featureNames: featureNames, toolIDs: toolIDs, filamentIDs: filamentIDs, centerOfGravity: centerOfGravity
         )
     }
 
@@ -1306,7 +1315,7 @@ struct GCodePathGeometry {
         let vertices = many.childNodes.reduce(0) { $0 + ($1.geometry?.sources(for: .vertex).first?.vectorCount ?? 0) }
         guard vertices == 20_000 * 8 else { return false }
         var detailed = bead
-        detailed.metrics = Metrics(actualSpeed: 12, flow: 5, actualFlow: 3, fan: 50, temperature: 215,
+        detailed.metrics = Metrics(massPerMM: 1, actualSpeed: 12, flow: 5, actualFlow: 3, fan: 50, temperature: 215,
                                    pressureAdvance: 0.04, acceleration: 1000, jerk: 8, layerTime: 30, tool: 1, colorID: 2)
         detailed.firstMove = 0; detailed.lastMove = 1
         detailed.points.append(SCNVector3(10, 10, 1))
@@ -1314,6 +1323,9 @@ struct GCodePathGeometry {
         data.prepareColorRanges()
         guard data.colorRange(for: .actualSpeed) == 12...12,
               data.colorRange(for: .layerTime) == 30...30,
+              abs((data.centerOfGravity?.x ?? -1) - 7.5) < 0.001,
+              abs((data.centerOfGravity?.y ?? -1) - 2.5) < 0.001,
+              data.makeNode(color: .white, showToolMarker: true, showCenterOfGravity: true).childNodes.count == 2,
               data.filtered(maxZ: 1, hiddenFeatures: ["Outer wall"]).segments.isEmpty,
               data.filtered(maxZ: 1, hiddenTools: [1]).segments.isEmpty,
               data.filtered(maxZ: 1, hiddenFilaments: [2]).segments.isEmpty,
@@ -1387,6 +1399,26 @@ struct GCodePathGeometry {
     }
 
     mutating func prepareColorRanges() {
+        var features = Set<String>(), tools = Set<Int>(), filaments = Set<Int>()
+        var weighted = SIMD3<Double>.zero, mass = 0.0
+        // Same model-only exclusions as libvgcode's center-of-gravity marker.
+        let excluded: Set<String> = ["Skirt", "Brim", "Support", "Support interface", "Support transition", "Prime tower", "Custom"]
+        for seg in segments where seg.kind == .extrude {
+            features.insert(seg.feature); tools.insert(seg.metrics.tool); filaments.insert(seg.metrics.colorID)
+            if excluded.contains(seg.feature) { continue }
+            for (a, b) in zip(seg.points, seg.points.dropFirst()) {
+                let delta = SIMD3<Double>(Double(b.x-a.x), Double(b.y-a.y), Double(b.z-a.z))
+                let weight = simd_length(delta) * Double(seg.metrics.massPerMM)
+                weighted += SIMD3<Double>(Double(a.x+b.x), Double(a.y+b.y), Double(a.z+b.z)) * (0.5 * weight)
+                mass += weight
+            }
+        }
+        featureNames = features.sorted(); toolIDs = tools.sorted(); filamentIDs = filaments.sorted()
+        if mass > 0 {
+            let p = weighted / mass
+            centerOfGravity = SCNVector3(Float(p.x), Float(p.y), Float(p.z))
+        }
+
         for mode in ColorMode.allCases where mode.isNumeric {
             var lo = Float.greatestFiniteMagnitude, hi = -Float.greatestFiniteMagnitude
             for seg in segments where seg.kind == .extrude {
@@ -1433,7 +1465,7 @@ struct GCodePathGeometry {
     /// A bounded number of geometry buffers share TWO materials for the entire job.
     /// Per-path materials caused quadratic SceneKit resource-manager cleanup on
     /// device (exit watchdog in SCNMTLResourceManager::_materialWillDie).
-    func makeNode(color: UIColor, colorMode: ColorMode = .feature, cancelled: () -> Bool = { false }) -> SCNNode {
+    func makeNode(color: UIColor, colorMode: ColorMode = .feature, showToolMarker: Bool = false, showCenterOfGravity: Bool = false, cancelled: () -> Bool = { false }) -> SCNNode {
         let root = SCNNode()
         root.name = "gcode"
         let solid = SCNMaterial()
@@ -1477,6 +1509,12 @@ struct GCodePathGeometry {
                 }
             }
         }
+        if showToolMarker, let p = segments.last?.points.last {
+            travels.appendMarker(p, radius: 3, color: .systemYellow)
+        }
+        if showCenterOfGravity, let p = centerOfGravity {
+            travels.appendMarker(p, radius: 4, color: .systemPink)
+        }
         beads.flush(into: root)
         travels.flush(into: root)
         return root
@@ -1497,6 +1535,12 @@ struct GCodePathGeometry {
             var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 1
             color.getRed(&r, green: &g, blue: &b, alpha: &a)
             colors.append(contentsOf: [Float(r), Float(g), Float(b), Float(a)])
+        }
+
+        mutating func appendMarker(_ p: SCNVector3, radius r: Float, color: UIColor) {
+            appendLines([SCNVector3(p.x-r,p.y,p.z), SCNVector3(p.x+r,p.y,p.z),
+                         SCNVector3(p.x,p.y-r,p.z), SCNVector3(p.x,p.y+r,p.z),
+                         SCNVector3(p.x,p.y,p.z-r), SCNVector3(p.x,p.y,p.z+r)], color: color)
         }
 
         mutating func appendLines(_ points: [SCNVector3], color: UIColor) {

@@ -2352,6 +2352,7 @@ struct OrcaRootView: View {
                 selectedObjectIndex: engine.selectedObjectIndex,
                 gcodeNode: engine.gcodePathNode,
                 showGCode: mainTab == .preview,
+                showShell: engine.previewShowShell,
                 bedSize: engine.bedSize,
                 bedTexturePath: engine.bedTexturePath,
                 accent: UIColor(red: 0, green: 150 / 255, blue: 136 / 255, alpha: 1),
@@ -3010,6 +3011,13 @@ struct OrcaRootView: View {
                     }
                 }.accessibilityIdentifier("preview-line-types")
                 DisclosureGroup("Options") {
+                    Toggle("Model shell", isOn: $engine.previewShowShell)
+                    Toggle("Tool marker", isOn: Binding(get: { engine.previewShowToolMarker }, set: {
+                        engine.previewShowToolMarker = $0; engine.requestPreviewLayer()
+                    }))
+                    Toggle("Center of gravity", isOn: Binding(get: { engine.previewShowCenterOfGravity }, set: {
+                        engine.previewShowCenterOfGravity = $0; engine.requestPreviewLayer()
+                    }))
                     ForEach(GCodePathGeometry.MoveKind.allCases.filter { $0 != .extrude }) { kind in
                         Toggle(kind.label, isOn: Binding(get: { engine.previewEnabledMoves.contains(kind) }, set: { visible in
                             if visible { engine.previewEnabledMoves.insert(kind) }
@@ -3019,14 +3027,14 @@ struct OrcaRootView: View {
                     }
                 }.accessibilityIdentifier("preview-options")
                 DisclosureGroup("Filaments and tools") {
-                    ForEach(Array(Set(geometry.segments.filter { $0.kind == .extrude }.map { $0.metrics.tool })).sorted(), id: \.self) { tool in
+                    ForEach(geometry.toolIDs, id: \.self) { tool in
                         Toggle("Tool \(tool + 1)", isOn: Binding(get: { !engine.previewHiddenTools.contains(tool) }, set: { visible in
                             if visible { engine.previewHiddenTools.remove(tool) }
                             else { engine.previewHiddenTools.insert(tool) }
                             engine.requestPreviewLayer()
                         }))
                     }
-                    ForEach(Array(Set(geometry.segments.filter { $0.kind == .extrude }.map { $0.metrics.colorID })).sorted(), id: \.self) { filament in
+                    ForEach(geometry.filamentIDs, id: \.self) { filament in
                         Toggle("Filament \(filament + 1)", isOn: Binding(get: { !engine.previewHiddenFilaments.contains(filament) }, set: { visible in
                             if visible { engine.previewHiddenFilaments.remove(filament) }
                             else { engine.previewHiddenFilaments.insert(filament) }
@@ -3099,51 +3107,6 @@ struct OrcaRootView: View {
         .overlay(alignment: .top) {
             Rectangle().fill(OrcaTheme.border).frame(height: 1)
         }
-    }
-
-    private func featureToggle(_ title: String, isOn: Binding<Bool>) -> some View {
-        Button {
-            isOn.wrappedValue.toggle()
-            engine.requestPreviewLayer()
-        } label: {
-            Text(title)
-                .font(.system(size: 11, weight: .semibold))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(isOn.wrappedValue ? OrcaTheme.accent.opacity(0.28) : OrcaTheme.elevated)
-                .foregroundStyle(isOn.wrappedValue ? OrcaTheme.accent : OrcaTheme.muted)
-                .clipShape(Capsule())
-                .overlay(
-                    Capsule().stroke(isOn.wrappedValue ? OrcaTheme.accent : Color.clear, lineWidth: 1)
-                )
-        }
-        .buttonStyle(.plain)
-    }
-
-    /// Color-swatch legend chip for G-code feature groups (W5).
-    private func legendChip(_ title: String, color: Color, isOn: Binding<Bool>) -> some View {
-        Button {
-            isOn.wrappedValue.toggle()
-            engine.requestPreviewLayer()
-        } label: {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(color)
-                    .frame(width: 8, height: 8)
-                    .opacity(isOn.wrappedValue ? 1 : 0.35)
-                Text(title)
-                    .font(.system(size: 11, weight: .semibold))
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(isOn.wrappedValue ? color.opacity(0.22) : OrcaTheme.elevated)
-            .foregroundStyle(isOn.wrappedValue ? OrcaTheme.text : OrcaTheme.muted)
-            .clipShape(Capsule())
-            .overlay(
-                Capsule().stroke(isOn.wrappedValue ? color.opacity(0.8) : Color.clear, lineWidth: 1)
-            )
-        }
-        .buttonStyle(.plain)
     }
 
     @State private var topShells = "3"

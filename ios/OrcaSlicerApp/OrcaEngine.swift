@@ -56,6 +56,9 @@ final class OrcaEngine: ObservableObject {
     @Published var gcodeZMax: Float = 20
     /// Assembly explode factor (0 = collapsed layout)
     @Published var explodeFactor: Float = 0
+    @Published var previewShowShell = false
+    @Published var previewShowToolMarker = false
+    @Published var previewShowCenterOfGravity = false
     @Published var previewHiddenTools: Set<Int> = []
     @Published var previewHiddenFilaments: Set<Int> = []
     @Published var previewHiddenFeatures: Set<String> = []
@@ -1091,11 +1094,12 @@ final class OrcaEngine: ObservableObject {
         let hidden = previewHiddenFeatures, moves = previewEnabledMoves
         let tools = previewHiddenTools, filaments = previewHiddenFilaments
         let through = previewThroughMove, mode = previewColorMode
+        let toolMarker = previewShowToolMarker, cog = previewShowCenterOfGravity
         previewBuilding = true
         let work = Task.detached(priority: .userInitiated) {
             let filtered = geo.filtered(minZ: lo, maxZ: hi, hiddenFeatures: hidden,
                 enabledMoves: moves, hiddenTools: tools, hiddenFilaments: filaments, throughMove: through, cancelled: { Task.isCancelled })
-            return filtered.makeNode(color: .white, colorMode: mode, cancelled: { Task.isCancelled })
+            return filtered.makeNode(color: .white, colorMode: mode, showToolMarker: toolMarker, showCenterOfGravity: cog, cancelled: { Task.isCancelled })
         }
         previewBuildTask = work
         Task { @MainActor [weak self] in
@@ -1973,9 +1977,10 @@ final class OrcaEngine: ObservableObject {
             if let width = getOptionFirst("line_width").flatMap(Float.init), width > 0.05 { return width }
             return (getOptionFirst("nozzle_diameter").flatMap(Float.init) ?? 0.4) * 1.1
         }()
+        let densities = (getOption("filament_density") ?? "1.24").split(separator: ",").compactMap { Float($0.trimmingCharacters(in: .whitespaces)) }
         slicePhase = "Preparing preview"
         let preview = await Task.detached(priority: .userInitiated) {
-            Self.processedPreview(sessionBits: sessionBits, defaultWidth: defaultWidth)
+            Self.processedPreview(sessionBits: sessionBits, defaultWidth: defaultWidth, densities: densities)
         }.value
         await MainActor.run { [sessionBits] in
             let sess = OpaquePointer(bitPattern: sessionBits)!
@@ -2059,7 +2064,7 @@ final class OrcaEngine: ObservableObject {
     }
 
     #if ORCA_LINKED
-    private static func processedPreview(sessionBits: UInt, defaultWidth: Float) ->
+    private static func processedPreview(sessionBits: UInt, defaultWidth: Float, densities: [Float]) ->
         (geometry: GCodePathGeometry, layers: [Float], reduced: Bool)? {
         guard let session = OpaquePointer(bitPattern: sessionBits) else { return nil }
         var segments: UnsafeMutablePointer<orca_preview_segment_t>?
@@ -2076,7 +2081,10 @@ final class OrcaEngine: ObservableObject {
                 let end = SCNVector3(move.end_x, move.end_y, move.end_z)
                 let kind = GCodePathGeometry.MoveKind(rawValue: Int(move.move_type)) ?? .travel
                 let feature = kind == .extrude ? String(cString: orca_preview_role_name(move.role)) : kind.label
-                let metrics = GCodePathGeometry.Metrics(actualSpeed: move.actual_speed,
+                let tool = Int(move.extruder_id)
+                let density = densities.indices.contains(tool) ? densities[tool] : (densities.first ?? 1.24)
+                let massPerMM = move.feedrate > 0 ? move.volumetric_flow / (move.feedrate / 60) * density : 0
+                let metrics = GCodePathGeometry.Metrics(massPerMM: massPerMM, actualSpeed: move.actual_speed,
                     flow: move.volumetric_flow, actualFlow: move.actual_volumetric_flow,
                     fan: move.fan_speed, temperature: move.temperature, pressureAdvance: move.pressure_advance,
                     acceleration: move.acceleration, jerk: move.jerk, layerTime: move.layer_duration,

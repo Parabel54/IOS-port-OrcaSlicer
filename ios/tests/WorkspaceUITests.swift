@@ -2,12 +2,7 @@ import XCTest
 
 final class WorkspaceUITests: XCTestCase {
     @MainActor
-    func testTabletLandscape() {
-        continueAfterFailure = false
-        XCUIDevice.shared.orientation = .portrait
-        let app = XCUIApplication(bundleIdentifier: "com.orcaslicer.ios")
-        app.launchArguments = ["--test-view-metadata", "--test-document-import", "--test-native-picker"]
-        app.launch()
+    private func openSlicedPreview(_ app: XCUIApplication) {
         let cancel = app.buttons["Cancel"].firstMatch
         XCTAssertTrue(cancel.waitForExistence(timeout: 180), "System document picker must present")
         cancel.tap()
@@ -24,6 +19,47 @@ final class WorkspaceUITests: XCTestCase {
         }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [preview], timeout: 180), .completed,
                        "The app must slice the imported model and present its processed preview")
+    }
+
+    @MainActor
+    func testPreviewNavigation() {
+        continueAfterFailure = false
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication(bundleIdentifier: "com.orcaslicer.ios")
+        app.launchArguments = ["--test-document-import", "--test-native-picker"]
+        app.launch()
+        openSlicedPreview(app)
+        app.buttons["Preview controls"].tap()
+        XCTAssertTrue(app.buttons["Hide preview controls"].waitForExistence(timeout: 10))
+        for title in ["Prepare", "Preview", "Device"] {
+            XCTAssertTrue(app.buttons[title].isHittable, "Main tabs must remain visible above Preview controls")
+        }
+        let settled = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            !app.progressIndicators["preview-building"].exists
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [settled], timeout: 60), .completed)
+        app.buttons["Hide preview controls"].tap()
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "preview-navigation"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        app.buttons["Device"].tap()
+        XCTAssertTrue(app.buttons["Prepare"].isHittable)
+        app.buttons["Prepare"].tap()
+        XCTAssertTrue(app.buttons["slice-plate"].isHittable)
+        app.buttons["Preview"].tap()
+        XCTAssertTrue(app.sliders["Upper preview layer"].exists)
+    }
+
+    @MainActor
+    func testTabletLandscape() {
+        continueAfterFailure = false
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication(bundleIdentifier: "com.orcaslicer.ios")
+        app.launchArguments = ["--test-view-metadata", "--test-document-import", "--test-native-picker"]
+        app.launch()
+        openSlicedPreview(app)
+        let slice = app.buttons["slice-plate"]
         XCTAssertTrue(app.sliders["Upper preview layer"].exists)
         XCTAssertTrue(app.buttons["Prepare"].isHittable)
         XCTAssertTrue(app.buttons["Preview"].isHittable)

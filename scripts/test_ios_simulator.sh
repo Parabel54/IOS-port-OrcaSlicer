@@ -195,6 +195,16 @@ PYLAYOUT
   done
   # Fail if a marker was written but the app subsequently crashed.
   ios_test_run 20 xcrun simctl terminate "$DEVICE" com.orcaslicer.ios
+  if [[ "$variant" == compact ]]; then
+    # Reproduce Preview/filter navigation on a real compact UIKit layout.
+    ios_test_run 360 xcodebuild test-without-building -xctestrun "$UI_RUN_FILE" \
+      -destination "id=$DEVICE" -parallel-testing-enabled NO \
+      -only-testing:OrcaSlicerUITests/WorkspaceUITests/testPreviewNavigation \
+      -resultBundlePath "$TEST_DIR/compact-preview.xcresult" \
+      2>&1 | tee "$TEST_DIR/compact-ui-test.log"
+    xcrun xcresulttool export attachments --path "$TEST_DIR/compact-preview.xcresult" \
+      --output-path "$TEST_DIR/compact-ui-attachments"
+  fi
   if [[ "$variant" == tablet ]]; then
     # Rotate the simulated device through XCTest. A multitasking app cannot
     # force interface orientation through UIWindowScene.requestGeometryUpdate.
