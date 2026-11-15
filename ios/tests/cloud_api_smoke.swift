@@ -16,6 +16,21 @@ private final class CloudFixtureProtocol: URLProtocol {
     override func stopLoading() {}
 }
 
+private func requestBody(_ request: URLRequest) throws -> Data {
+    if let data = request.httpBody { return data }
+    guard let stream = request.httpBodyStream else { throw OrcaCloudError.invalidResponse }
+    stream.open()
+    defer { stream.close() }
+    var result = Data()
+    var buffer = [UInt8](repeating: 0, count: 4096)
+    while true {
+        let count = stream.read(&buffer, maxLength: buffer.count)
+        if count == 0 { return result }
+        guard count > 0 else { throw OrcaCloudError.invalidResponse }
+        result.append(contentsOf: buffer.prefix(count))
+    }
+}
+
 @main
 struct CloudAPISmoke {
     static func main() async throws {
@@ -42,7 +57,7 @@ struct CloudAPISmoke {
         CloudFixtureProtocol.handler = { request in
             precondition(request.url!.path == "/auth/v1/token" && request.httpMethod == "POST")
             precondition(request.value(forHTTPHeaderField: "apikey") == OrcaCloudEndpoints.publicKey)
-            let body = try JSONSerialization.jsonObject(with: request.httpBody!) as! [String: String]
+            let body = try JSONSerialization.jsonObject(with: requestBody(request)) as! [String: String]
             precondition(body["auth_code"] == "one-time-code" && body["code_verifier"] == pkce.verifier)
             precondition(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!.first!.value == "pkce")
             return (200, Data(#"{"access_token":"fixture-access","refresh_token":"fixture-refresh","expires_in":3600,"user":{"id":"account-1","email":"person@example.invalid","user_metadata":{"full_name":"Test Account","email_verified":true,"nested":{"ignored":true}}}}"#.utf8))
@@ -61,7 +76,7 @@ struct CloudAPISmoke {
         precondition(printers.count == 2 && printers[0].online && printers[0].jobState == "printing")
         precondition(!printers[1].online && printers[1].access_role == "viewer")
         CloudFixtureProtocol.handler = { request in
-            let body = try JSONSerialization.jsonObject(with: request.httpBody!) as! [String: String]
+            let body = try JSONSerialization.jsonObject(with: requestBody(request)) as! [String: String]
             precondition(body == ["refresh_token":"fixture-refresh"])
             precondition(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!.first!.value == "refresh_token")
             return (200, Data(#"{"access_token":"rotated-access","refresh_token":"rotated-refresh","expires_at":4102444800,"user":{"id":"account-1"}}"#.utf8))
