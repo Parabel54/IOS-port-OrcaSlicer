@@ -668,23 +668,16 @@ struct PlateSceneView: UIViewRepresentable {
             let mz = (mesh.min.z + mesh.max.z) * 0.5
             let modelWorld = SCNVector3(mx, mz, -my)
 
-            // Blend toward bed center so the plate stays visible even for small models
-            let bed = bedCenterWorld(bedSize: bedSize)
-            let target = SCNVector3(
-                modelWorld.x * 0.35 + bed.x * 0.65,
-                max(modelWorld.y, 0) * 0.5,
-                modelWorld.z * 0.35 + bed.z * 0.65
-            )
-
-            let meshExt = max(
-                mesh.max.x - mesh.min.x,
-                mesh.max.y - mesh.min.y,
-                mesh.max.z - mesh.min.z,
-                15
-            )
-            let plate = max(bedSize.x, bedSize.y, 100)
-            // Pull back enough to include most of the plate + model (not a tight cube-only crop)
-            let dist = max(meshExt * 3.5, plate * 0.55, 140)
+            let target = modelWorld
+            let dx = mesh.max.x - mesh.min.x
+            let dy = mesh.max.y - mesh.min.y
+            let dz = mesh.max.z - mesh.min.z
+            let radius = max(sqrtf(dx * dx + dy * dy + dz * dz) * 0.5, 0.5)
+            let aspect = max(Float(view.bounds.width / max(view.bounds.height, 1)), 0.2)
+            let verticalHalfAngle = Float(42.0 * Double.pi / 360.0)
+            let limitingAngle = min(verticalHalfAngle, atanf(tanf(verticalHalfAngle) * aspect))
+            let dist = max(radius / sinf(limitingAngle) * 1.15, 3)
+            cam.camera?.zNear = max(Double(dist) / 1000, 0.01)
 
             cam.position = SCNVector3(
                 target.x + dist * 0.55,

@@ -13,6 +13,7 @@ final class OrcaEngine: ObservableObject {
     @Published var modelName: String?
     @Published var hasModel = false
     @Published private(set) var lastModelImportSucceeded = false
+    @Published private(set) var modelImporting = false
     @Published var gcodeURL: URL?
     @Published var lastMessage = ""
     @Published var lastSliceTimeSec: Float = 0
@@ -221,7 +222,7 @@ final class OrcaEngine: ObservableObject {
         gcodePathNode = nil
         gcodeGeometry = nil
         gcodeURL = nil
-        if let s = session, !presetsLoading, !sliceRunning {
+        if let s = session, !presetsLoading, !sliceRunning, !modelImporting {
             orca_session_purge_option_caches(s)
         }
         lastMessage = "Freed preview/settings caches (memory pressure)"
@@ -954,13 +955,44 @@ final class OrcaEngine: ObservableObject {
                 return orca_session_load_model(s, path)
             }
         }
+        return finishModelImport(url: url, append: append, rc: rc)
+        #else
+        modelName = url.lastPathComponent + " (engine not linked)"
+        hasModel = false
+        lastMessage = "Engine not linked"
+        return lastMessage
+        #endif
+    }
+
+    /// The document inbox owns these files, so native parsing can run off the UI
+    /// thread while controls and memory-pressure native cache mutation are paused.
+    @MainActor
+    func loadDocumentModel(url: URL, append: Bool) async -> Bool {
+        guard !modelImporting, !presetsLoading, !sliceRunning else { return false }
+        modelImporting = true
+        lastModelImportSucceeded = false
+        defer { modelImporting = false }
+        #if ORCA_LINKED
+        guard let session else { lastMessage = "No session"; return false }
+        let bits = UInt(bitPattern: session)
+        let rc = await Task.detached(priority: .userInitiated) {
+            let session = OpaquePointer(bitPattern: bits)!
+            return url.path.withCString { append ? orca_session_add_model(session, $0) : orca_session_load_model(session, $0) }
+        }.value
+        _ = finishModelImport(url: url, append: append, rc: rc)
+        return lastModelImportSucceeded
+        #else
+        lastMessage = "Engine not linked"
+        return false
+        #endif
+    }
+
+    #if ORCA_LINKED
+    private func finishModelImport(url: URL, append: Bool, rc: Int32) -> String {
+        guard let s = session else { return "No session" }
         if rc != 0 {
             let err = orca_session_last_error(s).map { String(cString: $0) } ?? "error"
             lastMessage = "\(append ? "add" : "load")_model rc=\(rc): \(err)"
-            if !append {
-                hasModel = false
-                mesh = nil
-            }
             return lastMessage
         }
         lastModelImportSucceeded = true
@@ -989,13 +1021,8 @@ final class OrcaEngine: ObservableObject {
             lastMessage = "Loaded \(url.lastPathComponent) · \(objectCount) object(s) · mesh ready"
         }
         return lastMessage
-        #else
-        modelName = url.lastPathComponent + " (engine not linked)"
-        hasModel = false
-        lastMessage = "Engine not linked"
-        return lastMessage
-        #endif
     }
+    #endif
 
     /// Rebuild G-code SceneKit node from geometry filtered by min/max Z clip + feature toggles
     func applyPreviewLayer() {

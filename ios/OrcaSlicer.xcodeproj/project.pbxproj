@@ -27,6 +27,7 @@
 		956626E18BA154CB8EB418B9 /* OrcaCloudAccount.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000016 /* OrcaCloudAccount.swift */; };
 		0D224B673BC459A887228267 /* CloudAccountPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000017 /* CloudAccountPanel.swift */; };
 		55789C7F893C5327BFF3362B /* FlashforgeClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000018 /* FlashforgeClient.swift */; };
+		F167DC091FAA51DD8E264504 /* ControlsDrawer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000019 /* ControlsDrawer.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -54,6 +55,7 @@
 		A10000000000000000000016 /* OrcaCloudAccount.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrcaCloudAccount.swift; sourceTree = "<group>"; };
 		A10000000000000000000017 /* CloudAccountPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudAccountPanel.swift; sourceTree = "<group>"; };
 		A10000000000000000000018 /* FlashforgeClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FlashforgeClient.swift; sourceTree = "<group>"; };
+		A10000000000000000000019 /* ControlsDrawer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlsDrawer.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -72,6 +74,7 @@
 				A10000000000000000000002 /* OrcaEngine.swift */,
 				A10000000000000000000008 /* PlateSceneView.swift */,
 				A1000000000000000000000C /* ProcessOptions.swift */,
+				A10000000000000000000019 /* ControlsDrawer.swift */,
 				A10000000000000000000018 /* FlashforgeClient.swift */,
 				A10000000000000000000017 /* CloudAccountPanel.swift */,
 				A10000000000000000000016 /* OrcaCloudAccount.swift */,
@@ -186,6 +189,7 @@
 				F5D701F3F6A64A75B3859D69 /* OrcaEngine.swift in Sources */,
 				951D0BA3C945455EA139190F /* PlateSceneView.swift in Sources */,
 				143431BE0F474D7CB36C4F5E /* ProcessOptions.swift in Sources */,
+				F167DC091FAA51DD8E264504 /* ControlsDrawer.swift in Sources */,
 				55789C7F893C5327BFF3362B /* FlashforgeClient.swift in Sources */,
 				0D224B673BC459A887228267 /* CloudAccountPanel.swift in Sources */,
 				956626E18BA154CB8EB418B9 /* OrcaCloudAccount.swift in Sources */,

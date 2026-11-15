@@ -21,6 +21,7 @@ PYRUN
 SDK_PATH="$(xcrun --sdk iphonesimulator --show-sdk-path)"
 TEST_DIR="$ROOT/build_logs/simulator-smoke"
 mkdir -p "$TEST_DIR"
+python3 "$ROOT/scripts/make_ios_3mf_fixture.py" "$TEST_DIR/orca-project.3mf"
 xcrun --sdk iphonesimulator clang++ -std=c++17 -arch arm64 \
   -isysroot "$SDK_PATH" -mios-simulator-version-min=16.0 \
   -I "$ROOT/src/ios" "$ROOT/ios/tests/engine_smoke.cpp" \
@@ -58,7 +59,7 @@ python3 "$ROOT/scripts/audit_ios_app.py" "$APP_BUNDLE" iphonesimulator
 ios_test_run 120 xcrun simctl install "$DEVICE" "$APP_BUNDLE"
 APP_DATA="$(xcrun simctl get_app_container "$DEVICE" com.orcaslicer.ios data)"
 mkdir -p "$APP_DATA/Documents"
-cp "$TEST_DIR/cube.3mf" "$APP_DATA/Documents/ios-import-smoke.3mf"
+cp "$TEST_DIR/orca-project.3mf" "$APP_DATA/Documents/ios-import-smoke.3mf"
 ios_test_run 90 xcrun simctl launch --terminate-running-process "$DEVICE" com.orcaslicer.ios --test-view-metadata --test-document-import \
   | tee "$TEST_DIR/app-launch.log"
 # Wait for the app's full profile startup, not just its initial process spawn.

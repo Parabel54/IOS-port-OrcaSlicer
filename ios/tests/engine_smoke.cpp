@@ -42,6 +42,17 @@ int main(int argc, char **argv)
         !require(std::fabs(std::strtof(loaded_height, nullptr) - 0.16f) < 0.0001f,
                  "project retains its layer height"))
         return 4;
+    // A real Orca-format project uses the Bambu/Orca reader, unlike our legacy
+    // store_3mf snapshot above. Model loading and project config need explicit flags.
+    if (!require(orca_session_set_option(session.get(), "layer_height", "0.2") == 0, "reset layer height") ||
+        !require(orca_session_load_model(session.get(), (directory + "/orca-project.3mf").c_str()) == 0,
+                 "import Orca-format 3MF geometry") ||
+        !require(orca_session_object_count(session.get()) == 1, "Orca project retains its object") ||
+        !require(orca_session_get_option(session.get(), "layer_height", loaded_height, sizeof(loaded_height)) == 0,
+                 "read Orca project settings") ||
+        !require(std::fabs(std::strtof(loaded_height, nullptr) - 0.16f) < 0.0001f,
+                 "Orca project restores layer height"))
+        return 4;
     const char *options[][2] = {
         {"use_relative_e_distances", "1"}, {"layer_change_gcode", "G92 E0"},
         {"layer_height", "0.2"}, {"wall_loops", "2"},
@@ -74,6 +85,17 @@ int main(int argc, char **argv)
             max_z = segments[i].end_z;
     }
     if (!require(max_z > 19.f, "preview reaches the top of the cube"))
+        return 11;
+    // A reader failure must leave the existing model/config/preview usable.
+    const std::string broken = directory + "/broken.3mf";
+    { std::ofstream invalid(broken); invalid << "not a 3MF archive"; }
+    if (!require(orca_session_load_model(session.get(), broken.c_str()) != 0, "reject invalid 3MF") ||
+        !require(orca_session_object_count(session.get()) == 1, "failed import preserves the previous model"))
+        return 11;
+    float previous_time = 0.f, previous_filament = 0.f;
+    int previous_layers = 0;
+    if (!require(orca_session_last_slice_stats(session.get(), &previous_time, &previous_filament, &previous_layers) == 0,
+                 "failed import preserves valid slice statistics"))
         return 11;
     // A failed next slice must invalidate the prior successful statistics/preview.
     if (!require(orca_session_set_option(session.get(), "layer_height", "5") == 0, "set invalid layer height") ||

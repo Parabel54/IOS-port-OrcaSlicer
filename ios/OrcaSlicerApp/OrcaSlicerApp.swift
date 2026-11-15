@@ -74,6 +74,7 @@ struct OrcaRootView: View {
     @State private var documentPicker: DocumentImportRequest?
     @State private var pendingDocumentPicker: DocumentImportRequest?
     @State private var didTestImport = false
+    @State private var processingDocument = false
     @State private var showProcess = false
     @State private var showCalibration = false
     @State private var exportShareURL: URL?
@@ -205,16 +206,22 @@ struct OrcaRootView: View {
                     tabBar
                     plateStage
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                    if mainTab == .preview, engine.gcodeGeometry != nil {
-                        layerScrubber
+                        .allowsHitTesting(!isSlicing && !engine.presetsLoading && !engine.modelImporting)
+                    if mainTab != .device {
+                        ControlsDrawer(expandedHeight: geo.size.height * 0.48, bottomInset: bottomPad,
+                                       title: mainTab == .preview ? String(localized: "Preview controls") : String(localized: "Plate controls"),
+                                       compact: { compactControls }, expanded: {
+                            AnyView(ScrollView {
+                                if mainTab == .preview, engine.gcodeGeometry != nil { layerScrubber }
+                                controlsPanel(bottomInset: 0)
+                            })
+                        })
                     }
-                    controlsPanel(bottomInset: bottomPad)
                 }
             }
         }
         // The C session belongs to the background slice until it finishes.
-        .disabled(isSlicing || engine.presetsLoading)
+        .disabled(isSlicing || engine.presetsLoading || engine.modelImporting)
         .overlay {
             if isSlicing {
                 VStack(spacing: 14) {
@@ -228,6 +235,16 @@ struct OrcaRootView: View {
                 .padding(24)
                 .background(OrcaTheme.panel)
                 .clipShape(RoundedRectangle(cornerRadius: 14))
+            } else if engine.modelImporting {
+                ProgressView("Opening model…")
+                    .padding(24)
+                    .background(OrcaTheme.panel)
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
+            } else if documents.receiving > 0 {
+                ProgressView("Preparing file…")
+                    .padding(20)
+                    .background(OrcaTheme.panel)
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
             }
         })
     }
@@ -340,18 +357,21 @@ struct OrcaRootView: View {
             testDocumentPickerWhenReady()
         }
         .onChange(of: isSlicing) { _ in importPendingDocuments() }
+        .onChange(of: editingModalPresented) { _ in importPendingDocuments() }
         .alert("Import failed", isPresented: Binding(get: { !documents.errorMessage.isEmpty }, set: { if !$0 { documents.errorMessage = "" } })) {
             Button("OK", role: .cancel) { documents.errorMessage = "" }
         } message: { Text(documents.errorMessage) }
     }
 
     private var headerBar: AnyView {
-        AnyView(HStack(spacing: 12) {
+        AnyView(HStack(spacing: 8) {
             OrcaLogoMark()
                 .frame(width: 36, height: 36)
             VStack(alignment: .leading, spacing: 2) {
                 Text("OrcaSlicer")
                     .font(.system(size: 20, weight: .bold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.65)
                     .foregroundStyle(OrcaTheme.text)
                 HStack(spacing: 6) {
                     Circle()
@@ -1873,6 +1893,34 @@ struct OrcaRootView: View {
             guard !Task.isCancelled else { return }
             jobMessage = error.localizedDescription
         }
+    }
+
+    private var compactControls: AnyView {
+        AnyView(HStack(spacing: 12) {
+            Menu {
+                Button("Open model") { requestDocumentPicker(.model(append: false)) }
+                Button("Add model") { requestDocumentPicker(.model(append: true)) }
+            } label: { Image(systemName: "folder").frame(width: 44, height: 44) }
+                .accessibilityLabel(Text("Open or add model"))
+            Button { showProcess = true } label: {
+                Image(systemName: "slider.horizontal.3").frame(width: 44, height: 44)
+            }
+            .accessibilityLabel(Text("Process settings"))
+            if engine.gcodeURL != nil {
+                Button { mainTab = .preview } label: { Image(systemName: "eye").frame(width: 44, height: 44) }
+                    .accessibilityLabel(Text("Show preview"))
+            }
+            Button(action: sliceNow) {
+                Label("Slice plate", systemImage: "square.3.layers.3d.down.right")
+                    .font(.system(size: 14, weight: .semibold))
+                    .lineLimit(1).minimumScaleFactor(0.7)
+                    .frame(maxWidth: .infinity, minHeight: 44)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(OrcaTheme.accent)
+            .disabled(!engine.hasModel || isSlicing || engine.modelImporting)
+        }
+        .padding(.horizontal, 14))
     }
 
     private func controlsPanel(bottomInset: CGFloat) -> AnyView {
@@ -4425,15 +4473,21 @@ struct OrcaRootView: View {
         pendingDocumentPicker = nil
     }
 
+    private var editingModalPresented: Bool {
+        showProcess || showWizard || showCalibration || showObjectSettings || showPreferences || showAbout || showShortcuts
+    }
+
     private func importPendingDocuments() {
-        guard !isSlicing, !engine.presetsLoading, engine.startupFinished else { return }
-        while let document = documents.takeNext() {
+        guard !processingDocument, !isSlicing, !engine.presetsLoading, !engine.modelImporting, engine.startupFinished, !editingModalPresented,
+              let document = documents.takeNext() else { return }
+        processingDocument = true
+        Task { @MainActor in
             var success = false
             switch document.kind {
             case .automatic: break // Resolved before staging.
             case .model(let append):
-                status = engine.loadModel(url: document.url, append: append)
-                success = engine.lastModelImportSucceeded
+                success = await engine.loadDocumentModel(url: document.url, append: append)
+                status = engine.lastMessage
                 if success { engine.rememberRecent(url: document.url) }
             case .settings(let preset):
                 success = engine.importConfigJSON(url: document.url, asUserPreset: preset)
@@ -4448,6 +4502,8 @@ struct OrcaRootView: View {
                     to: FileManager.default.temporaryDirectory.appendingPathComponent("orca-document-import-smoke.txt"),
                     atomically: true, encoding: .utf8)
             }
+            processingDocument = false
+            importPendingDocuments()
         }
     }
 

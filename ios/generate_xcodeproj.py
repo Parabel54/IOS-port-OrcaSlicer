@@ -36,7 +36,7 @@ def uid(key):
 
 IDs = {k: uid(k) for k in [
     "project", "target", "sources", "resources", "frameworks", "product",
-    "swift_app", "swift_engine", "swift_plate", "swift_process", "swift_connections", "swift_connections_panel", "swift_startup", "swift_documentimport", "swift_nativedocumentpicker", "swift_orcacloudapi", "swift_nativecloudsignin", "swift_orcacloudaccount", "swift_cloudaccountpanel", "swift_flashforge", "swift_startup_view", "logo", "assets",
+    "swift_app", "swift_engine", "swift_plate", "swift_process", "swift_connections", "swift_connections_panel", "swift_startup", "swift_documentimport", "swift_nativedocumentpicker", "swift_orcacloudapi", "swift_nativecloudsignin", "swift_orcacloudaccount", "swift_cloudaccountpanel", "swift_flashforge", "swift_drawer", "swift_startup_view", "logo", "assets",
     "process_profile", "process_profile_fine", "profiles_folder", "calib_folder", "scenekit_fw",
     "config_list_proj", "config_list_tgt",
     "debug_proj", "release_proj", "debug_tgt", "release_tgt",
@@ -243,6 +243,7 @@ pbx = f'''// !$*UTF8*$!
 		{IDs["swift_engine"]} /* OrcaEngine.swift in Sources */ = {{isa = PBXBuildFile; fileRef = A10000000000000000000002 /* OrcaEngine.swift */; }};
 		{IDs["swift_plate"]} /* PlateSceneView.swift in Sources */ = {{isa = PBXBuildFile; fileRef = A10000000000000000000008 /* PlateSceneView.swift */; }};
 		{IDs["swift_process"]} /* ProcessOptions.swift in Sources */ = {{isa = PBXBuildFile; fileRef = A1000000000000000000000C /* ProcessOptions.swift */; }};
+		{IDs["swift_drawer"]} /* ControlsDrawer.swift in Sources */ = {{isa = PBXBuildFile; fileRef = A10000000000000000000019 /* ControlsDrawer.swift */; }};
 		{IDs["swift_flashforge"]} /* FlashforgeClient.swift in Sources */ = {{isa = PBXBuildFile; fileRef = A10000000000000000000018 /* FlashforgeClient.swift */; }};
 		{IDs["swift_cloudaccountpanel"]} /* CloudAccountPanel.swift in Sources */ = {{isa = PBXBuildFile; fileRef = A10000000000000000000017 /* CloudAccountPanel.swift */; }};
 		{IDs["swift_orcacloudaccount"]} /* OrcaCloudAccount.swift in Sources */ = {{isa = PBXBuildFile; fileRef = A10000000000000000000016 /* OrcaCloudAccount.swift */; }};
@@ -271,6 +272,7 @@ pbx = f'''// !$*UTF8*$!
 		A10000000000000000000007 /* Assets.xcassets */ = {{isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; }};
 		A10000000000000000000008 /* PlateSceneView.swift */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlateSceneView.swift; sourceTree = "<group>"; }};
 		A1000000000000000000000C /* ProcessOptions.swift */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessOptions.swift; sourceTree = "<group>"; }};
+		A10000000000000000000019 /* ControlsDrawer.swift */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlsDrawer.swift; sourceTree = "<group>"; }};
 		A10000000000000000000018 /* FlashforgeClient.swift */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FlashforgeClient.swift; sourceTree = "<group>"; }};
 		A10000000000000000000017 /* CloudAccountPanel.swift */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudAccountPanel.swift; sourceTree = "<group>"; }};
 		A10000000000000000000016 /* OrcaCloudAccount.swift */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrcaCloudAccount.swift; sourceTree = "<group>"; }};
@@ -305,6 +307,7 @@ pbx = f'''// !$*UTF8*$!
 				A10000000000000000000002 /* OrcaEngine.swift */,
 				A10000000000000000000008 /* PlateSceneView.swift */,
 				A1000000000000000000000C /* ProcessOptions.swift */,
+				A10000000000000000000019 /* ControlsDrawer.swift */,
 				A10000000000000000000018 /* FlashforgeClient.swift */,
 				A10000000000000000000017 /* CloudAccountPanel.swift */,
 				A10000000000000000000016 /* OrcaCloudAccount.swift */,
@@ -419,6 +422,7 @@ pbx = f'''// !$*UTF8*$!
 				{IDs["swift_engine"]} /* OrcaEngine.swift in Sources */,
 				{IDs["swift_plate"]} /* PlateSceneView.swift in Sources */,
 				{IDs["swift_process"]} /* ProcessOptions.swift in Sources */,
+				{IDs["swift_drawer"]} /* ControlsDrawer.swift in Sources */,
 				{IDs["swift_flashforge"]} /* FlashforgeClient.swift in Sources */,
 				{IDs["swift_cloudaccountpanel"]} /* CloudAccountPanel.swift in Sources */,
 				{IDs["swift_orcacloudaccount"]} /* OrcaCloudAccount.swift in Sources */,
