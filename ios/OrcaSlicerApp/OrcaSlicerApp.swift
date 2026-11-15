@@ -3580,7 +3580,8 @@ struct OrcaRootView: View {
     }
 
     private var testDocumentFixture: URL {
-        StartupRecovery().dataDirectory.deletingLastPathComponent().appendingPathComponent("ios-import-smoke.3mf")
+        let name = ProcessInfo.processInfo.arguments.contains("--test-gcode-import") ? "ios-gcode-smoke.gcode" : "ios-import-smoke.3mf"
+        return StartupRecovery().dataDirectory.deletingLastPathComponent().appendingPathComponent(name)
     }
 
     private func requestDocumentPicker(_ kind: DocumentImportKind) {

@@ -52,6 +52,35 @@ final class WorkspaceUITests: XCTestCase {
     }
 
     @MainActor
+    func testGCodePreview() {
+        continueAfterFailure = false
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication(bundleIdentifier: "com.orcaslicer.ios")
+        app.launchArguments = ["--test-document-import", "--test-gcode-import"]
+        app.launch()
+        let opened = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            app.state == .runningForeground && app.buttons["Export G-code"].isHittable &&
+                app.sliders["Upper preview layer"].exists
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [opened], timeout: 180), .completed,
+                       "Opening G-code must produce a preview without loading or slicing a model")
+        app.buttons["Preview controls"].tap()
+        XCTAssertTrue(app.buttons["Hide preview controls"].waitForExistence(timeout: 10))
+        let rendered = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            app.state == .runningForeground && !app.progressIndicators["preview-building"].exists
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [rendered], timeout: 60), .completed)
+        app.buttons["Hide preview controls"].tap()
+        XCTAssertTrue(app.buttons["Device"].isHittable)
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "standalone-gcode-preview"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        app.buttons["Prepare"].tap()
+        XCTAssertFalse(app.buttons["slice-plate"].isEnabled, "The viewed G-code must not become an editable mesh")
+    }
+
+    @MainActor
     func testTabletLandscape() {
         continueAfterFailure = false
         XCUIDevice.shared.orientation = .portrait

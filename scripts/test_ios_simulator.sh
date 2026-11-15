@@ -158,6 +158,7 @@ for variant in compact tablet; do
   APP_DATA="$(xcrun simctl get_app_container "$DEVICE" com.orcaslicer.ios data)"
   mkdir -p "$APP_DATA/Documents"
   cp "$TEST_DIR/orca-project.3mf" "$APP_DATA/Documents/ios-import-smoke.3mf"
+  cp "$TEST_DIR/cube.gcode" "$APP_DATA/Documents/ios-gcode-smoke.gcode"
   for presentation in workspace settings; do
     if [[ "$variant" == tablet && "$presentation" == settings ]]; then continue; fi
     if [[ "$presentation" != workspace ]]; then
@@ -200,6 +201,7 @@ PYLAYOUT
     ios_test_run 360 xcodebuild test-without-building -xctestrun "$UI_RUN_FILE" \
       -destination "id=$DEVICE" -parallel-testing-enabled NO \
       -only-testing:OrcaSlicerUITests/WorkspaceUITests/testPreviewNavigation \
+      -only-testing:OrcaSlicerUITests/WorkspaceUITests/testGCodePreview \
       -resultBundlePath "$TEST_DIR/compact-preview.xcresult" \
       2>&1 | tee "$TEST_DIR/compact-ui-test.log"
     xcrun xcresulttool export attachments --path "$TEST_DIR/compact-preview.xcresult" \
