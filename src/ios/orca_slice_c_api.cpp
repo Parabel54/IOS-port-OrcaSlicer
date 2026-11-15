@@ -39,6 +39,7 @@
 #include "libslic3r/calib.hpp"
 #include "libslic3r/CutUtils.hpp"
 #include "libslic3r/MeshBoolean.hpp"
+#include "libslic3r/MeshRepair.hpp"
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/TriangleSelector.hpp"
 #include "libslic3r/BrimEarsPoint.hpp"
@@ -531,7 +532,9 @@ int orca_session_slice_to_gcode(orca_session_t *s, const char *gcode_out_path)
         s->preview_segments.reserve(std::min(preview_budget, s->preview_total_segments));
         size_t ordinal = 0;
         size_t previous_slot = std::numeric_limits<size_t>::max();
-        Vec3f previous_position = result.moves.empty() ? Vec3f::Zero().eval() : result.moves.front().position;
+        Vec3f previous_position = Vec3f::Zero();
+        if (!result.moves.empty())
+            previous_position = result.moves.front().position;
         for (size_t i = 1; i < result.moves.size(); ++i) {
             const auto &move = result.moves[i];
             // Speed-analysis points are not physical G-code endpoints. Ignoring
@@ -2524,9 +2527,9 @@ int orca_session_repair_mesh(orca_session_t *s, int index)
                 if (!vol || !vol->is_model_part())
                     continue;
                 TriangleMesh mesh = vol->mesh();
-                RepairedMeshErrors errs;
+                MeshRepairStats stats;
                 std::string err;
-                if (MeshBoolean::cgal::repair(mesh, &errs, &err)) {
+                if (repair_mesh(mesh, &stats, &err)) {
                     vol->set_mesh(std::move(mesh));
                     vol->calculate_convex_hull();
                     vol->invalidate_convex_hull_2d();

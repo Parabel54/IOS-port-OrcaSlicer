@@ -441,7 +441,7 @@ ORCA_API int orca_session_mesh_stats(
     int *facets, int *open_edges, int *parts, float *volume_mm3);
 
 /**
- * Attempt official MeshBoolean::repair on object volumes (CGAL).
+ * Attempt official repair_mesh on object volumes (CGAL).
  * index = -1 → all objects. Updates mesh in place.
  * @return 0 on success (partial repairs still 0 if any volume fixed)
  */
