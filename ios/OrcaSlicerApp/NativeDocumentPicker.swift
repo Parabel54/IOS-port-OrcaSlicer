@@ -14,18 +14,6 @@ struct NativeDocumentPicker: UIViewControllerRepresentable {
         let picker = ImportDocumentPickerController(forOpeningContentTypes: [.item], asCopy: false)
         picker.allowsMultipleSelection = false
         picker.delegate = context.coordinator
-        if ProcessInfo.processInfo.arguments.contains("--test-document-import"), !settingsOnly {
-            picker.testPresentation = {
-                let marker = FileManager.default.temporaryDirectory.appendingPathComponent("orca-document-picker-smoke.txt")
-                try? "PASS: native document picker presented".write(to: marker, atomically: true, encoding: .utf8)
-                let fixture = StartupRecovery().dataDirectory.deletingLastPathComponent().appendingPathComponent("ios-import-smoke.3mf")
-                // A real selection follows the remote service's presentation.
-                // Wait one transition in the synthetic picker test too.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                    context.coordinator.finish(picker, url: fixture)
-                }
-            }
-        }
         return picker
     }
 
@@ -61,11 +49,11 @@ struct NativeDocumentPicker: UIViewControllerRepresentable {
 }
 
 private final class ImportDocumentPickerController: UIDocumentPickerViewController {
-    var testPresentation: (() -> Void)?
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        guard view.window != nil, let testPresentation else { return }
-        self.testPresentation = nil
-        testPresentation()
+        if ProcessInfo.processInfo.arguments.contains("--test-native-picker") {
+            let marker = FileManager.default.temporaryDirectory.appendingPathComponent("orca-document-picker-smoke.txt")
+            try? "PASS: native document picker presented".write(to: marker, atomically: true, encoding: .utf8)
+        }
     }
 }

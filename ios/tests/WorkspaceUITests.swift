@@ -6,8 +6,11 @@ final class WorkspaceUITests: XCTestCase {
         continueAfterFailure = false
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication(bundleIdentifier: "com.orcaslicer.ios")
-        app.launchArguments = ["--test-view-metadata", "--test-document-import"]
+        app.launchArguments = ["--test-view-metadata", "--test-document-import", "--test-native-picker"]
         app.launch()
+        let cancel = app.buttons["Cancel"].firstMatch
+        XCTAssertTrue(cancel.waitForExistence(timeout: 180), "System document picker must present")
+        cancel.tap()
         let slice = app.buttons["slice-plate"]
         let imported = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             slice.exists && slice.isEnabled && slice.isHittable

@@ -132,10 +132,6 @@ camera = Path(sys.argv[1]) / 'tmp/orca-camera-smoke.txt'
 if not camera.is_file() or not camera.read_text().startswith('PASS:'):
     raise SystemExit('Camera pan/orbit/zoom smoke test failed')
 print(camera.read_text())
-picker = Path(sys.argv[1]) / 'tmp/orca-document-picker-smoke.txt'
-if not picker.is_file():
-    raise SystemExit('Native document picker did not present')
-print(picker.read_text())
 print(import_result.read_text())
 print('PASS: app completed engine and system-profile startup')
 PYTEST
@@ -144,6 +140,7 @@ sleep 3
 xcrun simctl io "$DEVICE" screenshot "$TEST_DIR/app-launch.png"
 
 # A narrow phone and a large tablet exercise real adaptive SwiftUI layouts.
+ios_test_run 20 xcrun simctl terminate "$DEVICE" com.orcaslicer.ios
 ios_test_run 20 xcrun simctl shutdown "$DEVICE"
 ios_test_run 20 xcrun simctl delete "$DEVICE"
 for variant in compact tablet; do
@@ -196,6 +193,8 @@ PYLAYOUT
     xcrun simctl io "$DEVICE" screenshot "$TEST_DIR/$variant-$presentation.png"
     cp "$APP_DATA/tmp/orca-workspace-layout.json" "$TEST_DIR/$variant-$presentation.json"
   done
+  # Fail if a marker was written but the app subsequently crashed.
+  ios_test_run 20 xcrun simctl terminate "$DEVICE" com.orcaslicer.ios
   if [[ "$variant" == tablet ]]; then
     # Rotate the simulated device through XCTest. A multitasking app cannot
     # force interface orientation through UIWindowScene.requestGeometryUpdate.

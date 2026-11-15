@@ -391,6 +391,11 @@ struct OrcaRootView: View {
         .sheet(item: $documentPicker) { request in
             NativeDocumentPicker(settingsOnly: request.isSettings) { url in
                 if let url { documents.receive(url, kind: request.kind) }
+                else if ProcessInfo.processInfo.arguments.contains("--test-native-picker") {
+                    // UI automation cancels through the system button, then
+                    // exercises the document inbox with its local fixture.
+                    documents.receive(testDocumentFixture, kind: request.kind)
+                }
                 documentPicker = nil
             }
         }
@@ -3368,8 +3373,16 @@ struct OrcaRootView: View {
         didTestImport = true
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 300_000_000)
-            requestDocumentPicker(.model(append: false))
+            if ProcessInfo.processInfo.arguments.contains("--test-native-picker") {
+                requestDocumentPicker(.model(append: false))
+            } else {
+                documents.receive(testDocumentFixture, kind: .model(append: false))
+            }
         }
+    }
+
+    private var testDocumentFixture: URL {
+        StartupRecovery().dataDirectory.deletingLastPathComponent().appendingPathComponent("ios-import-smoke.3mf")
     }
 
     private func requestDocumentPicker(_ kind: DocumentImportKind) {
