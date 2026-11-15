@@ -341,7 +341,7 @@ struct ProcessSettingsBrowser: View {
                         if scope == 0 && (categoryFilter.isEmpty || categoryFilter == "Others") {
                             NavigationLink("Post-processing plugins") { NativeProcessingPanel(engine: engine) }
                         }
-                        Text("\(filtered.count) of \(entries.count) options")
+                        Text("Options: \(filtered.count)")
                             .font(.caption)
                             .foregroundStyle(themeMuted)
                             .listRowBackground(themePanel)
@@ -433,10 +433,12 @@ struct ProcessSettingsBrowser: View {
                         .foregroundStyle(themeMuted)
                 }
             }
-            Text(entry.key)
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(themeMuted)
-                .lineLimit(1)
+            if mode == 2 {
+                Text(entry.key)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(themeMuted)
+                    .lineLimit(1)
+            }
 
             switch entry.type {
             case .bool where entry.value.contains(",") || entry.value.contains(";") || entry.value == "nil":
@@ -452,9 +454,9 @@ struct ProcessSettingsBrowser: View {
                     set: { on in
                         apply(entry.key, value: on ? "1" : "0")
                     }
-                )) {
-                    Text("enabled").font(.system(size: 12)).foregroundStyle(themeMuted)
-                }
+                )) { Text(entry.label) }
+                .labelsHidden()
+                .accessibilityLabel(Text(entry.label))
                 .tint(themeAccent)
 
             case .enum:
@@ -468,7 +470,7 @@ struct ProcessSettingsBrowser: View {
                     let matched = ProcessOptionCatalog.match(
                         current, in: choices, fallback: choices[0].key
                     )
-                    Picker(entry.key, selection: Binding(
+                    Picker(entry.label, selection: Binding(
                         get: { matched },
                         set: { apply(entry.key, value: $0) }
                     )) {
@@ -477,6 +479,8 @@ struct ProcessSettingsBrowser: View {
                         }
                     }
                     .pickerStyle(.menu)
+                    .labelsHidden()
+                    .accessibilityLabel(Text(entry.label))
                     .tint(themeAccent)
                 } else {
                     scalarEditor(entry)
@@ -496,7 +500,7 @@ struct ProcessSettingsBrowser: View {
             set: { draftValues[entry.key] = $0 }
         )
         return HStack(spacing: 8) {
-            TextField(entry.key, text: draft, axis: .vertical)
+            TextField(entry.label, text: draft, axis: .vertical)
                 .lineLimit(1...8)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
