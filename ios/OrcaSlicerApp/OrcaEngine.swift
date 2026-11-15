@@ -2094,9 +2094,13 @@ final class OrcaEngine: ObservableObject {
                 // Parking and homing travels are not printable layer heights.
                 let zs = records.filter { $0.travel == 0 }.flatMap { [$0.start_z, $0.end_z] }
                 let feeds = paths.map { $0.feedrate }.filter { $0 > 0 }
+                let widths = records.filter { $0.travel == 0 && $0.width > 0 }.map { $0.width }
+                let heights = records.filter { $0.travel == 0 && $0.height > 0 }.map { $0.height }
                 let path = GCodePathGeometry(segments: paths,
                     zMin: zs.min() ?? 0, zMax: zs.max() ?? 0.2,
                     feedMin: feeds.min() ?? 0, feedMax: feeds.max() ?? 1,
+                    widthRange: (widths.min() ?? defW)...(widths.max() ?? defW),
+                    layerHeightRange: (heights.min() ?? 0.2)...(heights.max() ?? 0.2),
                     defaultWidth: defW)
                 self.previewIsReduced = totalCount > count
                 self.previewLayerHeights = Array(Set(records.filter { $0.travel == 0 }.map { $0.end_z })).sorted()

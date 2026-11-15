@@ -2992,29 +2992,26 @@ struct OrcaRootView: View {
                 }
             }
 
-            // Color mode: feature / height / speed
-            HStack(spacing: 8) {
-                Text("Color")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(OrcaTheme.muted)
-                ForEach(GCodePathGeometry.ColorMode.allCases) { mode in
-                    Button {
-                        engine.previewColorMode = mode
-                        engine.requestPreviewLayer()
-                    } label: {
-                        Text(mode.label)
-                            .font(.system(size: 11, weight: .semibold))
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(engine.previewColorMode == mode
-                                        ? OrcaTheme.accent.opacity(0.28) : OrcaTheme.elevated)
-                            .foregroundStyle(engine.previewColorMode == mode
-                                             ? OrcaTheme.accent : OrcaTheme.muted)
-                            .clipShape(Capsule())
-                    }
-                    .buttonStyle(.plain)
-                }
-                Spacer(minLength: 0)
+            Picker("Color by", selection: Binding(
+                get: { engine.previewColorMode },
+                set: { engine.previewColorMode = $0; engine.requestPreviewLayer() }
+            )) {
+                ForEach(GCodePathGeometry.ColorMode.allCases) { mode in Text(mode.label).tag(mode) }
+            }.pickerStyle(.menu)
+            if engine.previewColorMode != .feature, let geometry = engine.gcodeGeometry {
+                let range = geometry.colorRange(for: engine.previewColorMode)
+                let unit = engine.previewColorMode == .speed ? "mm/s" : "mm"
+                LinearGradient(colors: [Color(uiColor: GCodePathGeometry.gradientColor(t: 0)),
+                    Color(uiColor: GCodePathGeometry.gradientColor(t: 0.25)),
+                    Color(uiColor: GCodePathGeometry.gradientColor(t: 0.5)),
+                    Color(uiColor: GCodePathGeometry.gradientColor(t: 0.75)),
+                    Color(uiColor: GCodePathGeometry.gradientColor(t: 1))], startPoint: .leading, endPoint: .trailing)
+                    .frame(height: 8).clipShape(Capsule())
+                HStack {
+                    Text(String(format: "%.2f %@", range.lowerBound, unit))
+                    Spacer()
+                    Text(String(format: "%.2f %@", range.upperBound, unit))
+                }.font(.caption.monospacedDigit())
             }
 
             // Analysis strip when stats available

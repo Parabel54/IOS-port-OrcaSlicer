@@ -1033,12 +1033,16 @@ struct GCodePathGeometry {
     enum ColorMode: String, CaseIterable, Identifiable {
         case feature
         case height
+        case layerHeight
+        case lineWidth
         case speed
         var id: String { rawValue }
         var label: String {
             switch self {
             case .feature: return "Feature"
-            case .height: return "Height"
+            case .height: return "Z height"
+            case .layerHeight: return "Layer height"
+            case .lineWidth: return "Line width"
             case .speed: return "Speed"
             }
         }
@@ -1058,6 +1062,8 @@ struct GCodePathGeometry {
     var zMax: Float = 0
     var feedMin: Float = 0
     var feedMax: Float = 0
+    var widthRange: ClosedRange<Float> = 0...1
+    var layerHeightRange: ClosedRange<Float> = 0...1
     /// Default line width when WIDTH comment missing (from nozzle / line_width)
     var defaultWidth: Float = 0.45
 
@@ -1140,7 +1146,7 @@ struct GCodePathGeometry {
         }
         return GCodePathGeometry(
             segments: out, zMin: max(zMin, minZ), zMax: maxZ,
-            feedMin: feedMin, feedMax: feedMax, defaultWidth: defaultWidth
+            feedMin: feedMin, feedMax: feedMax, widthRange: widthRange, layerHeightRange: layerHeightRange, defaultWidth: defaultWidth
         )
     }
 
@@ -1161,7 +1167,13 @@ struct GCodePathGeometry {
             SCNVector3(Float($0) * 0.01, $0 == 1 ? 100 : 0, 1)
         }, feature: "Outer wall", width: 0.45, feedrate: 1200)
         let longPath = GCodePathGeometry(segments: [corner]).makeNode(color: .white)
-        return (longPath.childNodes.first?.boundingBox.max.y ?? 0) >= 99
+        guard (longPath.childNodes.first?.boundingBox.max.y ?? 0) >= 99 else { return false }
+        var thick = bead
+        thick.width = 0.8; thick.height = 0.4
+        let colors = GCodePathGeometry(segments: [bead, thick], widthRange: 0.45...0.8, layerHeightRange: 0.3...0.4)
+        return !colors.color(for: bead, mode: .layerHeight).isEqual(colors.color(for: thick, mode: .layerHeight)) &&
+            !colors.color(for: bead, mode: .lineWidth).isEqual(colors.color(for: thick, mode: .lineWidth)) &&
+            colors.filtered(minZ: 1, maxZ: 1).widthRange == colors.widthRange
     }
 
     static func color(for feature: String) -> UIColor {
@@ -1216,30 +1228,30 @@ struct GCodePathGeometry {
         return UIColor(red: r, green: g, blue: b, alpha: alpha)
     }
 
-    func color(for seg: Segment, mode: ColorMode) -> UIColor {
+    func colorRange(for mode: ColorMode) -> ClosedRange<Float> {
         switch mode {
-        case .feature:
-            return Self.color(for: seg.feature)
-        case .height:
-            let midZ: Float
-            if let first = seg.points.first, let last = seg.points.last {
-                midZ = (first.z + last.z) * 0.5
-            } else {
-                midZ = zMin
-            }
-            let span = max(0.001, zMax - zMin)
-            let t = (midZ - zMin) / span
-            return Self.gradientColor(t: t)
-        case .speed:
-            let span = max(1, feedMax - feedMin)
-            let t = seg.feedrate > 0 ? (seg.feedrate - feedMin) / span : 0
-            return Self.gradientColor(t: t)
+        case .feature: return 0...1
+        case .height: return min(zMin, zMax)...max(zMin, zMax)
+        case .layerHeight: return layerHeightRange
+        case .lineWidth: return widthRange
+        case .speed: return (min(feedMin, feedMax) / 60)...(max(feedMin, feedMax) / 60)
         }
     }
 
-    /// Parent "content" applies Z-up → Y-up; do not rotate this node.
-    /// Extrusions: ribbon quads at official `;WIDTH:` (fallback defaultWidth).
-    /// Travel: thin line.
+    func color(for seg: Segment, mode: ColorMode) -> UIColor {
+        let value: Float
+        switch mode {
+        case .feature: return Self.color(for: seg.feature)
+        case .height:
+            value = ((seg.points.first?.z ?? zMin) + (seg.points.last?.z ?? zMin)) * 0.5
+        case .layerHeight: value = seg.height
+        case .lineWidth: value = seg.width
+        case .speed: value = seg.feedrate / 60
+        }
+        let range = colorRange(for: mode)
+        return Self.gradientColor(t: (value - range.lowerBound) / max(0.001, range.upperBound - range.lowerBound))
+    }
+
     func makeNode(color: UIColor, colorMode: ColorMode = .feature) -> SCNNode {
         let root = SCNNode()
         root.name = "gcode"
