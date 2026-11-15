@@ -180,6 +180,20 @@ final class OrcaEngine: ObservableObject {
         #endif
     }
 
+    /// Results belong to one exact model/configuration and cannot survive an edit.
+    private func invalidateSlice() {
+        gcodeURL = nil
+        gcodeGeometry = nil
+        gcodePathNode = nil
+        previewIsReduced = false
+        lastSliceStatsText = ""
+        lastAvgLayerTimeText = ""
+        lastSliceTimeSec = 0
+        lastSliceFilamentMm3 = 0
+        lastSliceLayers = 0
+        filamentByRole = []
+    }
+
     /// Drop G-code preview + settings-browser caches. Model mesh kept for prepare.
     func handleMemoryWarning() {
         #if ORCA_LINKED
@@ -426,6 +440,7 @@ final class OrcaEngine: ObservableObject {
             return false
         }
         _ = orca_session_apply_presets(s)
+        invalidateSlice()
         selectedProcess = name
         activeProcessProfile = name
         refreshPresetLists()
@@ -448,6 +463,7 @@ final class OrcaEngine: ObservableObject {
             return false
         }
         _ = orca_session_apply_presets(s)
+        invalidateSlice()
         selectedFilament = name
         persistSelection()
         lastMessage = "Filament: \(name)"
@@ -736,11 +752,13 @@ final class OrcaEngine: ObservableObject {
     @discardableResult
     private func setOptionRaw(_ key: String, _ value: String) -> Int32 {
         guard let s = session else { return -1 }
-        return key.withCString { k in
+        let rc = key.withCString { k in
             value.withCString { v in
                 orca_session_set_option(s, k, v)
             }
         }
+        if rc == 0 { invalidateSlice() }
+        return rc
     }
     #endif
 
@@ -971,6 +989,7 @@ final class OrcaEngine: ObservableObject {
     }
 
     func refreshMesh() {
+        invalidateSlice()
         #if ORCA_LINKED
         guard let s = session, hasModel else {
             mesh = nil
@@ -1693,20 +1712,20 @@ final class OrcaEngine: ObservableObject {
     @Published var slicePercent: Int = 0
     @Published var slicePhase: String = ""
 
+    private var sliceRunning = false
+
     @MainActor
     func slice() async -> String {
         #if ORCA_LINKED
         guard let s = session else { return "No session" }
+        guard !sliceRunning else { return "A slice is already running" }
+        guard !presetsLoading else { return "Wait for printer profiles to finish loading" }
+        sliceRunning = true
+        defer { sliceRunning = false }
         let out = FileManager.default.temporaryDirectory
             .appendingPathComponent("plate_\(UUID().uuidString).gcode")
         // A failed attempt must never expose the previous job as its result.
-        gcodeURL = nil
-        gcodeGeometry = nil
-        gcodePathNode = nil
-        previewIsReduced = false
-        lastSliceStatsText = ""
-        lastAvgLayerTimeText = ""
-        filamentByRole = []
+        invalidateSlice()
         await MainActor.run {
             self.slicePercent = 0
             self.slicePhase = "Starting"
@@ -1821,15 +1840,18 @@ final class OrcaEngine: ObservableObject {
                     let end = SCNVector3(move.end_x, move.end_y, move.end_z)
                     let feature = move.travel != 0 ? "Travel" :
                         String(cString: orca_preview_role_name(move.role))
-                    if let last = paths.last, let previousEnd = last.points.last,
-                       last.feature == feature, last.width == move.width,
-                       last.feedrate == move.feedrate,
-                       previousEnd.x == start.x, previousEnd.y == start.y, previousEnd.z == start.z {
-                        paths[paths.count - 1].points.append(end)
-                    } else {
-                        paths.append(GCodePathGeometry.Segment(points: [start, end],
-                            feature: feature, width: move.width, feedrate: move.feedrate))
+                    if !paths.isEmpty {
+                        let index = paths.count - 1
+                        if let previousEnd = paths[index].points.last,
+                           paths[index].feature == feature, paths[index].width == move.width,
+                           paths[index].feedrate == move.feedrate,
+                           previousEnd.x == start.x, previousEnd.y == start.y, previousEnd.z == start.z {
+                            paths[index].points.append(end)
+                            continue
+                        }
                     }
+                    paths.append(GCodePathGeometry.Segment(points: [start, end],
+                        feature: feature, width: move.width, feedrate: move.feedrate))
                 }
                 let zs = paths.flatMap { $0.points.map { $0.z } }
                 let feeds = paths.map { $0.feedrate }.filter { $0 > 0 }

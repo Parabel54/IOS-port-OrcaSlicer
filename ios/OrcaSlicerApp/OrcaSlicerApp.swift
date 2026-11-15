@@ -176,7 +176,7 @@ struct OrcaRootView: View {
             }
         }
         // The C session belongs to the background slice until it finishes.
-        .disabled(isSlicing)
+        .disabled(isSlicing || engine.presetsLoading)
         .sheet(isPresented: $showProcess) {
             processSheet
                 .presentationDetents([.medium, .large])
