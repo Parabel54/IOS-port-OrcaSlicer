@@ -28,6 +28,7 @@
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Format/3mf.hpp"
+#include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/miniz_extension.hpp"
 // Generated into build dir as libslic3r_version.h (include path via libslic3r target)
 #include "libslic3r_version.h"
@@ -323,6 +324,10 @@ static int load_model_impl(orca_session_t *s, const char *path, bool append)
         return -1;
     s->clear_error();
     try {
+        if (fs::is_regular_file(path) && fs::file_size(path) == 0) {
+            s->set_error("The selected file contains 0 bytes. Finish downloading it in Files before importing.");
+            return -3;
+        }
         DynamicPrintConfig  file_config;
         ConfigSubstitutionContext substitutions(ForwardCompatibilitySubstitutionRule::EnableSilent);
         Model incoming;
@@ -344,26 +349,38 @@ static int load_model_impl(orca_session_t *s, const char *path, bool append)
         if (slic3r_archive) {
             if (!load_3mf(path, file_config, substitutions, &incoming, true)) {
                 s->set_error("Unable to read Slic3r 3MF project");
-                if (!append)
-                    s->has_model = false;
                 return -3;
             }
             incoming.add_default_instances();
             for (ModelObject *object : incoming.objects)
                 object->input_file = path;
+        } else if (extension == ".3mf") {
+            // The Orca reader requires explicit geometry/config flags and valid
+            // output storage. Its auxiliary outputs are owned by the caller.
+            struct ProjectOutputs {
+                PlateDataPtrs plates;
+                std::vector<Preset*> presets;
+                ~ProjectOutputs() {
+                    release_PlateData_list(plates);
+                    for (Preset *preset : presets)
+                        delete preset;
+                }
+            } outputs;
+            bool is_bambu = false;
+            Semver file_version;
+            incoming = Model::read_from_file(std::string(path), &file_config,
+                &substitutions, LoadStrategy::AddDefaultInstances | LoadStrategy::LoadModel | LoadStrategy::LoadConfig,
+                &outputs.plates, &outputs.presets, &is_bambu, &file_version);
         } else {
             incoming = Model::read_from_file(std::string(path), &file_config,
                 &substitutions, LoadStrategy::AddDefaultInstances);
         }
         if (incoming.objects.empty()) {
             s->set_error("Model has no objects after load");
-            if (!append) {
-                s->has_model = false;
-            }
             return -2;
         }
-        ensure_default_config(s);
-        s->config.apply(file_config);
+        DynamicPrintConfig next_config = s->has_config ? s->config : DynamicPrintAndCLIConfig::full_print_config();
+        next_config.apply(file_config);
 
         if (!append) {
             s->model = std::move(incoming);
@@ -388,17 +405,17 @@ static int load_model_impl(orca_session_t *s, const char *path, bool append)
                 obj->ensure_on_bed();
         }
         s->has_model = !s->model.objects.empty();
+        s->config = std::move(next_config);
+        s->has_config = true;
         s->has_slice_stats = false;
+        s->preview_segments.clear();
+        s->preview_total_segments = 0;
         return 0;
     } catch (const std::exception &ex) {
         s->set_error(std::string("load_model: ") + ex.what());
-        if (!append)
-            s->has_model = false;
         return -3;
     } catch (...) {
         s->set_error("load_model: unknown error");
-        if (!append)
-            s->has_model = false;
         return -3;
     }
 }
