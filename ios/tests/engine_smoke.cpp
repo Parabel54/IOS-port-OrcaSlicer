@@ -11,13 +11,13 @@
 
 int main(int argc, char **argv)
 {
-    if (argc != 2)
+    if (argc != 3)
         return 2;
     const std::string directory = argv[1];
     const std::string project = directory + "/cube.3mf";
     const std::string output = directory + "/cube.gcode";
     std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
-        session(orca_session_create(nullptr), orca_session_destroy);
+        session(orca_session_create(argv[2]), orca_session_destroy);
     if (!session)
         return 3;
     auto require = [&](bool condition, const char *message) {
@@ -25,6 +25,9 @@ int main(int argc, char **argv)
             std::fprintf(stderr, "%s: %s\n", message, orca_session_last_error(session.get()));
         return condition;
     };
+    std::ifstream nozzle_data(std::string(argv[2]) + "/info/nozzle_info.json");
+    if (!require(nozzle_data.good(), "bundled nozzle data is available"))
+        return 4;
     if (!require(orca_session_set_option(session.get(), "layer_height", "0.16") == 0, "set project layer height"))
         return 4;
     if (!require(orca_session_add_box(session.get(), "Smoke cube", 20, 20, 20) >= 0, "create cube") ||
