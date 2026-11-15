@@ -4051,13 +4051,19 @@ int orca_session_simplify_mesh(
                 total_faces += cur;
                 continue;
             }
+            const auto painting = vol->save_painting();
             its_quadric_edge_collapse(its, want, nullptr, nullptr, nullptr);
-            vol->set_mesh(std::move(mesh));
+            // Rebuild cached statistics after editing the indexed triangles,
+            // and remap annotations through the desktop simplify path.
+            vol->set_mesh(TriangleMesh(std::move(its)));
+            vol->restore_painting(painting);
             vol->calculate_convex_hull();
             vol->invalidate_convex_hull_2d();
+            vol->set_new_unique_id();
             total_faces += int(vol->mesh().its.indices.size());
         }
         obj->invalidate_bounding_box();
+        obj->ensure_on_bed();
         return total_faces;
     } catch (const std::exception &ex) {
         s->set_error(std::string("simplify_mesh: ") + ex.what());

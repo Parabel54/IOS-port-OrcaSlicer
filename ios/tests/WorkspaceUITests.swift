@@ -17,6 +17,19 @@ final class WorkspaceUITests: XCTestCase {
         }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [imported], timeout: 180), .completed,
                        "The native picker must finish import and dismiss before rotation")
+        slice.tap()
+        let export = app.buttons["Export G-code"]
+        let preview = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            app.state == .runningForeground && export.exists && export.isHittable
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [preview], timeout: 180), .completed,
+                       "The app must slice the imported model and present its processed preview")
+        XCTAssertTrue(app.sliders["Upper preview layer"].exists)
+        let toolpaths = XCTAttachment(screenshot: app.screenshot())
+        toolpaths.name = "toolpath-preview"
+        toolpaths.lifetime = .keepAlways
+        add(toolpaths)
+        app.buttons["Prepare"].tap()
         app.buttons["model-library-shortcut"].tap()
         XCTAssertTrue(app.buttons["add-primitive"].waitForExistence(timeout: 10))
         app.buttons["add-primitive"].tap()

@@ -87,9 +87,16 @@ int main(int argc, char **argv)
         if (!require(orca_session_add_primitive(edited.get(), 1, 20, 20, 20) == 0, "simplify fixture") ||
             !require(orca_session_mesh_stats(edited.get(), 0, &facets, &edges, &parts, &volume) == 0, "initial cylinder facets")) return 4;
         const int before = facets;
+        for (int kind = 0; kind < 4; ++kind)
+            if (!require(orca_session_paint_fill(edited.get(), 0, kind, 1) > 0, "paint simplify fixture")) return 4;
         if (!require(orca_session_simplify_mesh(edited.get(), 0, 64) > 0, "simplify native mesh") ||
             !require(orca_session_mesh_stats(edited.get(), 0, &facets, &edges, &parts, &volume) == 0 && facets < before,
                      "simplify reduces the actual mesh")) return 4;
+        for (int kind = 0; kind < 4; ++kind) {
+            int painted = 0;
+            if (!require(orca_session_paint_stats(edited.get(), 0, kind, 1, &painted) == 0 && painted > 0 && painted <= facets,
+                         "simplify remaps valid painting onto the reduced mesh")) return 4;
+        }
     }
     {
         std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
