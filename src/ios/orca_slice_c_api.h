@@ -155,6 +155,14 @@ ORCA_API int orca_session_option_info(
     char *category_buf, size_t category_len,
     char *sidetext_buf, size_t sidetext_len);
 
+/** Configured post-processing commands; returned strings belong to the session. */
+ORCA_API int orca_session_post_process_count(orca_session_t *s);
+ORCA_API const char *orca_session_post_process_script(orca_session_t *s, int index);
+
+/** Desktop presentation: scope 0=process, 1=filament, 2=printer, -1=internal.
+ * Returns the minimum ConfigOptionMode, or -1 for hidden/read-only options. */
+ORCA_API int orca_session_option_presentation(const char *key, int *scope_out);
+
 /** Enum serialize keys / labels for coEnum options (from ConfigOptionDef). */
 ORCA_API int orca_session_option_enum_count(orca_session_t *s, const char *key);
 ORCA_API const char *orca_session_option_enum_value(orca_session_t *s, const char *key, int index);

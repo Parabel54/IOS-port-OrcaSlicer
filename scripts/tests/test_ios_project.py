@@ -34,6 +34,7 @@ class ProjectGenerationTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         (self.root / 'ios').mkdir()
         shutil.copy(SOURCE, self.root / 'ios/generate_xcodeproj.py')
+        shutil.copytree(SOURCE.parent / 'licenses', self.root / 'ios/licenses')
         profiles = self.root / 'resources/profiles'
         profiles.mkdir(parents=True)
         (profiles / 'vendor.json').write_text('{}')

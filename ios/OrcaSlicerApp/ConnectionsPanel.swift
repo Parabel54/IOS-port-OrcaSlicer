@@ -60,10 +60,7 @@ struct PrinterConnectionsPanel: View {
                 Text(connections.message).font(.caption)
             }
             Divider()
-            Text("Plugins").font(.headline)
-            Text("Flashforge AD5X/5M, Moonraker, OctoPrint, and PrusaLink connections are built in. Open your printer’s web interface to use its installed web plugins. Desktop networking plugins require an iOS-compatible build and are not loaded by this app.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            NavigationLink("Post-processing plugins") { NativeProcessingPanel(engine: engine) }
             Button("Open printer web interface") {
                 if let url = PrinterConnection.validatedURL(address) {
                     browser = BrowserDestination(url: url)

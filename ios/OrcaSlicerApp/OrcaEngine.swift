@@ -1619,6 +1619,9 @@ final class OrcaEngine: ObservableObject {
         for i in 0..<n {
             guard let ck = orca_session_option_key(s, Int32(i)) else { continue }
             let key = String(cString: ck)
+            var scope: Int32 = -1
+            let mode = key.withCString { orca_session_option_presentation($0, &scope) }
+            guard mode >= 0, mode <= 2, scope >= 0 else { continue }
             var type: Int32 = 6
             var labelBuf = [CChar](repeating: 0, count: 256)
             var catBuf = [CChar](repeating: 0, count: 128)
@@ -1638,6 +1641,8 @@ final class OrcaEngine: ObservableObject {
             // Defer enum choice materialization — hundreds of keys × N labels was costly
             out.append(ConfigOptionEntry(
                 key: key,
+                scope: Int(scope),
+                mode: Int(mode),
                 label: label.isEmpty ? key : label,
                 category: category,
                 sidetext: sidetext,
@@ -1897,6 +1902,17 @@ final class OrcaEngine: ObservableObject {
             slicePhase = rc == -7 ? "Cancelled" : "Failed"
             let err = orca_session_last_error(s).map { String(cString: $0) } ?? "slice failed"
             return "slice rc=\(rc): \(err)"
+        }
+        let commands = (0..<orca_session_post_process_count(s)).compactMap { index in
+            orca_session_post_process_script(s, index).map { String(cString: $0) }
+        }
+        do {
+            self.slicePhase = "Post-processing"
+            try await Task.detached { try NativePostProcessing.run(file: out, commands: commands) }.value
+        } catch {
+            try? FileManager.default.removeItem(at: out)
+            self.slicePhase = "Post-processing failed"
+            return error.localizedDescription
         }
         await MainActor.run { [sessionBits] in
             let sess = OpaquePointer(bitPattern: sessionBits)!

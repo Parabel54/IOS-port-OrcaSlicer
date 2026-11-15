@@ -25,6 +25,18 @@ int main(int argc, char **argv)
             std::fprintf(stderr, "%s: %s\n", message, orca_session_last_error(session.get()));
         return condition;
     };
+    int scope = -1;
+    if (!require(orca_session_option_presentation("layer_height", &scope) >= 0 && scope == 0, "process option ownership") ||
+        !require(orca_session_option_presentation("filament_type", &scope) >= 0 && scope == 1, "filament option ownership") ||
+        !require(orca_session_option_presentation("nozzle_diameter", &scope) >= 0 && scope == 2, "printer option ownership") ||
+        !require(orca_session_option_presentation("missing_option", &scope) == -1, "unknown option is hidden"))
+        return 4;
+    if (!require(orca_session_set_option(session.get(), "post_process", "zmod-preprocess.py") == 0, "configure post-processing") ||
+        !require(orca_session_post_process_count(session.get()) == 1, "post-processing command count") ||
+        !require(std::string(orca_session_post_process_script(session.get(), 0)) == "zmod-preprocess.py", "desktop post-processing command") ||
+        !require(orca_session_post_process_script(session.get(), 1) == nullptr, "post-processing command bounds") ||
+        !require(orca_session_set_option(session.get(), "post_process", "") == 0, "disable post-processing"))
+        return 4;
     std::ifstream nozzle_data(std::string(argv[2]) + "/info/nozzle_info.json");
     if (!require(nozzle_data.good(), "bundled nozzle data is available"))
         return 4;

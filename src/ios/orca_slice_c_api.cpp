@@ -1015,6 +1015,39 @@ int orca_session_option_info(
     }
 }
 
+int orca_session_post_process_count(orca_session_t *s)
+{
+    if (!s) return 0;
+    const auto *scripts = s->config.option<ConfigOptionStrings>("post_process");
+    return scripts ? static_cast<int>(scripts->values.size()) : 0;
+}
+
+const char *orca_session_post_process_script(orca_session_t *s, int index)
+{
+    if (!s || index < 0) return nullptr;
+    const auto *scripts = s->config.option<ConfigOptionStrings>("post_process");
+    return scripts && static_cast<size_t>(index) < scripts->values.size() ? scripts->values[index].c_str() : nullptr;
+}
+
+int orca_session_option_presentation(const char *key, int *scope_out)
+{
+    if (scope_out) *scope_out = -1;
+    if (!key) return -1;
+    const ConfigOptionDef *def = lookup_option_def(key);
+    if (!def || def->readonly || (def->label.empty() && def->full_label.empty())) return -1;
+    // Use desktop preset ownership, rather than guessing scope from key prefixes.
+    const std::vector<std::string> *scopes[] = {
+        &Preset::print_options(), &Preset::filament_options(), &Preset::printer_options()
+    };
+    for (int scope = 0; scope < 3; ++scope) {
+        if (std::find(scopes[scope]->begin(), scopes[scope]->end(), key) != scopes[scope]->end()) {
+            if (scope_out) *scope_out = scope;
+            return static_cast<int>(def->mode);
+        }
+    }
+    return -1;
+}
+
 int orca_session_option_enum_count(orca_session_t *s, const char *key)
 {
     if (!s || !key)

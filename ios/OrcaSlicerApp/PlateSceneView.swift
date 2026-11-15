@@ -502,41 +502,68 @@ struct PlateSceneView: UIViewRepresentable {
                 panGesture?.isEnabled = true
             }
             guard gesture.numberOfTouches == 2, gesture.state == .changed, let view else { return }
-            zoom(scale: Float(gesture.scale), view: view)
+            zoom(scale: Float(gesture.scale), view: view, anchor: gesture.location(in: view))
             gesture.scale = 1
         }
 
-        func zoom(scale: Float, view: SCNView) {
+        func zoom(scale: Float, view: SCNView, anchor: CGPoint? = nil) {
             guard let camera = view.pointOfView else { return }
-            let target = view.defaultCameraController.target
-            let offset = SIMD3<Float>(camera.position.x - target.x, camera.position.y - target.y, camera.position.z - target.z)
-            let distance = simd_length(offset)
+            let controller = view.defaultCameraController
+            let target = SIMD3<Float>(controller.target.x, controller.target.y, controller.target.z)
+            let distance = simd_length(camera.simdPosition - target)
             guard distance > 0, scale.isFinite, scale > 0 else { return }
-            let next = min(max(distance / scale, 0.5), 20000)
-            let position = SIMD3<Float>(target.x, target.y, target.z) + offset * (next / distance)
-            camera.position = SCNVector3(position.x, position.y, position.z)
+            let ratio = min(max(distance / scale, 0.5), 20000) / distance
+            // Keep the point under the pinch centroid stationary on screen.
+            var focus = target
+            if let anchor {
+                let depth = view.projectPoint(controller.target).z
+                let world = view.unprojectPoint(SCNVector3(Float(anchor.x), Float(anchor.y), depth))
+                focus = SIMD3<Float>(world.x, world.y, world.z)
+            }
+            camera.simdPosition = focus + (camera.simdPosition - focus) * ratio
+            let nextTarget = focus + (target - focus) * ratio
+            controller.target = SCNVector3(nextTarget.x, nextTarget.y, nextTarget.z)
         }
 
         private func cameraPan(_ gesture: UIPanGestureRecognizer, view: SCNView, mode: PlateTouchMode) {
-            guard gesture.state == .changed, let camera = view.pointOfView else { return }
+            // Consume the recognizer's initial movement too; subsequent changes
+            // are incremental so crossing its recognition threshold cannot jump.
+            guard gesture.state == .began || gesture.state == .changed else { return }
             let delta = gesture.translation(in: view)
             gesture.setTranslation(.zero, in: view)
             cameraDrag(delta: delta, view: view, mode: mode)
         }
 
         func cameraDrag(delta: CGPoint, view: SCNView, mode: PlateTouchMode) {
-            guard let camera = view.pointOfView else { return }
+            guard let camera = view.pointOfView, delta.x.isFinite, delta.y.isFinite else { return }
             let controller = view.defaultCameraController
-            controller.pointOfView = camera
+            let target = SIMD3<Float>(controller.target.x, controller.target.y, controller.target.z)
+            let offset = camera.simdPosition - target
+            let distance = simd_length(offset)
+            guard distance > 0 else { return }
             if mode == .orbit {
-                controller.rotateBy(x: Float(delta.x), y: Float(delta.y))
+                // One screen width/height is half a turn on every device. Keep
+                // the existing target after panning; never reframe on touch-down.
+                let yaw = simd_quatf(angle: -Float(delta.x / max(view.bounds.width, 1)) * .pi,
+                                     axis: SIMD3<Float>(0, 1, 0))
+                let elevation = asinf(min(max(offset.y / distance, -1), 1))
+                let requested = Float(delta.y / max(view.bounds.height, 1)) * Float.pi
+                let limit = Float.pi * 0.47
+                let next = min(max(elevation + requested, -limit), limit)
+                let right = yaw.act(camera.simdWorldRight)
+                let pitch = simd_quatf(angle: -(next - elevation), axis: right)
+                let rotation = pitch * yaw
+                camera.simdPosition = target + rotation.act(offset)
+                camera.simdOrientation = simd_normalize(rotation * camera.simdOrientation)
             } else {
-                let target = controller.target
-                let distance = simd_length(SIMD3<Float>(camera.position.x - target.x, camera.position.y - target.y, camera.position.z - target.z))
-                let units = 2 * distance * tanf(Float.pi * 21 / 180) / Float(max(view.bounds.height, 1))
-                let shift = camera.convertVector(SCNVector3(-Float(delta.x) * units, Float(delta.y) * units, 0), to: nil)
-                camera.position = SCNVector3(camera.position.x + shift.x, camera.position.y + shift.y, camera.position.z + shift.z)
-                controller.target = SCNVector3(target.x + shift.x, target.y + shift.y, target.z + shift.z)
+                // Unprojection respects the real projection/FOV and aspect ratio.
+                let center = view.projectPoint(controller.target)
+                let a = view.unprojectPoint(center)
+                let b = view.unprojectPoint(SCNVector3(center.x + Float(delta.x), center.y + Float(delta.y), center.z))
+                let shift = SIMD3<Float>(a.x - b.x, a.y - b.y, a.z - b.z)
+                camera.simdPosition += shift
+                let next = target + shift
+                controller.target = SCNVector3(next.x, next.y, next.z)
             }
         }
 
@@ -557,7 +584,7 @@ struct PlateSceneView: UIViewRepresentable {
                 isDragging = true
             case .changed:
                 guard isDragging else { return }
-                rotateDegrees = Float(gesture.translation(in: view).x) * 0.5
+                rotateDegrees = Float(gesture.translation(in: view).x / max(view.bounds.width, 1)) * 180
                 let angle = rotateDegrees * Float.pi / 180
                 switch parent.rotationAxis {
                 case 0: rotationNode?.eulerAngles.x = angle
@@ -684,16 +711,6 @@ struct PlateSceneView: UIViewRepresentable {
             }
 
             if parent.touchMode == .orbit || parent.touchMode == .pan {
-                if gr.state == .began, parent.touchMode == .orbit {
-                    let index = parent.selectedObjectIndex
-                    let mesh = index >= 0 && index < parent.objectMeshes.count ? parent.objectMeshes[index] : parent.mesh
-                    if let mesh {
-                        let center = (mesh.min + mesh.max) * 0.5
-                        let target = SCNVector3(center.x, center.z, -center.y)
-                        view.defaultCameraController.target = target
-                        view.pointOfView?.look(at: target)
-                    }
-                }
                 cameraPan(gr, view: view, mode: parent.touchMode)
                 return
             }
