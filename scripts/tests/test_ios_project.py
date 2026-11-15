@@ -19,6 +19,10 @@ class ProjectGenerationTests(unittest.TestCase):
         profiles = self.root / 'resources/profiles'
         profiles.mkdir(parents=True)
         (profiles / 'vendor.json').write_text('{}')
+        for folder in ('info', 'flush', 'filament_mixing'):
+            resource = self.root / 'resources' / folder
+            resource.mkdir()
+            (resource / 'table.json').write_text('{}')
 
     def generate(self, sdk):
         return subprocess.run([sys.executable, str(self.root / 'ios/generate_xcodeproj.py'),
@@ -51,6 +55,17 @@ class ProjectGenerationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(first, project.read_bytes())
         self.assertFalse(stale.exists())
+
+    def test_bundles_engine_tables_and_rejects_missing_tables(self):
+        self.engine('iphoneos')
+        result = self.generate('iphoneos')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        project = (self.root / 'ios/OrcaSlicer.xcodeproj/project.pbxproj').read_text()
+        for folder in ('info', 'flush', 'filament_mixing'):
+            self.assertIn(f'path = Resources/{folder};', project)
+            self.assertTrue((self.root / 'ios/OrcaSlicerApp/Resources' / folder / 'table.json').is_file())
+        shutil.rmtree(self.root / 'resources/info')
+        self.assertNotEqual(self.generate('iphoneos').returncode, 0)
 
     def test_requires_profiles(self):
         self.engine('iphoneos')

@@ -67,6 +67,19 @@ if _SRC_CALIB.is_dir():
     print("Synced calib →", CALIB_DIR)
 has_calib = CALIB_DIR.is_dir() and any(CALIB_DIR.rglob("*"))
 
+# Small engine data tables used by nozzle validation, flush prediction and mixing.
+engine_resource_folders = []
+for folder in ("info", "flush", "filament_mixing"):
+    source = REPO / "resources" / folder
+    destination = ROOT / "OrcaSlicerApp" / "Resources" / folder
+    if source.is_dir():
+        if destination.exists():
+            shutil.rmtree(destination)
+        shutil.copytree(source, destination)
+        engine_resource_folders.append(folder)
+    elif args.require_engine:
+        parser.error(f"Missing required engine resources: {source}")
+
 mac_lib_path = "$(SRCROOT)/../build-macos-headless-arm64/engine_bundle/lib"
 ios_sim_lib_path = "$(SRCROOT)/../build-ios-iphonesimulator-arm64/engine_bundle/lib"
 ios_dev_lib_path = "$(SRCROOT)/../build-ios-iphoneos-arm64/engine_bundle/lib"
@@ -420,6 +433,21 @@ pbx = f'''// !$*UTF8*$!
 	rootObject = {IDs["project"]} /* Project object */;
 }}
 '''
+
+for folder in engine_resource_folders:
+    file_id = uid("engine-resource-file/" + folder)
+    build_id = uid("engine-resource-build/" + folder)
+    pbx = pbx.replace("/* End PBXBuildFile section */",
+        f"\t\t{build_id} /* {folder} in Resources */ = {{isa = PBXBuildFile; fileRef = {file_id}; }};\n"
+        "/* End PBXBuildFile section */")
+    pbx = pbx.replace("/* End PBXFileReference section */",
+        f'\t\t{file_id} /* {folder} */ = {{isa = PBXFileReference; lastKnownFileType = folder; '
+        f'path = Resources/{folder}; sourceTree = "<group>"; }};\n'
+        "/* End PBXFileReference section */")
+    pbx = pbx.replace("A1000000000000000000000C /* ProcessOptions.swift */,",
+        f"A1000000000000000000000C /* ProcessOptions.swift */,\n\t\t\t\t{file_id} /* {folder} */,")
+    pbx = pbx.replace(f'{IDs["assets"]} /* Assets.xcassets in Resources */,',
+        f'{IDs["assets"]} /* Assets.xcassets in Resources */,\n\t\t\t\t{build_id} /* {folder} in Resources */,')
 
 (PROJ / "project.pbxproj").write_text(pbx)
 print("Wrote", PROJ / "project.pbxproj")

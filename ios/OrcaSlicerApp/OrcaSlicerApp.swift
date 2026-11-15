@@ -233,7 +233,7 @@ struct OrcaRootView: View {
                 .navigationTitle("Shortcuts")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
-                    ToolbarItem(placement: .topBarTrailing) {
+                    ToolbarItem(placement: .navigationBarTrailing) {
                         Button("Done") { showShortcuts = false }
                             .foregroundStyle(OrcaTheme.accent)
                     }
@@ -2300,7 +2300,7 @@ struct OrcaRootView: View {
             .navigationTitle("Setup wizard")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Continue") {
                         OrcaEngine.appLanguage = wizardLanguage
                         OrcaEngine.appRegion = wizardRegion
@@ -2380,7 +2380,7 @@ struct OrcaRootView: View {
             .navigationTitle("Preferences")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Done") { showPreferences = false }
                         .foregroundStyle(OrcaTheme.accent)
                 }
@@ -2414,7 +2414,7 @@ struct OrcaRootView: View {
             .navigationTitle("About")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Done") { showAbout = false }
                         .foregroundStyle(OrcaTheme.accent)
                 }
@@ -2461,7 +2461,7 @@ struct OrcaRootView: View {
             .navigationTitle("Object settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Done") { showObjectSettings = false }
                         .foregroundStyle(OrcaTheme.accent)
                 }
@@ -3753,7 +3753,7 @@ struct OrcaRootView: View {
             .navigationTitle("Process")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Done") { showProcess = false }
                         .fontWeight(.semibold)
                         .foregroundStyle(OrcaTheme.accent)
@@ -3903,7 +3903,7 @@ struct OrcaRootView: View {
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Done") {
                         showPrinterPicker = false
                         showProcessPicker = false

@@ -263,7 +263,7 @@ struct ProcessSettingsBrowser: View {
             .navigationTitle("All settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Reload") { reload() }
                         .foregroundStyle(themeAccent)
                 }
