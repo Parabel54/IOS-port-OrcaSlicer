@@ -531,8 +531,15 @@ int orca_session_slice_to_gcode(orca_session_t *s, const char *gcode_out_path)
         s->preview_segments.reserve(std::min(preview_budget, s->preview_total_segments));
         size_t ordinal = 0;
         size_t previous_slot = std::numeric_limits<size_t>::max();
+        Vec3f previous_position = result.moves.empty() ? Vec3f::Zero().eval() : result.moves.front().position;
         for (size_t i = 1; i < result.moves.size(); ++i) {
             const auto &move = result.moves[i];
+            // Speed-analysis points are not physical G-code endpoints. Ignoring
+            // them must not shorten the next visible segment.
+            if (move.internal_only)
+                continue;
+            const Vec3f start = previous_position;
+            previous_position = move.position;
             if (!visible_move(move))
                 continue;
             const size_t slot = s->preview_total_segments <= preview_budget ? ordinal :
@@ -541,7 +548,6 @@ int orca_session_slice_to_gcode(orca_session_t *s, const char *gcode_out_path)
             if (slot == previous_slot)
                 continue;
             previous_slot = slot;
-            const auto &start = result.moves[i - 1].position;
             const auto &end = move.position;
             const bool travel = move.type == EMoveType::Travel;
             s->preview_segments.push_back({start.x(), start.y(), start.z(),
