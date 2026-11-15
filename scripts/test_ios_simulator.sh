@@ -93,7 +93,15 @@ ios_test_run 360 xcodebuild build-for-testing -project "$ROOT/ios/OrcaSlicer.xco
   2>&1 | tee "$TEST_DIR/ui-build.log"
 codesign --force --deep --sign - "$APP_BUNDLE"
 codesign --force --deep --sign - "$ROOT/build-ios-app/Build/Products/Release-iphonesimulator/OrcaSlicerUITests-Runner.app"
-UI_RUN_FILE="$(rg --files --no-ignore "$ROOT/build-ios-app/Build/Products" -g '*.xctestrun' | head -n 1)"
+UI_RUN_FILE="$(python3 - "$ROOT/build-ios-app/Build/Products" <<'PYRUNFILE'
+from pathlib import Path
+import sys
+files = list(Path(sys.argv[1]).glob('OrcaSlicerUITests_*.xctestrun'))
+if len(files) != 1:
+    raise SystemExit(f'Expected one UI test run file, found {files}')
+print(files[0])
+PYRUNFILE
+)"
 ios_test_run 180 xcrun simctl spawn "$DEVICE" "$TEST_DIR/engine_smoke" "$TEST_DIR" "$APP_BUNDLE" \
   2>&1 | tee "$TEST_DIR/result.log"
 python3 "$ROOT/scripts/audit_ios_app.py" "$APP_BUNDLE" iphonesimulator
