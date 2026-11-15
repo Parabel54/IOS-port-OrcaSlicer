@@ -28,3 +28,10 @@ xcrun simctl boot "$DEVICE"
 xcrun simctl bootstatus "$DEVICE" -b
 xcrun simctl spawn "$DEVICE" "$TEST_DIR/engine_smoke" "$TEST_DIR" \
   2>&1 | tee "$TEST_DIR/result.log"
+APP_BUNDLE="$ROOT/build-ios-app/Build/Products/Release-iphonesimulator/OrcaSlicer.app"
+xcrun simctl install "$DEVICE" "$APP_BUNDLE"
+xcrun simctl launch --terminate-running-process "$DEVICE" com.orcaslicer.ios \
+  | tee "$TEST_DIR/app-launch.log"
+# Allow the first SwiftUI frame before preserving a diagnostic screenshot.
+sleep 3
+xcrun simctl io "$DEVICE" screenshot "$TEST_DIR/app-launch.png"
