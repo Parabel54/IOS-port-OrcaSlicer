@@ -42,11 +42,13 @@ int main(int argc, char **argv)
         float b[6]{};
         if (!require(orca_session_add_primitive(shape.get(), 0, 20, 10, 8) == 0, "scale fixture") ||
             !require(orca_session_translate_object(shape.get(), 0, 15, -7, 0) == 0, "off-center fixture") ||
-            !require(orca_session_scale_object_axes(shape.get(), 0, 2, 3, 0.5) == 0, "axis scale") ||
+            !require(orca_session_model_bounds(shape.get(), b, b+1, b+2, b+3, b+4, b+5) == 0, "initial off-center bounds")) return 4;
+        const float center_x = (b[0]+b[3])*0.5f, center_y = (b[1]+b[4])*0.5f;
+        if (!require(orca_session_scale_object_axes(shape.get(), 0, 2, 3, 0.5) == 0, "axis scale") ||
             !require(orca_session_model_bounds(shape.get(), b, b+1, b+2, b+3, b+4, b+5) == 0, "scaled bounds") ||
             !require(std::fabs(b[3]-b[0]-40) < 0.01 && std::fabs(b[4]-b[1]-30) < 0.01 &&
-                     std::fabs(b[5]-4) < 0.01 && std::fabs((b[0]+b[3])*0.5-125) < 0.01 &&
-                     std::fabs((b[1]+b[4])*0.5-103) < 0.01, "scaled dimensions and stable center") ||
+                     std::fabs(b[5]-4) < 0.01 && std::fabs((b[0]+b[3])*0.5-center_x) < 0.01 &&
+                     std::fabs((b[1]+b[4])*0.5-center_y) < 0.01, "scaled dimensions and stable center") ||
             !require(orca_session_scale_object_axes(shape.get(), 0, -1, 1, 1) != 0, "reject negative scale")) return 4;
     }
     for (const char *file : {"3DBenchy.drc", "calicat.drc", "OrcaCube_v2.drc", "OrcaPlug_v2.drc",
