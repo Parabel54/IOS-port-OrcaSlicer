@@ -14,6 +14,9 @@ on:
       - 'scripts/tests/test_ios_project.py'
       - 'resources/**'
       - '.github/workflows/ios-engine.yml'
+concurrency:
+  group: ios-engine-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
 permissions:
   contents: read
 jobs:

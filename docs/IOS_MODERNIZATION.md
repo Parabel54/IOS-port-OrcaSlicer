@@ -19,7 +19,7 @@ the iOS/headless dependency path. Normal desktop configuration retains upstream 
 - Bundle nozzle, flush-prediction and filament-mixing tables required by the engine.
 - Add unsigned device/simulator build workflow: `.github/workflows/ios-engine.yml`.
 
-The app clears stale G-code before a new slice and disables editing while the shared C session is slicing. Print validation runs before processing. Preview comes from the official GCodeProcessorResult, with a bounded sample across the entire job and an explicit simplified-preview notice for large models. CI exercises the simulator C ABI (3MF import, slice, preview, G-code export, invalid-config rejection), caches dependencies after they build successfully, and packages unsigned apps. The runtime smoke test has not yet passed.
+The app clears stale G-code before a new slice and disables editing while the shared C session is slicing. The cancel control requests cancellation on the active Print; the simulator smoke test also checks cancellation and recovery. Print validation runs before processing. Preview comes from the official GCodeProcessorResult, with a bounded sample across the entire job and an explicit simplified-preview notice for large models. CI exercises the simulator C ABI (3MF import, slice, preview, G-code export, invalid-config rejection), caches dependencies after they build successfully, and packages unsigned apps. The runtime smoke test has not yet passed.
 
 ## Verification
 
@@ -44,7 +44,7 @@ and linking failures before treating the integration as usable.
 |---|---|---|
 | v2.5.1 iOS engine | Source integration, dependency configure | Build both SDKs; resolve ABI and linker errors |
 | Correct slicing | Official engine calls | Compare desktop/mobile output across printers, supports, variable layers, multi-material |
-| Slice lifecycle | Detailed progress, validation, stale-result invalidation and UI edit lock implemented | Pass runtime tests; add cancellation and complete session-access audit |
+| Slice lifecycle | Detailed progress, validation, stale-result invalidation and UI edit lock implemented | Pass cancellation/recovery runtime tests and complete session-access audit |
 | Preview | Official processed moves; bounded full-job sampling | Pass simulator smoke test; verify arc-heavy and large jobs visually |
 | Projects | Existing 3MF snapshots | Desktop multi-plate round trips preserving settings, painting and assignments |
 | Editing | Existing basic painting/cut/assembly | Font emboss geometry, connectors, richer paint tools; verify undo persistence |

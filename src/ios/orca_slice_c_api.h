@@ -64,6 +64,14 @@ ORCA_API void orca_session_set_progress_callback(
  */
 ORCA_API int orca_session_slice_to_gcode(orca_session_t *s, const char *gcode_out_path);
 
+/**
+ * Request cancellation of the active slice. Safe from another thread or the
+ * progress callback. Other session calls must be serialized by the caller;
+ * do not destroy the session until slice_to_gcode returns. Cancellation returns -7.
+ */
+ORCA_API void orca_session_cancel_slice(orca_session_t *s);
+
+
 /** Processed toolpath segment, in mm; feedrate is mm/min for the mobile viewer. */
 typedef struct orca_preview_segment {
     float start_x, start_y, start_z;

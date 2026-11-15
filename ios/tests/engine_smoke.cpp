@@ -72,6 +72,19 @@ int main(int argc, char **argv)
         orca_free(stale);
         return 13;
     }
-    std::printf("PASS: 3MF import, slicing, G-code export, processed preview, invalid-config rejection\n");
+    if (!require(orca_session_set_option(session.get(), "layer_height", "0.2") == 0, "restore valid layer height"))
+        return 14;
+    orca_session_set_progress_callback(session.get(), [](int percent, const char *, void *user) {
+        if (percent >= 15)
+            orca_session_cancel_slice(static_cast<orca_session_t *>(user));
+    }, session.get());
+    const int cancelled = orca_session_slice_to_gcode(session.get(), (directory + "/cancelled.gcode").c_str());
+    orca_session_set_progress_callback(session.get(), nullptr, nullptr);
+    if (!require(cancelled == -7, "cancel active slice"))
+        return 15;
+    if (!require(orca_session_slice_to_gcode(session.get(), (directory + "/recovered.gcode").c_str()) == 0,
+                 "slice again after cancellation"))
+        return 16;
+    std::printf("PASS: 3MF import, slicing, G-code export, processed preview, validation, cancellation and recovery\n");
     return 0;
 }

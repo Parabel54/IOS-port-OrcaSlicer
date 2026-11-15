@@ -177,6 +177,21 @@ struct OrcaRootView: View {
         }
         // The C session belongs to the background slice until it finishes.
         .disabled(isSlicing || engine.presetsLoading)
+        .overlay {
+            if isSlicing {
+                VStack(spacing: 14) {
+                    ProgressView().tint(OrcaTheme.accent)
+                    Text(engine.slicePhase.isEmpty ? "Starting…" : engine.slicePhase)
+                        .foregroundStyle(OrcaTheme.text)
+                    Button("Cancel slicing") { engine.cancelSlice() }
+                        .foregroundStyle(OrcaTheme.accent)
+                        .disabled(engine.slicePercent < 5)
+                }
+                .padding(24)
+                .background(OrcaTheme.panel)
+                .clipShape(RoundedRectangle(cornerRadius: 14))
+            }
+        }
         .sheet(isPresented: $showProcess) {
             processSheet
                 .presentationDetents([.medium, .large])

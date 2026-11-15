@@ -14,11 +14,14 @@
 
 #include <exception>
 #include <memory>
+#include <mutex>
+#include <atomic>
 #include <string>
 
 #include "libslic3r/Config.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/PrintBase.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
@@ -59,6 +62,9 @@ struct orca_session {
     std::string resources_path;
     std::string data_dir_path;
     std::string last_error;
+    std::mutex active_print_mutex;
+    std::shared_ptr<Print> active_print;
+    std::atomic<bool> cancel_requested{false};
     Model       model;
     DynamicPrintConfig config;
     bool        has_model{false};
@@ -441,19 +447,34 @@ int orca_session_slice_to_gcode(orca_session_t *s, const char *gcode_out_path)
 {
     if (!s || !gcode_out_path)
         return -1;
-    s->clear_error();
-    s->has_slice_stats = false;
-    s->preview_segments.clear();
-    s->preview_total_segments = 0;
-    if (!s->has_model) {
-        s->set_error("No model loaded");
-        return -2;
-    }
     try {
+        auto running = std::make_shared<Print>();
+        {
+            std::lock_guard<std::mutex> lock(s->active_print_mutex);
+            if (s->active_print)
+                return -8;
+            s->cancel_requested = false;
+            s->active_print = running;
+        }
+        // Keep cancellation's shared Print alive, and unregister on every exit.
+        struct ActivePrintGuard {
+            orca_session_t *session;
+            ~ActivePrintGuard() {
+                std::lock_guard<std::mutex> lock(session->active_print_mutex);
+                session->active_print.reset();
+            }
+        } guard{s};
+        s->clear_error();
+        s->has_slice_stats = false;
+        s->preview_segments.clear();
+        s->preview_total_segments = 0;
+        if (!s->has_model) {
+            s->set_error("No model loaded");
+            return -2;
+        }
         ensure_default_config(s);
         s->report_progress(5, "Applying config");
-
-        Print print;
+        Print &print = *running;
         // Center / place objects if needed — use model as loaded
         auto status = print.apply(s->model, s->config);
         (void) status;
@@ -481,7 +502,11 @@ int orca_session_slice_to_gcode(orca_session_t *s, const char *gcode_out_path)
                                    status.text.c_str());
         });
         s->report_progress(15, "Slicing (Print::process)");
+        if (s->cancel_requested)
+            print.cancel();
+        print.throw_if_canceled();
         print.process();
+        print.throw_if_canceled();
 
         s->report_progress(85, "Exporting G-code");
         GCodeProcessorResult result;
@@ -558,15 +583,32 @@ int orca_session_slice_to_gcode(orca_session_t *s, const char *gcode_out_path)
         } catch (...) {
             s->last_layers = 0;
         }
+        if (s->cancel_requested)
+            throw CanceledException();
         s->has_slice_stats = true;
         s->report_progress(100, "Done");
         return 0;
+    } catch (const CanceledException &) {
+        s->set_error("Slice cancelled");
+        s->report_progress(0, "Cancelled");
+        return -7;
     } catch (const std::exception &ex) {
         s->set_error(std::string("slice: ") + ex.what());
         return -5;
     } catch (...) {
         s->set_error("slice: unknown error");
         return -5;
+    }
+}
+
+void orca_session_cancel_slice(orca_session_t *s)
+{
+    if (!s)
+        return;
+    std::lock_guard<std::mutex> lock(s->active_print_mutex);
+    if (s->active_print) {
+        s->cancel_requested = true;
+        s->active_print->cancel();
     }
 }
 

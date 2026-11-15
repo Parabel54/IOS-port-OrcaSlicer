@@ -1712,6 +1712,15 @@ final class OrcaEngine: ObservableObject {
     @Published var slicePercent: Int = 0
     @Published var slicePhase: String = ""
 
+    @MainActor
+    func cancelSlice() {
+        #if ORCA_LINKED
+        guard sliceRunning, let s = session else { return }
+        orca_session_cancel_slice(s)
+        slicePhase = "Cancelling…"
+        #endif
+    }
+
     private var sliceRunning = false
 
     @MainActor
@@ -1759,7 +1768,7 @@ final class OrcaEngine: ObservableObject {
         }.value
         if rc != 0 {
             try? FileManager.default.removeItem(at: out)
-            slicePhase = "Failed"
+            slicePhase = rc == -7 ? "Cancelled" : "Failed"
             let err = orca_session_last_error(s).map { String(cString: $0) } ?? "slice failed"
             return "slice rc=\(rc): \(err)"
         }
