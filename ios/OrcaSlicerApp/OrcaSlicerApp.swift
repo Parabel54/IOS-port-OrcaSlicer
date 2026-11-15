@@ -269,6 +269,9 @@ struct OrcaRootView: View {
                                   "sidebar": size.width >= 860 && size.height >= 500 && sidebarVisible]
         if let json = try? JSONSerialization.data(withJSONObject: data) {
             try? json.write(to: FileManager.default.temporaryDirectory.appendingPathComponent("orca-workspace-layout.json"))
+            if size.width > size.height {
+                try? json.write(to: FileManager.default.temporaryDirectory.appendingPathComponent("orca-workspace-landscape.json"))
+            }
         }
     }
 
@@ -1944,6 +1947,7 @@ struct OrcaRootView: View {
                         .frame(maxWidth: .infinity, minHeight: 44)
                 }.buttonStyle(.borderedProminent).tint(OrcaTheme.accent)
                     .disabled(!engine.hasModel || isSlicing || engine.modelImporting)
+                    .accessibilityIdentifier("slice-plate")
             }
         }.padding(.horizontal, 8))
     }
@@ -3430,12 +3434,6 @@ struct OrcaRootView: View {
                 Task { @MainActor in
                     try? await Task.sleep(nanoseconds: 600_000_000)
                     showProcess = true
-                }
-            }
-            if ProcessInfo.processInfo.arguments.contains("--test-landscape-layout"),
-               let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
-                scene.requestGeometryUpdate(.iOS(interfaceOrientations: .landscapeRight)) { error in
-                    NSLog("Landscape test failed: %@", error.localizedDescription)
                 }
             }
             processingDocument = false

@@ -1,0 +1,28 @@
+import XCTest
+
+final class WorkspaceUITests: XCTestCase {
+    @MainActor
+    func testTabletLandscape() {
+        continueAfterFailure = false
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication(bundleIdentifier: "com.orcaslicer.ios")
+        app.launchArguments = ["--test-view-metadata", "--test-document-import"]
+        app.launch()
+        let slice = app.buttons["slice-plate"]
+        let imported = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            slice.exists && slice.isEnabled && slice.isHittable
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [imported], timeout: 180), .completed,
+                       "The native picker must finish import and dismiss before rotation")
+        XCUIDevice.shared.orientation = .landscapeRight
+        let landscape = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            app.state == .runningForeground && app.frame.width > app.frame.height
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [landscape], timeout: 60), .completed)
+        XCTAssertTrue(slice.isHittable, "Primary actions must remain reachable after rotation")
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "tablet-landscape"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+    }
+}

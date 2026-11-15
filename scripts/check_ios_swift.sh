@@ -31,6 +31,14 @@ xcrun --sdk "$SDK" swiftc -typecheck -parse-as-library -swift-version 5 \
 
 python3 -m unittest discover -s "$ROOT/scripts/tests" -p test_ios_settings_catalog.py -v
 
+if [[ "$SDK" == iphonesimulator ]]; then
+  PLATFORM_PATH="$(xcrun --sdk "$SDK" --show-sdk-platform-path)"
+  xcrun --sdk "$SDK" swiftc -typecheck -parse-as-library -swift-version 5 \
+    -sdk "$SDK_PATH" -target "$SWIFT_TARGET" \
+    -F "$PLATFORM_PATH/Developer/Library/Frameworks" \
+    "$ROOT/ios/tests/WorkspaceUITests.swift"
+fi
+
 # Run storage and credential-isolation checks with injected secrets on the Mac host.
 TEST_DIR="$(mktemp -d)"
 trap 'rm -rf "$TEST_DIR"' EXIT

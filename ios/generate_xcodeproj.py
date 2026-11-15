@@ -487,6 +487,68 @@ for folder in engine_resource_folders:
     pbx = pbx.replace(f'{IDs["assets"]} /* Assets.xcassets in Resources */,',
         f'{IDs["assets"]} /* Assets.xcassets in Resources */,\n\t\t\t\t{build_id} /* {folder} in Resources */,')
 
+# UI automation owns device rotation; multitasking apps may not force their
+# interface orientation through UIWindowScene.requestGeometryUpdate.
+ui = {key: uid("ui-tests/" + key) for key in
+      ("target", "product", "file", "build", "sources", "frameworks", "resources",
+       "configs", "debug", "release", "proxy", "dependency")}
+
+def ui_section(section, objects):
+    global pbx
+    end = "/* End " + section + " section */"
+    pbx = pbx.replace(end, objects + "\n" + end)
+
+pbx = pbx.replace("LastUpgradeCheck = 1600;", f"LastUpgradeCheck = 1600; TargetAttributes = {{{ui['target']} = {{CreatedOnToolsVersion = 16.4; TestTargetID = {IDs['target']}; }}; }};")
+ui_section("PBXBuildFile", f'{ui["build"]} = {{isa = PBXBuildFile; fileRef = {ui["file"]}; }};')
+ui_section("PBXFileReference", f'''{ui["file"]} /* WorkspaceUITests.swift */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = tests/WorkspaceUITests.swift; sourceTree = "<group>"; }};
+{ui["product"]} /* OrcaSlicerUITests.xctest */ = {{isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = OrcaSlicerUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; }};''')
+pbx = pbx.replace(f'{IDs["group_products"]},', f'{IDs["group_products"]},\n                {ui["file"]},', 1)
+pbx = pbx.replace(f'{IDs["product"]} /* OrcaSlicer.app */,', f'{IDs["product"]} /* OrcaSlicer.app */,\n                {ui["product"]},', 1)
+ui_section("PBXNativeTarget", f'''{ui["target"]} /* OrcaSlicerUITests */ = {{isa = PBXNativeTarget;
+    buildConfigurationList = {ui["configs"]};
+    buildPhases = ({ui["sources"]}, {ui["frameworks"]}, {ui["resources"]});
+    buildRules = (); dependencies = ({ui["dependency"]});
+    name = OrcaSlicerUITests; productName = OrcaSlicerUITests;
+    productReference = {ui["product"]}; productType = "com.apple.product-type.bundle.ui-testing";
+}};''')
+pbx = pbx.replace(f'{IDs["target"]} /* OrcaSlicer */,', f'{IDs["target"]} /* OrcaSlicer */,\n                {ui["target"]},', 1)
+ui_section("PBXSourcesBuildPhase", f'{ui["sources"]} = {{isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = ({ui["build"]}); runOnlyForDeploymentPostprocessing = 0; }};')
+ui_section("PBXFrameworksBuildPhase", f'{ui["frameworks"]} = {{isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; }};')
+ui_section("PBXResourcesBuildPhase", f'{ui["resources"]} = {{isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; }};')
+# These object kinds are absent from the single-target app project.
+pbx = pbx.replace("/* Begin PBXNativeTarget section */", f'''/* Begin PBXContainerItemProxy section */
+{ui["proxy"]} = {{isa = PBXContainerItemProxy; containerPortal = {IDs["project"]}; proxyType = 1; remoteGlobalIDString = {IDs["target"]}; remoteInfo = OrcaSlicer; }};
+/* End PBXContainerItemProxy section */
+/* Begin PBXTargetDependency section */
+{ui["dependency"]} = {{isa = PBXTargetDependency; target = {IDs["target"]}; targetProxy = {ui["proxy"]}; }};
+/* End PBXTargetDependency section */
+/* Begin PBXNativeTarget section */''')
+for configuration, key in (("Debug", "debug"), ("Release", "release")):
+    ui_section("XCBuildConfiguration", f'''{ui[key]} = {{isa = XCBuildConfiguration; name = {configuration}; buildSettings = {{
+        PRODUCT_BUNDLE_IDENTIFIER = com.orcaslicer.ios.uitests;
+        PRODUCT_NAME = "$(TARGET_NAME)";
+        GENERATE_INFOPLIST_FILE = YES; SWIFT_VERSION = 5.0;
+        IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+        SDKROOT = iphonesimulator; SUPPORTED_PLATFORMS = iphonesimulator;
+        TARGETED_DEVICE_FAMILY = "1,2"; TEST_TARGET_NAME = OrcaSlicer;
+        CODE_SIGNING_ALLOWED = NO;
+        LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@loader_path/Frameworks");
+    }}; }};''')
+ui_section("XCConfigurationList", f'{ui["configs"]} = {{isa = XCConfigurationList; buildConfigurations = ({ui["debug"]}, {ui["release"]}); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; }};')
+scheme_directory = PROJ / "xcshareddata" / "xcschemes"
+scheme_directory.mkdir(parents=True, exist_ok=True)
+reference = f'<BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="{ui["target"]}" BuildableName="OrcaSlicerUITests.xctest" BlueprintName="OrcaSlicerUITests" ReferencedContainer="container:OrcaSlicer.xcodeproj"/>'
+(scheme_directory / "OrcaSlicerUITests.xcscheme").write_text(f'''<?xml version="1.0" encoding="UTF-8"?>
+<Scheme LastUpgradeVersion="1640" version="1.3">
+  <BuildAction parallelizeBuildables="YES" buildImplicitDependencies="YES">
+    <BuildActionEntries><BuildActionEntry buildForTesting="YES" buildForRunning="NO" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="YES">{reference}</BuildActionEntry></BuildActionEntries>
+  </BuildAction>
+  <TestAction buildConfiguration="Release" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="YES">
+    <Testables><TestableReference skipped="NO" parallelizable="NO">{reference}</TestableReference></Testables>
+  </TestAction>
+</Scheme>
+''')
+
 (PROJ / "project.pbxproj").write_text(pbx)
 print("Wrote", PROJ / "project.pbxproj")
 print("has_ios_sim_engine=", has_ios_sim_engine)

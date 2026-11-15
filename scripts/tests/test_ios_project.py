@@ -68,6 +68,9 @@ class ProjectGenerationTests(unittest.TestCase):
         project = self.root / 'ios/OrcaSlicer.xcodeproj/project.pbxproj'
         first = project.read_bytes()
         self.assertIn(b'ORCA_LINKED', first)
+        self.assertIn(b'com.apple.product-type.bundle.ui-testing', first)
+        self.assertIn(b'TEST_TARGET_NAME = OrcaSlicer', first)
+        self.assertTrue((project.parent / 'xcshareddata/xcschemes/OrcaSlicerUITests.xcscheme').is_file())
         self.assertIn(b'iphoneos*', first)
         for source in (b'PrinterConnections.swift', b'ConnectionsPanel.swift', b'StartupRecovery.swift', b'StartupRecoveryView.swift', b'DocumentImport.swift', b'NativeDocumentPicker.swift', b'OrcaCloudAPI.swift', b'NativeCloudSignIn.swift', b'OrcaCloudAccount.swift', b'CloudAccountPanel.swift', b'FlashforgeClient.swift', b'NativePostProcessing.swift'):
             self.assertIn(source + b' in Sources', first)

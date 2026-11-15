@@ -87,6 +87,13 @@ ios_test_run 240 xcrun simctl bootstatus "$DEVICE" -b
 # A system app proves that service responds before installing the slicer.
 ios_test_run 90 xcrun simctl launch "$DEVICE" com.apple.Preferences
 APP_BUNDLE="$ROOT/build-ios-app/Build/Products/Release-iphonesimulator/OrcaSlicer.app"
+ios_test_run 360 xcodebuild build-for-testing -project "$ROOT/ios/OrcaSlicer.xcodeproj" \
+  -scheme OrcaSlicerUITests -configuration Release -sdk iphonesimulator \
+  -destination "id=$DEVICE" -derivedDataPath "$ROOT/build-ios-app" CODE_SIGNING_ALLOWED=NO \
+  2>&1 | tee "$TEST_DIR/ui-build.log"
+codesign --force --deep --sign - "$APP_BUNDLE"
+codesign --force --deep --sign - "$ROOT/build-ios-app/Build/Products/Release-iphonesimulator/OrcaSlicerUITests-Runner.app"
+UI_RUN_FILE="$(rg --files --no-ignore "$ROOT/build-ios-app/Build/Products" -g '*.xctestrun' | head -n 1)"
 ios_test_run 180 xcrun simctl spawn "$DEVICE" "$TEST_DIR/engine_smoke" "$TEST_DIR" "$APP_BUNDLE" \
   2>&1 | tee "$TEST_DIR/result.log"
 python3 "$ROOT/scripts/audit_ios_app.py" "$APP_BUNDLE" iphonesimulator
@@ -146,8 +153,7 @@ for variant in compact tablet; do
   APP_DATA="$(xcrun simctl get_app_container "$DEVICE" com.orcaslicer.ios data)"
   mkdir -p "$APP_DATA/Documents"
   cp "$TEST_DIR/orca-project.3mf" "$APP_DATA/Documents/ios-import-smoke.3mf"
-  for presentation in workspace settings landscape; do
-    if [[ "$variant" == compact && "$presentation" == landscape ]]; then continue; fi
+  for presentation in workspace settings; do
     if [[ "$variant" == tablet && "$presentation" == settings ]]; then continue; fi
     if [[ "$presentation" != workspace ]]; then
       ios_test_run 20 xcrun simctl terminate "$DEVICE" com.orcaslicer.ios
@@ -155,7 +161,6 @@ for variant in compact tablet; do
     rm -f "$APP_DATA/tmp/orca-document-import-smoke.txt" "$APP_DATA/tmp/orca-workspace-layout.json"
     workspace_flags=(--test-view-metadata --test-document-import)
     if [[ "$presentation" == settings ]]; then workspace_flags+=(--test-show-settings); fi
-    if [[ "$presentation" == landscape ]]; then workspace_flags+=(--test-landscape-layout); fi
     ios_test_run 90 xcrun simctl launch "$DEVICE" com.orcaslicer.ios "${workspace_flags[@]}"
     python3 - "$APP_DATA" "$variant" "$presentation" <<'PYLAYOUT'
 from pathlib import Path
@@ -169,8 +174,7 @@ while True:
     geometry = root/'orca-workspace-layout.json'
     if marker.is_file() and geometry.is_file():
         layout = json.loads(geometry.read_text())
-        if sys.argv[3] != 'landscape' or layout['width'] > layout['height']:
-            break
+        break
     if time.monotonic() > deadline:
         raise SystemExit('Responsive workspace did not finish loading/rotating')
     time.sleep(1)
@@ -184,6 +188,17 @@ PYLAYOUT
     xcrun simctl io "$DEVICE" screenshot "$TEST_DIR/$variant-$presentation.png"
     cp "$APP_DATA/tmp/orca-workspace-layout.json" "$TEST_DIR/$variant-$presentation.json"
   done
+  if [[ "$variant" == tablet ]]; then
+    # Rotate the simulated device through XCTest. A multitasking app cannot
+    # force interface orientation through UIWindowScene.requestGeometryUpdate.
+    ios_test_run 360 xcodebuild test-without-building -xctestrun "$UI_RUN_FILE" \
+      -destination "id=$DEVICE" -parallel-testing-enabled NO \
+      -resultBundlePath "$TEST_DIR/tablet-orientation.xcresult" \
+      2>&1 | tee "$TEST_DIR/ui-test.log"
+    xcrun xcresulttool export attachments --path "$TEST_DIR/tablet-orientation.xcresult" \
+      --output-path "$TEST_DIR/ui-attachments"
+    cp "$APP_DATA/tmp/orca-workspace-landscape.json" "$TEST_DIR/tablet-landscape.json"
+  fi
   ios_test_run 20 xcrun simctl shutdown "$DEVICE"
   ios_test_run 20 xcrun simctl delete "$DEVICE"
 done
