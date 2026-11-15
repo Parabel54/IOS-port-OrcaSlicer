@@ -1155,7 +1155,13 @@ struct GCodePathGeometry {
         let node = GCodePathGeometry(segments: [bead]).makeNode(color: .white)
         guard let geometry = node.childNodes.first else { return false }
         let bounds = geometry.boundingBox
-        return bounds.max.z - bounds.min.z >= 0.29 && bounds.max.y - bounds.min.y >= 0.44
+        guard bounds.max.z - bounds.min.z >= 0.29 && bounds.max.y - bounds.min.y >= 0.44 else { return false }
+        // A corner between sampled vertices must survive a long toolpath.
+        let corner = Segment(points: (0..<8002).map {
+            SCNVector3(Float($0) * 0.01, $0 == 1 ? 100 : 0, 1)
+        }, feature: "Outer wall", width: 0.45, feedrate: 1200)
+        let longPath = GCodePathGeometry(segments: [corner]).makeNode(color: .white)
+        return (longPath.childNodes.first?.boundingBox.max.y ?? 0) >= 99
     }
 
     static func color(for feature: String) -> UIColor {
@@ -1282,17 +1288,9 @@ struct GCodePathGeometry {
         let n = points.count
         guard n >= 2 else { return nil }
         let half = max(width, 0.12) * 0.5
-        // Cap segment density for large paths
-        let stride = max(1, n / 4000)
-        var sampled: [SCNVector3] = []
-        var i = 0
-        while i < n {
-            sampled.append(points[i])
-            i += stride
-        }
-        if sampled.last.map({ $0.x != points[n - 1].x || $0.y != points[n - 1].y || $0.z != points[n - 1].z }) ?? true {
-            sampled.append(points[n - 1])
-        }
+        // The engine already bounds the exported segment count. Keep every
+        // exported point here so corner geometry is not replaced by chords.
+        let sampled = points
         let m = sampled.count
         guard m >= 2 else { return nil }
 

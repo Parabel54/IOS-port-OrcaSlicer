@@ -206,6 +206,7 @@ final class OrcaEngine: ObservableObject {
 
     /// Results belong to one exact model/configuration and cannot survive an edit.
     private func invalidateSlice() {
+        previewRefreshTask?.cancel()
         gcodeURL = nil
         gcodeGeometry = nil
         previewLayerHeights = []
@@ -221,6 +222,7 @@ final class OrcaEngine: ObservableObject {
 
     /// Drop G-code preview + settings-browser caches. Model mesh kept for prepare.
     func handleMemoryWarning() {
+        previewRefreshTask?.cancel()
         #if ORCA_LINKED
         gcodePathNode = nil
         gcodeGeometry = nil
@@ -1097,6 +1099,17 @@ final class OrcaEngine: ObservableObject {
         return lastMessage
     }
     #endif
+
+    private var previewRefreshTask: Task<Void, Never>?
+
+    func requestPreviewLayer() {
+        previewRefreshTask?.cancel()
+        previewRefreshTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(nanoseconds: 60_000_000) } catch { return }
+            guard !Task.isCancelled else { return }
+            self?.applyPreviewLayer()
+        }
+    }
 
     /// Rebuild G-code SceneKit node from geometry filtered by min/max Z clip + feature toggles
     func applyPreviewLayer() {

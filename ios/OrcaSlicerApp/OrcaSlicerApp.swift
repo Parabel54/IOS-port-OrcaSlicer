@@ -2918,7 +2918,7 @@ struct OrcaRootView: View {
             guard z != engine.previewMaxZ else { return }
             engine.previewMaxZ = z
             engine.previewMinZ = min(engine.previewMinZ, z)
-            engine.applyPreviewLayer()
+            engine.requestPreviewLayer()
         })
     }
 
@@ -2952,13 +2952,13 @@ struct OrcaRootView: View {
                     guard z != engine.previewMinZ else { return }
                     engine.previewMinZ = z
                     engine.previewMaxZ = max(engine.previewMaxZ, z)
-                    engine.applyPreviewLayer()
+                    engine.requestPreviewLayer()
                 }), in: 0...Double(max(1, engine.previewLayerHeights.count - 1)), step: 1)
                     .disabled(engine.previewLayerHeights.count < 2)
                 Button("Show all layers") {
                     engine.previewMinZ = engine.gcodeZMin
                     engine.previewMaxZ = engine.gcodeZMax
-                    engine.applyPreviewLayer()
+                    engine.requestPreviewLayer()
                 }
             }
             // Color legend chips — wall / infill / support / travel / other (W5)
@@ -3000,7 +3000,7 @@ struct OrcaRootView: View {
                 ForEach(GCodePathGeometry.ColorMode.allCases) { mode in
                     Button {
                         engine.previewColorMode = mode
-                        engine.applyPreviewLayer()
+                        engine.requestPreviewLayer()
                     } label: {
                         Text(mode.label)
                             .font(.system(size: 11, weight: .semibold))
@@ -3054,7 +3054,7 @@ struct OrcaRootView: View {
     private func featureToggle(_ title: String, isOn: Binding<Bool>) -> some View {
         Button {
             isOn.wrappedValue.toggle()
-            engine.applyPreviewLayer()
+            engine.requestPreviewLayer()
         } label: {
             Text(title)
                 .font(.system(size: 11, weight: .semibold))
@@ -3074,7 +3074,7 @@ struct OrcaRootView: View {
     private func legendChip(_ title: String, color: Color, isOn: Binding<Bool>) -> some View {
         Button {
             isOn.wrappedValue.toggle()
-            engine.applyPreviewLayer()
+            engine.requestPreviewLayer()
         } label: {
             HStack(spacing: 6) {
                 Circle()
