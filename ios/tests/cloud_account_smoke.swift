@@ -1,12 +1,14 @@
 import Foundation
 
 private final class AccountFixtureProtocol: URLProtocol {
+    static var profileResponse = Data(#"{"upserts":[],"deletes":[],"next_cursor":0}"#.utf8)
     static var handler: ((URLRequest) -> (Int, Data, Double))?
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
         guard let handler = Self.handler else { preconditionFailure("Missing account fixture") }
-        let (status, data, delay) = handler(request)
+        let (status, data, delay) = request.url!.path.hasSuffix("sync/pull")
+            ? (200, Self.profileResponse, 0.0) : handler(request)
         DispatchQueue.global().asyncAfter(deadline: .now() + delay) { [self] in
             client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!, cacheStoragePolicy: .notAllowed)
             client?.urlProtocol(self, didLoad: data)
@@ -154,6 +156,13 @@ struct CloudAccountSmoke {
         precondition(mfa.signedIn && !mfa.needsMFACode && stored!.contains("verified-refresh"))
         let mfaRestored = OrcaCloudAccount(api: api, credentials: credentials, authentication: FixtureAuthentication())
         precondition(mfaRestored.signedIn)
+        AccountFixtureProtocol.profileResponse = Data(#"{"upserts":[{"id":"00000000-0000-4000-8000-000000000011","name":"PLA","updated_time":42,"content":{"name":"PLA","type":"filament","version":"2.5.1","filament_settings_id":["PLA"]}},{"id":"00000000-0000-4000-8000-000000000012","name":"AD5X profile","updated_time":43,"content":{"name":"AD5X profile","type":"printer","version":"2.5.1","printer_settings_id":"AD5X profile"}}],"deletes":[],"next_cursor":43}"#.utf8)
+        await mfa.sync()
+        precondition(mfa.profiles.count == 2 && mfa.profiles[0].kind == "filament" && mfa.profiles[1].kind == "printer")
+        await mfa.signOut()
+        precondition(mfa.profiles.isEmpty)
+        AccountFixtureProtocol.profileResponse = Data(#"{"upserts":[],"deletes":[],"next_cursor":0}"#.utf8)
+        print("PASS: account sync downloads printer and filament presets and clears them on sign-out")
         print("PASS: native login capabilities, email/SMS flows and no session persistence before MFA verification")
         print("PASS: account restore/sync, token rotation, 401 retry, transient failure, expired-session cleanup, cancel and logout races")
     }

@@ -2,6 +2,7 @@ import SwiftUI
 
 struct CloudAccountPanel: View {
     @ObservedObject var account: OrcaCloudAccount
+    @ObservedObject var engine: OrcaEngine
     @ObservedObject var connections: PrinterConnections
     @State private var email = ""
     @State private var password = ""
@@ -15,10 +16,19 @@ struct CloudAccountPanel: View {
             if account.signedIn {
                 Text(account.displayName).font(.subheadline)
                 HStack {
-                    Button("Sync printers") { Task { await account.sync() } }
+                    Button("Sync printers and presets") { Task { await account.sync() } }
                         .disabled(account.busy)
                     Button("Sign out", role: .destructive) { Task { await account.signOut() } }
                 }
+                Button("Upload local presets to Orca Cloud") {
+                    do {
+                        let profiles = try engine.exportLocalCloudProfiles()
+                        Task { await account.uploadLocalProfiles(profiles) }
+                    } catch { account.message = error.localizedDescription }
+                }.disabled(account.busy || engine.modelImporting || engine.presetsLoading || engine.sliceRunning)
+                Text("Cloud presets: \(account.profiles.filter { $0.kind == "printer" }.count) printers · \(account.profiles.filter { $0.kind == "filament" }.count) filaments · \(account.profiles.filter { $0.kind == "print" }.count) processes")
+                    .font(.caption)
+                if !account.profileImportMessage.isEmpty { Text(account.profileImportMessage).font(.caption) }
                 if let date = account.lastSynced {
                     Text("Last synchronized: \(date.formatted(date: .omitted, time: .shortened))")
                         .font(.caption).foregroundStyle(.secondary)
@@ -47,7 +57,7 @@ struct CloudAccountPanel: View {
                     }
                     .padding(.vertical, 6)
                 }
-                Text("Cloud sync updates printer names and status. Local printer addresses and access codes stay on this device. New cloud printer registration is managed in Orca Cloud.")
+                Text("Cloud sync downloads printer, filament and process presets into the slicer as well as linked-printer status. Use Upload local presets to send local presets to this account. Local printer addresses and access codes stay on this device. New cloud printer registration is managed in Orca Cloud.")
                     .font(.caption).foregroundStyle(.secondary)
             } else if account.needsMFACode || account.pendingPhone != nil {
                 verificationForm

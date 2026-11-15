@@ -78,6 +78,26 @@ struct CloudAPISmoke {
         precondition(printers.count == 2 && printers[0].online && printers[0].jobState == "printing")
         precondition(!printers[1].online && printers[1].access_role == "viewer")
         CloudFixtureProtocol.handler = { request in
+            precondition(request.url!.path == "/api/v1/sync/pull" && request.httpMethod == "GET")
+            precondition(request.url!.query == nil && request.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-access")
+            return (200, Data(#"{"upserts":[{"id":"00000000-0000-4000-8000-000000000011","name":"PLA","updated_time":42,"content":{"name":"PLA","type":"filament","version":"2.5.1","filament_settings_id":["PLA"]}}],"deletes":[],"next_cursor":42}"#.utf8))
+        }
+        let profiles = try await api.profiles(accessToken: "fixture-access")
+        precondition(profiles.count == 1 && profiles[0].kind == "filament" && profiles[0].updatedTime == 42)
+        CloudFixtureProtocol.handler = { request in
+            precondition(request.url!.path == "/api/v1/sync/push" && request.httpMethod == "POST")
+            let body = try JSONSerialization.jsonObject(with: requestBody(request)) as! [String: Any]
+            precondition(body["original_updated_time"] as? String == "42")
+            precondition((body["content"] as? [String: Any])?["filament_settings_id"] as? [String] == ["PLA"])
+            return (200, Data(#"{"updated_time":43}"#.utf8))
+        }
+        let acknowledged = try await api.pushProfile(profiles[0], id: profiles[0].id, originalTime: 42, accessToken: "fixture-access")
+        precondition(acknowledged == 43)
+        CloudFixtureProtocol.handler = { _ in (409, Data()) }
+        do { _ = try await api.pushProfile(profiles[0], id: profiles[0].id, originalTime: 42, accessToken: "fixture-access"); preconditionFailure("Conflict ignored") }
+        catch OrcaCloudError.http(409) {}
+        print("PASS: full cloud preset snapshot, typed filament content, conflict-checked push and no force overwrite")
+        CloudFixtureProtocol.handler = { request in
             let body = try JSONSerialization.jsonObject(with: requestBody(request)) as! [String: String]
             precondition(body == ["refresh_token":"fixture-refresh"])
             precondition(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!.first!.value == "refresh_token")

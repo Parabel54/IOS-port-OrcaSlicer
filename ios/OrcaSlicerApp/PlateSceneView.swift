@@ -9,9 +9,24 @@ import SwiftUI
 import SceneKit
 import UIKit
 
+enum PlateTouchMode: String, CaseIterable, Identifiable {
+    case orbit = "Orbit", pan = "Pan", move = "Move", rotate = "Rotate", select = "Select"
+    var id: String { rawValue }
+    var icon: String {
+        switch self {
+        case .orbit: return "globe"
+        case .pan: return "hand.draw"
+        case .move: return "arrow.up.and.down.and.arrow.left.and.right"
+        case .rotate: return "rotate.3d"
+        case .select: return "cursorarrow"
+        }
+    }
+}
+
 /// Interactive build plate with official-engine mesh geometry + optional G-code paths.
 struct PlateSceneView: UIViewRepresentable {
     var mesh: MeshGeometry?
+    var meshRevision: Int = 0
     /// Per-object meshes for tap-to-select (same order as engine.objectNames).
     var objectMeshes: [MeshGeometry] = []
     var selectedObjectIndex: Int = -1
@@ -22,9 +37,12 @@ struct PlateSceneView: UIViewRepresentable {
     var bedTexturePath: String? = nil
     var accent: UIColor = UIColor(red: 0, green: 150 / 255, blue: 136 / 255, alpha: 1)
     /// Prepare tab: pan on bed plane moves selected object(s) in mm (slic3r XY).
-    var moveMode: Bool = false
+    var touchMode: PlateTouchMode = .orbit
+    var fitRequest = UUID()
     /// Tap object to select; drag on object to move (without requiring Move gizmo).
-    var selectMode: Bool = true
+    var selectMode: Bool { [.select, .move, .rotate].contains(touchMode) }
+    var moveMode: Bool { touchMode == .move }
+    var onRotateCommit: ((Float, Int) -> Void)? = nil
     /// Measure gizmo: tap places points in slic3r XYZ (mm).
     var measureMode: Bool = false
     /// Paint gizmo: tap/drag paints facets via libslic3r FacetsAnnotation.
@@ -44,11 +62,45 @@ struct PlateSceneView: UIViewRepresentable {
     /// User tapped an object on the plate (-1 = empty bed / deselect).
     var onSelectObject: ((Int) -> Void)? = nil
 
+    /// Run on the simulator main thread against a real SceneKit camera.
+    static func cameraSmokeTest() -> Bool {
+        let view = SCNView(frame: CGRect(x: 0, y: 0, width: 390, height: 600))
+        view.scene = SCNScene()
+        let camera = SCNNode()
+        camera.camera = SCNCamera()
+        camera.position = SCNVector3(50, 60, 80)
+        camera.look(at: SCNVector3Zero)
+        view.scene?.rootNode.addChildNode(camera)
+        view.pointOfView = camera
+        view.defaultCameraController.pointOfView = camera
+        view.defaultCameraController.automaticTarget = false
+        view.defaultCameraController.target = SCNVector3Zero
+        view.defaultCameraController.interactionMode = .orbitTurntable
+        let coordinator = Coordinator()
+        coordinator.installGestures(on: view)
+        guard coordinator.panGesture?.maximumNumberOfTouches == 1, coordinator.pinchGesture != nil else { return false }
+        let distance = simd_length(SIMD3<Float>(50, 60, 80))
+        coordinator.zoom(scale: 2, view: view)
+        guard abs(simd_length(SIMD3<Float>(camera.position.x, camera.position.y, camera.position.z)) - distance / 2) < 0.01 else { return false }
+        let before = camera.position
+        coordinator.cameraDrag(delta: CGPoint(x: 35, y: 25), view: view, mode: .pan)
+        let target = view.defaultCameraController.target
+        guard abs(camera.position.x - before.x - target.x) < 0.01,
+              abs(camera.position.y - before.y - target.y) < 0.01,
+              abs(target.x) + abs(target.y) + abs(target.z) > 0.01 else { return false }
+        let beforeOrbit = camera.position
+        coordinator.cameraDrag(delta: CGPoint(x: 60, y: 20), view: view, mode: .orbit)
+        let afterOrbit = camera.position
+        let offset = SIMD3<Float>(afterOrbit.x - target.x, afterOrbit.y - target.y, afterOrbit.z - target.z)
+        return abs(simd_length(offset) - distance / 2) < 0.1 &&
+            abs(afterOrbit.x - beforeOrbit.x) + abs(afterOrbit.z - beforeOrbit.z) > 0.01
+    }
+
     func makeUIView(context: Context) -> SCNView {
         let view = SCNView()
         view.scene = makeScene()
         view.backgroundColor = UIColor(red: 0x2D / 255, green: 0x2D / 255, blue: 0x31 / 255, alpha: 1)
-        view.allowsCameraControl = true
+        view.allowsCameraControl = false
         view.autoenablesDefaultLighting = false
         view.antialiasingMode = .multisampling4X
         view.defaultCameraController.interactionMode = .orbitTurntable
@@ -72,14 +124,10 @@ struct PlateSceneView: UIViewRepresentable {
               let content = scene.rootNode.childNode(withName: "content", recursively: false)
         else { return }
 
-        // Move / measure / paint: disable orbit so gestures own the surface.
-        // Select mode keeps orbit; long-press-free drag starts only after hitting an object.
-        let wantCamera = !moveMode && !measureMode && !paintMode && !context.coordinator.isDragging
-        if view.allowsCameraControl != wantCamera {
-            view.allowsCameraControl = wantCamera
-        }
-        // Pan for move gizmo, paint, or select (drag-on-object to move)
-        context.coordinator.panGesture?.isEnabled = moveMode || paintMode || selectMode
+        // One recognizer owns one-finger gestures. SceneKit's built-in
+        // recognizers otherwise compete with object dragging and pinch zoom.
+        view.allowsCameraControl = false
+        context.coordinator.panGesture?.isEnabled = true
         context.coordinator.tapGesture?.isEnabled = measureMode || paintMode || selectMode
 
         // Bed size / texture recreate if missing or changed
@@ -113,7 +161,7 @@ struct PlateSceneView: UIViewRepresentable {
         let meshKey = (mesh.map {
             String(format: "c:%d:%.3f,%.3f,%.3f,%.3f",
                    $0.vertexCount, $0.min.x, $0.min.y, $0.max.x, $0.max.y)
-        } ?? "nil") + "|sel=\(selectedObjectIndex)|objs=\(perKey)"
+        } ?? "nil") + "|objs=\(perKey)|revision=\(meshRevision)"
         if !context.coordinator.isDragging, context.coordinator.lastMeshKey != meshKey {
             content.childNode(withName: "model", recursively: false)?.removeFromParentNode()
             let root = SCNNode()
@@ -135,17 +183,11 @@ struct PlateSceneView: UIViewRepresentable {
                     root.addChildNode(node)
                 }
                 content.addChildNode(root)
-                if let mesh {
-                    context.coordinator.frameCamera(view: view, mesh: mesh, bedSize: bedSize)
-                }
             } else if let mesh {
                 let node = mesh.makeNode(color: accent)
                 node.name = "object_0"
                 root.addChildNode(node)
                 content.addChildNode(root)
-                context.coordinator.frameCamera(view: view, mesh: mesh, bedSize: bedSize)
-            } else {
-                context.coordinator.frameCameraOnBed(view: view, bedSize: bedSize)
             }
             context.coordinator.lastMeshKey = meshKey
             context.coordinator.visualOffset = .zero
@@ -164,6 +206,12 @@ struct PlateSceneView: UIViewRepresentable {
                         : UIColor.black
                 }
             }
+        }
+
+        if context.coordinator.lastFitRequest != fitRequest {
+            if let mesh { context.coordinator.frameCamera(view: view, mesh: mesh, bedSize: bedSize) }
+            else { context.coordinator.frameCameraOnBed(view: view, bedSize: bedSize) }
+            context.coordinator.lastFitRequest = fitRequest
         }
 
         // G-code toolpaths (Preview tab) — also under content (Z-up)
@@ -392,12 +440,16 @@ struct PlateSceneView: UIViewRepresentable {
         return parent
     }
 
-    final class Coordinator: NSObject {
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
         weak var view: SCNView?
         var parent: PlateSceneView?
         var lastMeshKey: String = ""
         var lastBed: SIMD2<Float> = SIMD2(0, 0)
         var lastTexture: String = ""
+        var lastFitRequest: UUID?
+        var pinchGesture: UIPinchGestureRecognizer?
+        private var rotateDegrees: Float = 0
+        private var rotationNode: SCNNode?
         var panGesture: UIPanGestureRecognizer?
         var tapGesture: UITapGestureRecognizer?
         var isDragging = false
@@ -416,15 +468,100 @@ struct PlateSceneView: UIViewRepresentable {
             if panGesture == nil {
                 let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
                 pan.maximumNumberOfTouches = 1
-                pan.isEnabled = false
+                pan.delegate = self
+                pan.minimumNumberOfTouches = 1
+                pan.isEnabled = true
                 view.addGestureRecognizer(pan)
                 panGesture = pan
+            }
+            if pinchGesture == nil {
+                let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
+                pinch.delegate = self
+                view.addGestureRecognizer(pinch)
+                pinchGesture = pinch
             }
             if tapGesture == nil {
                 let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
                 tap.isEnabled = false
+                if let panGesture { tap.require(toFail: panGesture) }
                 view.addGestureRecognizer(tap)
                 tapGesture = tap
+            }
+        }
+
+        @objc private func handlePinch(_ gesture: UIPinchGestureRecognizer) {
+            if gesture.state == .began {
+                panGesture?.isEnabled = false
+                panGesture?.isEnabled = true
+            }
+            guard gesture.numberOfTouches == 2, gesture.state == .changed, let view else { return }
+            zoom(scale: Float(gesture.scale), view: view)
+            gesture.scale = 1
+        }
+
+        func zoom(scale: Float, view: SCNView) {
+            guard let camera = view.pointOfView else { return }
+            let target = view.defaultCameraController.target
+            let offset = SIMD3<Float>(camera.position.x - target.x, camera.position.y - target.y, camera.position.z - target.z)
+            let distance = simd_length(offset)
+            guard distance > 0, scale.isFinite, scale > 0 else { return }
+            let next = min(max(distance / scale, 0.5), 20000)
+            let position = SIMD3<Float>(target.x, target.y, target.z) + offset * (next / distance)
+            camera.position = SCNVector3(position.x, position.y, position.z)
+        }
+
+        private func cameraPan(_ gesture: UIPanGestureRecognizer, view: SCNView, mode: PlateTouchMode) {
+            guard gesture.state == .changed, let camera = view.pointOfView else { return }
+            let delta = gesture.translation(in: view)
+            gesture.setTranslation(.zero, in: view)
+            cameraDrag(delta: delta, view: view, mode: mode)
+        }
+
+        func cameraDrag(delta: CGPoint, view: SCNView, mode: PlateTouchMode) {
+            guard let camera = view.pointOfView else { return }
+            let controller = view.defaultCameraController
+            controller.pointOfView = camera
+            if mode == .orbit {
+                controller.rotateBy(x: Float(delta.x), y: Float(delta.y))
+            } else {
+                let target = controller.target
+                let distance = simd_length(SIMD3<Float>(camera.position.x - target.x, camera.position.y - target.y, camera.position.z - target.z))
+                let units = 2 * distance * tanf(Float.pi * 21 / 180) / Float(max(view.bounds.height, 1))
+                let shift = camera.convertVector(SCNVector3(-Float(delta.x) * units, Float(delta.y) * units, 0), to: nil)
+                camera.position = SCNVector3(camera.position.x + shift.x, camera.position.y + shift.y, camera.position.z + shift.z)
+                controller.target = SCNVector3(target.x + shift.x, target.y + shift.y, target.z + shift.z)
+            }
+        }
+
+        private func rotateObject(_ gesture: UIPanGestureRecognizer, view: SCNView, parent: PlateSceneView) {
+            switch gesture.state {
+            case .began:
+                dragObjectIndex = hitObjectIndex(view: view, screen: gesture.location(in: view)) ?? parent.selectedObjectIndex
+                guard let model = view.scene?.rootNode.childNode(withName: "content", recursively: false)?.childNode(withName: "model", recursively: false) else { return }
+                if dragObjectIndex >= 0 { parent.onSelectObject?(dragObjectIndex) }
+                rotationNode = dragObjectIndex >= 0 ? model.childNode(withName: "object_\(dragObjectIndex)", recursively: false) : model
+                let mesh = dragObjectIndex >= 0 && dragObjectIndex < parent.objectMeshes.count ? parent.objectMeshes[dragObjectIndex] : parent.mesh
+                if let mesh {
+                    let center = (mesh.min + mesh.max) * 0.5
+                    rotationNode?.pivot = SCNMatrix4MakeTranslation(center.x, center.y, center.z)
+                    rotationNode?.position = SCNVector3(center.x, center.y, center.z)
+                }
+                rotateDegrees = 0
+                isDragging = true
+            case .changed:
+                guard isDragging else { return }
+                rotateDegrees = Float(gesture.translation(in: view).x) * 0.5
+                rotationNode?.eulerAngles.z = rotateDegrees * Float.pi / 180
+            case .ended, .cancelled, .failed:
+                let commit = gesture.state == .ended && isDragging && abs(rotateDegrees) > 0.1
+                rotationNode?.transform = SCNMatrix4Identity
+                rotationNode?.pivot = SCNMatrix4Identity
+                rotationNode = nil
+                isDragging = false
+                suppressSelectUntil = Date().timeIntervalSince1970 + 0.35
+                if commit { parent.onRotateCommit?(rotateDegrees, dragObjectIndex) }
+                dragObjectIndex = -1
+            default: break
             }
         }
 
@@ -527,16 +664,22 @@ struct PlateSceneView: UIViewRepresentable {
                     isDragging = false
                     paintStrokeActive = false
                     lastPaintScreen = nil
-                    view.allowsCameraControl = !(parent.moveMode)
+                    view.allowsCameraControl = false
                 default:
                     break
                 }
                 return
             }
 
-            // Move: explicit Move gizmo, OR select mode drag that starts on an object
-            let canMove = parent.moveMode || parent.selectMode
-            guard canMove else { return }
+            if parent.touchMode == .orbit || parent.touchMode == .pan {
+                cameraPan(gr, view: view, mode: parent.touchMode)
+                return
+            }
+            if parent.touchMode == .rotate {
+                rotateObject(gr, view: view, parent: parent)
+                return
+            }
+            guard parent.moveMode else { return }
 
             switch gr.state {
             case .began:
@@ -581,7 +724,7 @@ struct PlateSceneView: UIViewRepresentable {
                 dragStartBedXY = nil
                 lastBedXY = nil
                 // Keep visual offset until engine commits + mesh rebuild (avoids snap-to-old-pose)
-                if wasDragging, abs(total.x) > 0.05 || abs(total.y) > 0.05 {
+                if gr.state == .ended, wasDragging, abs(total.x) > 0.05 || abs(total.y) > 0.05 {
                     // Suppress synthetic tap that would deselect right after drag
                     suppressSelectUntil = Date().timeIntervalSince1970 + 0.35
                     parent.onDragCommit?(total.x, total.y, objIdx)
@@ -596,7 +739,7 @@ struct PlateSceneView: UIViewRepresentable {
                     visualOffset = .zero
                     dragObjectIndex = -1
                 }
-                view.allowsCameraControl = !(parent.moveMode)
+                view.allowsCameraControl = false
 
             default:
                 break
@@ -657,6 +800,7 @@ struct PlateSceneView: UIViewRepresentable {
             )
             cam.look(at: target)
             view.pointOfView = cam
+            view.defaultCameraController.pointOfView = cam
             view.defaultCameraController.automaticTarget = false
             view.defaultCameraController.target = target
         }
@@ -688,6 +832,7 @@ struct PlateSceneView: UIViewRepresentable {
             )
             cam.look(at: target)
             view.pointOfView = cam
+            view.defaultCameraController.pointOfView = cam
             view.defaultCameraController.automaticTarget = false
             view.defaultCameraController.target = target
         }

@@ -75,6 +75,7 @@ struct OrcaRootView: View {
     @State private var pendingDocumentPicker: DocumentImportRequest?
     @State private var didTestImport = false
     @State private var processingDocument = false
+    @State private var cloudPresetRevision: UUID?
     @State private var showProcess = false
     @State private var showCalibration = false
     @State private var exportShareURL: URL?
@@ -108,6 +109,8 @@ struct OrcaRootView: View {
         case paintBrimEars = "Brim ears"
     }
 
+    @State private var plateTouchMode: PlateTouchMode = .orbit
+    @State private var fitCameraRequest = UUID()
     @State private var gizmoMode: GizmoMode = .select
     @State private var showPreferences = false
     @State private var showAbout = false
@@ -236,7 +239,7 @@ struct OrcaRootView: View {
                 .background(OrcaTheme.panel)
                 .clipShape(RoundedRectangle(cornerRadius: 14))
             } else if engine.modelImporting {
-                ProgressView("Opening model…")
+                ProgressView("Importing…")
                     .padding(24)
                     .background(OrcaTheme.panel)
                     .clipShape(RoundedRectangle(cornerRadius: 14))
@@ -342,22 +345,30 @@ struct OrcaRootView: View {
         }
         .sheet(item: $documentPicker) { request in
             NativeDocumentPicker(settingsOnly: request.isSettings) { url in
-                documentPicker = nil
                 if let url { documents.receive(url, kind: request.kind) }
+                documentPicker = nil
             }
         }
         .onAppear {
             importPendingDocuments()
             testDocumentPickerWhenReady()
+            if ProcessInfo.processInfo.arguments.contains("--test-view-metadata") {
+                let result = PlateSceneView.cameraSmokeTest() ? "PASS: one-finger pan/orbit and two-finger zoom camera math" : "FAIL: camera gesture smoke test"
+                try? result.write(to: FileManager.default.temporaryDirectory.appendingPathComponent("orca-camera-smoke.txt"), atomically: true, encoding: .utf8)
+            }
         }
+        .onChange(of: cloudAccount.busy) { busy in if !busy { importCloudPresetsIfReady() } }
+        .onChange(of: cloudAccount.profileRevision) { _ in importCloudPresetsIfReady() }
+        .onChange(of: engine.modelImporting) { importing in if !importing { importPendingDocuments(); importCloudPresetsIfReady() } }
         .onChange(of: documents.pending.count) { _ in importPendingDocuments() }
         .onChange(of: engine.presetsLoading) { _ in importPendingDocuments() }
         .onChange(of: engine.startupFinished) { _ in
             importPendingDocuments()
             testDocumentPickerWhenReady()
+            importCloudPresetsIfReady()
         }
-        .onChange(of: isSlicing) { _ in importPendingDocuments() }
-        .onChange(of: editingModalPresented) { _ in importPendingDocuments() }
+        .onChange(of: isSlicing) { _ in importPendingDocuments(); importCloudPresetsIfReady() }
+        .onChange(of: editingModalPresented) { _ in importPendingDocuments(); importCloudPresetsIfReady() }
         .alert("Import failed", isPresented: Binding(get: { !documents.errorMessage.isEmpty }, set: { if !$0 { documents.errorMessage = "" } })) {
             Button("OK", role: .cancel) { documents.errorMessage = "" }
         } message: { Text(documents.errorMessage) }
@@ -585,7 +596,7 @@ struct OrcaRootView: View {
                     .buttonStyle(.plain)
                 }
 
-                PrinterConnectionsPanel(account: cloudAccount, connections: connections, address: printerHost,
+                PrinterConnectionsPanel(account: cloudAccount, engine: engine, connections: connections, address: printerHost,
                                         kind: hostType.rawValue, apiKey: octoApiKey,
                                         serialNumber: hostType == .flashforge ? flashforgeSerial : nil) { printer in
                     selectPrinterConnection(printer)
@@ -2203,6 +2214,7 @@ struct OrcaRootView: View {
                     selected: moveMode
                 ) {
                     moveMode.toggle()
+                    plateTouchMode = moveMode ? .move : .orbit
                     status = moveMode
                         ? "Move mode: drag on plate (orbit off)"
                         : "Orbit camera"
@@ -2212,6 +2224,9 @@ struct OrcaRootView: View {
                     toolChip(mode.rawValue, gizmoIcon(mode), selected: gizmoMode == mode) {
                         gizmoMode = mode
                         moveMode = (mode == .move)
+                        if mode == .move { plateTouchMode = .move }
+                        else if mode == .rotate { plateTouchMode = .rotate }
+                        else if mode == .select { plateTouchMode = .select }
                         if mode != .measure {
                             measurePointA = nil
                             measurePointB = nil
@@ -2321,6 +2336,7 @@ struct OrcaRootView: View {
         AnyView(ZStack {
             PlateSceneView(
                 mesh: engine.mesh,
+                meshRevision: engine.meshRevision,
                 objectMeshes: engine.objectMeshes,
                 selectedObjectIndex: engine.selectedObjectIndex,
                 gcodeNode: engine.gcodePathNode,
@@ -2328,10 +2344,12 @@ struct OrcaRootView: View {
                 bedSize: engine.bedSize,
                 bedTexturePath: engine.bedTexturePath,
                 accent: UIColor(red: 0, green: 150 / 255, blue: 136 / 255, alpha: 1),
-                moveMode: (moveMode || gizmoMode == .move) && mainTab == .prepare && engine.hasModel,
-                // Tap-to-select + drag-on-object always on Prepare (except measure/paint gizmos)
-                selectMode: mainTab == .prepare && engine.hasModel
-                    && gizmoMode != .measure && !isPaintGizmo,
+                touchMode: plateTouchMode,
+                fitRequest: fitCameraRequest,
+                onRotateCommit: { degrees, index in
+                    engine.rotateZ(degrees: degrees, index: index)
+                    status = engine.lastMessage
+                },
                 measureMode: gizmoMode == .measure && mainTab == .prepare,
                 paintMode: isPaintGizmo && mainTab == .prepare && engine.hasModel,
                 paintOverlay: isPaintGizmo ? engine.paintOverlayMesh : nil,
@@ -2358,6 +2376,25 @@ struct OrcaRootView: View {
                     status = engine.lastMessage
                 }
             )
+            .overlay(alignment: .bottom) {
+                if mainTab != .device {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(PlateTouchMode.allCases) { mode in
+                                if mainTab == .prepare || mode == .orbit || mode == .pan {
+                                    toolChip(mode.rawValue, mode.icon, selected: plateTouchMode == mode) {
+                                        plateTouchMode = mode
+                                        gizmoMode = mode == .move ? .move : mode == .rotate ? .rotate : .select
+                                        moveMode = mode == .move
+                                        engine.clearPaintOverlay()
+                                    }
+                                }
+                            }
+                            toolChip("Fit", "arrow.up.left.and.arrow.down.right") { fitCameraRequest = UUID() }
+                        }.padding(8)
+                    }.background(.ultraThinMaterial).clipShape(RoundedRectangle(cornerRadius: 12)).padding(8)
+                }
+            }
             .overlay(alignment: .topLeading) {
                 hintOverlay.padding(12)
             }
@@ -2729,6 +2766,8 @@ struct OrcaRootView: View {
                     .font(.system(size: 13, design: .monospaced))
                     .foregroundStyle(OrcaTheme.muted)
                     .multilineTextAlignment(.center)
+                Text("Build \(Bundle.main.object(forInfoDictionaryKey: "OrcaBuildRevision") as? String ?? "development")")
+                    .font(.caption.monospaced())
                 Text("iOS shell (SwiftUI) · official libslic3r engine\nAGPL-3.0 · replaces desktop wxWidgets UI on mobile")
                     .font(.footnote)
                     .foregroundStyle(OrcaTheme.muted)
@@ -4477,6 +4516,21 @@ struct OrcaRootView: View {
         showProcess || showWizard || showCalibration || showObjectSettings || showPreferences || showAbout || showShortcuts
     }
 
+    private func importCloudPresetsIfReady() {
+        guard let owner = cloudAccount.ownerID, cloudPresetRevision != cloudAccount.profileRevision,
+              !cloudAccount.busy, !processingDocument, !isSlicing, !engine.presetsLoading,
+              !engine.modelImporting, engine.startupFinished, !editingModalPresented else { return }
+        let revision = cloudAccount.profileRevision
+        let profiles = cloudAccount.profiles
+        guard cloudAccount.lastSynced != nil else { return }
+        cloudPresetRevision = revision
+        Task { @MainActor in
+            let success = await engine.importCloudProfiles(profiles, owner: owner, adoptedIDs: cloudAccount.uploadedProfileIDs)
+            cloudAccount.profileImportMessage = engine.lastMessage
+            if !success { status = engine.lastMessage }
+        }
+    }
+
     private func importPendingDocuments() {
         guard !processingDocument, !isSlicing, !engine.presetsLoading, !engine.modelImporting, engine.startupFinished, !editingModalPresented,
               let document = documents.takeNext() else { return }
@@ -4487,6 +4541,7 @@ struct OrcaRootView: View {
             case .automatic: break // Resolved before staging.
             case .model(let append):
                 success = await engine.loadDocumentModel(url: document.url, append: append)
+                if success { fitCameraRequest = UUID() }
                 status = engine.lastMessage
                 if success { engine.rememberRecent(url: document.url) }
             case .settings(let preset):
@@ -4504,6 +4559,7 @@ struct OrcaRootView: View {
             }
             processingDocument = false
             importPendingDocuments()
+            importCloudPresetsIfReady()
         }
     }
 

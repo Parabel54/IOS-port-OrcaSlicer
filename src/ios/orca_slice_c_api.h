@@ -403,6 +403,15 @@ ORCA_API int orca_session_import_config(orca_session_t *s, const char *path);
 ORCA_API int orca_session_import_user_preset(
     orca_session_t *s, const char *path, int kind);
 
+/** Import native JSON or an Orca/ZIP preset bundle into the official catalog.
+ * Returns the number imported, or a negative error. Does not select or apply it. */
+ORCA_API int orca_session_import_preset_catalog(orca_session_t *s, const char *path);
+/** Apply cloud profile records using official preset inheritance and identity.
+ * path contains a JSON array of {id,name,updated_time,content}. */
+ORCA_API int orca_session_import_cloud_presets(orca_session_t *s, const char *path, const char *user_id);
+/** Export user printer, filament and process presets as cloud profile records. */
+ORCA_API int orca_session_export_user_profiles(orca_session_t *s, const char *path);
+
 /**
  * Clone object into an Nx × Ny grid with spacing_mm between origins, then arrange.
  * index = source object; nx,ny >= 1 (total clones = nx*ny including original kept).

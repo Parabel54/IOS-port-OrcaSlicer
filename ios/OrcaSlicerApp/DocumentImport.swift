@@ -70,18 +70,25 @@ final class DocumentInbox: ObservableObject {
     @Published private(set) var receiving = 0
 
     func receive(_ url: URL, kind: DocumentImportKind = .automatic) {
+        // Hold provider access before dismissing the picker; staging continues
+        // asynchronously after its delegate has returned.
+        let accessed = url.startAccessingSecurityScopedResource()
         receiving += 1
         Task {
-            defer { receiving -= 1 }
+            defer {
+                receiving -= 1
+                if accessed { url.stopAccessingSecurityScopedResource() }
+            }
             do {
                 let extensionName = url.pathExtension.lowercased()
-                guard ["stl", "obj", "3mf", "amf", "json"].contains(extensionName) else {
-                    errorMessage = String(localized: "Choose an STL, OBJ, 3MF, AMF model or a JSON settings file.")
+                guard ["stl", "obj", "3mf", "amf", "json", "orca_printer", "orca_filament", "orca_bundle", "zip"].contains(extensionName) else {
+                    errorMessage = String(localized: "Choose a model, JSON settings file, or Orca preset bundle.")
                     return
                 }
                 let resolved: DocumentImportKind
                 switch kind {
-                case .automatic: resolved = extensionName == "json" ? .settings(preset: nil) : .model(append: false)
+                case .automatic: resolved = ["json", "orca_printer", "orca_filament", "orca_bundle", "zip"].contains(extensionName) ? .settings(preset: nil) : .model(append: false)
+                case .model where ["json", "orca_printer", "orca_filament", "orca_bundle", "zip"].contains(extensionName): resolved = .settings(preset: nil)
                 default: resolved = kind
                 }
                 let local = try await Task.detached(priority: .userInitiated) {

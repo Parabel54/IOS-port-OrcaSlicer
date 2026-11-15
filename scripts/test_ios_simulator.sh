@@ -79,6 +79,10 @@ metadata = Path(sys.argv[1]) / 'tmp/orca-view-metadata-smoke.txt'
 if not metadata.is_file():
     raise SystemExit('Missing small-stack view metadata test result')
 print(metadata.read_text())
+camera = Path(sys.argv[1]) / 'tmp/orca-camera-smoke.txt'
+if not camera.is_file() or not camera.read_text().startswith('PASS:'):
+    raise SystemExit('Camera pan/orbit/zoom smoke test failed')
+print(camera.read_text())
 picker = Path(sys.argv[1]) / 'tmp/orca-document-picker-smoke.txt'
 if not picker.is_file():
     raise SystemExit('Native document picker did not present')

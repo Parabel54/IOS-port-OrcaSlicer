@@ -16,6 +16,15 @@ extension OrcaCloudAuthenticating {
 final class OrcaCloudAccount: ObservableObject {
     @Published private(set) var signedIn = false
     @Published private(set) var displayName = ""
+    @Published private(set) var profiles: [OrcaCloudProfile] = []
+    @Published private(set) var profileRevision = UUID()
+    @Published var profileImportMessage = ""
+    var ownerID: String? { cloudSession?.user.id }
+    var uploadedProfileIDs: Set<String> {
+        guard let ownerID else { return [] }
+        let entries = UserDefaults.standard.dictionary(forKey: "orca.cloud.upload-identities." + ownerID) as? [String: String] ?? [:]
+        return Set(entries.values)
+    }
     @Published private(set) var printers: [OrcaCloudPrinter] = []
     @Published private(set) var busy = false
     @Published private(set) var signingIn = false
@@ -177,9 +186,13 @@ final class OrcaCloudAccount: ObservableObject {
         signingIn = false
         let result = try await api.printers(accessToken: session.access_token)
         guard generation == current else { return }
+        let downloadedProfiles = try await api.profiles(accessToken: session.access_token)
+        guard generation == current else { return }
+        profiles = downloadedProfiles
         printers = result
+        profileRevision = UUID()
         lastSynced = Date()
-        message = String(localized: "Account and printers synchronized.")
+        message = String(localized: "Account, printers and presets downloaded.")
     }
 
     func cancelSignIn() {
@@ -203,20 +216,69 @@ final class OrcaCloudAccount: ObservableObject {
             if session.expiry.timeIntervalSinceNow < 60 {
                 session = try await refreshSession(session, generation: current)
             }
-            let result: [OrcaCloudPrinter]
-            do { result = try await api.printers(accessToken: session.access_token) }
+            var result: [OrcaCloudPrinter] = []
+            var downloadedProfiles: [OrcaCloudProfile] = []
+            do {
+                result = try await api.printers(accessToken: session.access_token)
+                downloadedProfiles = try await api.profiles(accessToken: session.access_token)
+            }
             catch OrcaCloudError.http(401) {
                 session = try await refreshSession(session, generation: current)
                 result = try await api.printers(accessToken: session.access_token)
+                downloadedProfiles = try await api.profiles(accessToken: session.access_token)
             }
             guard generation == current else { return }
             printers = result
+            profiles = downloadedProfiles
+            profileRevision = UUID()
             lastSynced = Date()
-            message = String(localized: "Account and printers synchronized.")
+            message = String(localized: "Account, printers and presets downloaded.")
         } catch {
             guard generation == current else { return }
             // Preserve the local session on transient failures; never erase LAN keys.
             message = error.localizedDescription
+        }
+    }
+
+    /// Explicit upload preserves the server version on HTTP 409. Local and
+    /// cloud presets with the same name are never silently merged/force-pushed.
+    func uploadLocalProfiles(_ local: [OrcaCloudProfile]) async {
+        guard !busy, var session = cloudSession else { return }
+        busy = true
+        let current = generation
+        defer { if generation == current { busy = false } }
+        do {
+            if session.expiry.timeIntervalSinceNow < 60 { session = try await refreshSession(session, generation: current) }
+            let key = "orca.cloud.upload-identities." + session.user.id
+            var identities = UserDefaults.standard.dictionary(forKey: key) as? [String: String] ?? [:]
+            var uploaded = 0
+            for profile in local where profile.ownerID.isEmpty || profile.ownerID == session.user.id {
+                guard generation == current else { return }
+                let nameKey = profile.kind + ":" + profile.name
+                let remote = profiles.first { $0.kind == profile.kind && $0.name == profile.name }
+                let id = identities[nameKey] ?? (profile.ownerID == session.user.id && UUID(uuidString: profile.id) != nil ? profile.id : UUID().uuidString.lowercased())
+                if let remote, remote.id != id { throw OrcaCloudError.http(409) }
+                identities[nameKey] = id
+                UserDefaults.standard.set(identities, forKey: key)
+                let original = remote == nil ? nil : (profile.updatedTime > 0 ? profile.updatedTime : remote?.updatedTime)
+                do { _ = try await api.pushProfile(profile, id: id, originalTime: original, accessToken: session.access_token) }
+                catch OrcaCloudError.http(401) {
+                    session = try await refreshSession(session, generation: current)
+                    _ = try await api.pushProfile(profile, id: id, originalTime: original, accessToken: session.access_token)
+                }
+                uploaded += 1
+            }
+            guard generation == current else { return }
+            let downloadedProfiles = try await api.profiles(accessToken: session.access_token)
+            guard generation == current else { return }
+            profiles = downloadedProfiles
+            profileRevision = UUID()
+            message = String(localized: "Uploaded \(uploaded) local presets to Orca Cloud.")
+        } catch {
+            guard generation == current else { return }
+            message = (error as? OrcaCloudError) == .http(409)
+                ? String(localized: "A local preset conflicts with a cloud version. Both are preserved; rename the local copy or resolve it in Orca Cloud before retrying.")
+                : error.localizedDescription
         }
     }
 
@@ -235,6 +297,8 @@ final class OrcaCloudAccount: ObservableObject {
         signedIn = false
         displayName = ""
         printers = []
+        profiles = []
+        profileImportMessage = ""
         lastSynced = nil
         message = ""
         if let token { try? await api.logout(accessToken: token) }
@@ -253,6 +317,8 @@ final class OrcaCloudAccount: ObservableObject {
             signedIn = false
             displayName = ""
             printers = []
+            profiles = []
+            profileImportMessage = ""
             lastSynced = nil
             message = String(localized: "Your cloud session has expired. Sign in again.")
             throw OrcaCloudError.http(status)

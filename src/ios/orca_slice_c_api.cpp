@@ -13,6 +13,10 @@
 #include "orca_slice_c_api.h"
 
 #include <exception>
+#include <fstream>
+#include <sstream>
+#include <stdexcept>
+#include <nlohmann/json.hpp>
 #include <memory>
 #include <mutex>
 #include <atomic>
@@ -2195,12 +2199,17 @@ int orca_session_import_config(orca_session_t *s, const char *path)
         std::map<std::string, std::string> key_values;
         std::string reason;
         ConfigSubstitutionContext ctx(ForwardCompatibilitySubstitutionRule::Enable);
-        int rc = s->config.load_from_json(std::string(path), ctx, true, key_values, reason);
+        DynamicPrintConfig next_config = s->config;
+        int rc = next_config.load_from_json(std::string(path), ctx, true, key_values, reason);
         if (rc != 0) {
             s->set_error(reason.empty() ? "import_config failed" : reason);
             return -2;
         }
+        s->config = std::move(next_config);
         s->has_config = true;
+        s->has_slice_stats = false;
+        s->preview_segments.clear();
+        s->preview_total_segments = 0;
         return 0;
     } catch (const std::exception &ex) {
         s->set_error(std::string("import_config: ") + ex.what());
@@ -2264,6 +2273,174 @@ int orca_session_import_user_preset(orca_session_t *s, const char *path, int kin
     } catch (...) {
         s->set_error("import_user_preset: unknown error");
         return -4;
+    }
+}
+
+// Keep document imports in the official preset catalog. Session overlays are
+// intentionally separate: importing a filament must not replace printer settings.
+int orca_session_import_preset_catalog(orca_session_t *s, const char *path)
+{
+    if (!s || !path || !s->preset_bundle || !s->presets_loaded)
+        return -1;
+    s->clear_error();
+    try {
+        // The upstream importer can return early with bundle reads paused.
+        struct ResumeReads {
+            PresetBundleMetadata &metadata;
+            ~ResumeReads() { metadata.UnpauseRead(); }
+        } resume{s->preset_bundle->bundles};
+        std::vector<std::string> files{path};
+        AppConfig config;
+        s->preset_bundle->import_presets(files, [](const std::string &) { return 3; },
+            ForwardCompatibilitySubstitutionRule::EnableSilent, config);
+        s->preset_bundle->update_compatible(PresetSelectCompatibleType::Never);
+        s->refresh_name_caches();
+        if (files.empty()) {
+            s->set_error("No presets imported. Check the preset version, type, and inherited base preset.");
+            return -2;
+        }
+        return int(files.size());
+    } catch (const std::exception &ex) {
+        s->set_error(std::string("import preset catalog: ") + ex.what());
+        return -3;
+    }
+}
+
+int orca_session_import_cloud_presets(orca_session_t *s, const char *path, const char *user_id)
+{
+    if (!s || !path || !user_id || !*user_id || !s->preset_bundle || !s->presets_loaded)
+        return -1;
+    s->clear_error();
+    try {
+        std::ifstream input(path);
+        nlohmann::json payload;
+        input >> payload;
+        if (!payload.is_array())
+            throw std::runtime_error("Expected a cloud preset array");
+        auto &bundle = *s->preset_bundle;
+        bundle.update_user_presets_directory(DEFAULT_USER_FOLDER_NAME);
+        PresetsConfigSubstitutions substitutions;
+        std::vector<nlohmann::json> pending;
+        for (const auto &record : payload) {
+            if (!record.at("content").is_object() || record.at("id").get<std::string>().empty())
+                throw std::runtime_error("Invalid cloud preset");
+            pending.push_back(record);
+        }
+        int loaded = 0;
+        while (!pending.empty()) {
+            bool progressed = false;
+            for (auto it = pending.begin(); it != pending.end();) {
+                auto content = it->at("content");
+                const std::string id = it->at("id").get<std::string>();
+                const std::string name = content.value("name", it->value("name", std::string()));
+                const std::string type = content.value("type", std::string());
+                PresetCollection *collection = nullptr;
+                if (type == "printer" || type == "machine") collection = &bundle.printers;
+                else if (type == "filament") collection = &bundle.filaments;
+                else if (type == "print" || type == "process") collection = &bundle.prints;
+                if (!collection || name.empty() || name.find_first_of("/\\") != std::string::npos || name == "." || name == "..")
+                    throw std::runtime_error("Invalid cloud preset name or type");
+                const std::string inherits = content.value("inherits", std::string());
+                if (!inherits.empty() && !collection->find_preset2(inherits, true)) { ++it; continue; }
+                if (Preset *existing = collection->find_preset(name, false)) {
+                    if (it->value("adopt_local", false) && existing->is_user() && existing->user_id.empty()) {
+                        existing->setting_id = id;
+                        existing->user_id = user_id;
+                        existing->updated_time = 0;
+                    }
+                    if (existing->is_default || existing->is_system ||
+                        existing->setting_id != id || existing->user_id != user_id)
+                        throw std::runtime_error("Cloud preset conflicts with a local preset: " + name);
+                }
+                std::map<std::string, std::string> values;
+                for (auto item = content.begin(); item != content.end(); ++item)
+                    values[item.key()] = item.value().is_string() ? item.value().get<std::string>() : item.value().dump();
+                values["setting_id"] = id;
+                values["user_id"] = user_id;
+                values["updated_time"] = std::to_string(it->value("updated_time", int64_t(0)));
+                collection->load_user_preset(name, values, substitutions,
+                    ForwardCompatibilitySubstitutionRule::EnableSilent, PresetOrigin(PresetOrigin::Kind::User));
+                Preset *preset = collection->find_preset(name, false);
+                if (!preset || preset->setting_id != id || preset->user_id != user_id)
+                    throw std::runtime_error("Could not load cloud preset: " + name);
+                if (preset->file.empty())
+                    preset->file = collection->path_from_name(name, inherits.empty());
+                if (!preset->save(nullptr))
+                    throw std::runtime_error("Could not save cloud preset: " + name);
+                ++loaded;
+                it = pending.erase(it);
+                progressed = true;
+            }
+            if (!progressed)
+                throw std::runtime_error("Cloud presets have missing or cyclic inherited base presets");
+        }
+        bundle.update_compatible(PresetSelectCompatibleType::Never);
+        s->refresh_name_caches();
+        return loaded;
+    } catch (const std::exception &ex) {
+        s->refresh_name_caches();
+        s->set_error(std::string("cloud preset import: ") + ex.what());
+        return -3;
+    }
+}
+
+int orca_session_export_user_profiles(orca_session_t *s, const char *path)
+{
+    if (!s || !path || !s->preset_bundle || !s->presets_loaded)
+        return -1;
+    s->clear_error();
+    try {
+        nlohmann::json records = nlohmann::json::array();
+        auto add_collection = [&](PresetCollection &collection, const char *type) {
+            for (const Preset &preset : collection) {
+                if (!preset.is_user() || preset.is_default || preset.is_system || preset.is_project_embedded)
+                    continue;
+                std::ostringstream encoded;
+                preset.config.save_to_json(encoded, get_preset_bare_name(preset.name), "User", preset.version.to_string());
+                auto content = nlohmann::json::parse(encoded.str());
+                content["type"] = type;
+                records.push_back({{"id", preset.setting_id}, {"name", get_preset_bare_name(preset.name)},
+                    {"user_id", preset.user_id}, {"updated_time", preset.updated_time}, {"content", content}});
+            }
+        };
+        add_collection(s->preset_bundle->printers, "printer");
+        add_collection(s->preset_bundle->filaments, "filament");
+        add_collection(s->preset_bundle->prints, "print");
+        auto add_legacy = [&](const fs::path &directory, PresetCollection &collection, const char *type) {
+            if (!fs::is_directory(directory)) return;
+            for (fs::directory_iterator it(directory), end; it != end; ++it) {
+                if (!fs::is_regular_file(it->path()) || it->path().extension() != ".json") continue;
+                DynamicPrintConfig config;
+                ConfigSubstitutionContext substitutions(ForwardCompatibilitySubstitutionRule::EnableSilent);
+                std::map<std::string, std::string> values;
+                std::string reason;
+                if (config.load_from_json(it->path().string(), substitutions, true, values, reason) != 0)
+                    throw std::runtime_error("Could not export local preset: " + it->path().stem().string());
+                Preset::remove_invalid_keys(config, collection.default_preset_for(config).config);
+                config.set_key_value("inherits", new ConfigOptionString(""));
+                const std::string name = it->path().stem().string();
+                std::ostringstream encoded;
+                config.save_to_json(encoded, name, "User", SoftFever_VERSION);
+                auto content = nlohmann::json::parse(encoded.str());
+                content["type"] = type;
+                const Preset *existing = collection.find_preset(name, false);
+                // Legacy saved edits take precedence over the catalog version.
+                records.erase(std::remove_if(records.begin(), records.end(), [&](const auto &record) {
+                    return record["name"] == name && record["content"]["type"] == type;
+                }), records.end());
+                records.push_back({{"id", existing ? existing->setting_id : ""}, {"name", name},
+                    {"user_id", existing ? existing->user_id : ""}, {"updated_time", existing ? existing->updated_time : 0}, {"content", content}});
+            }
+        };
+        add_legacy(s->user_process_dir(), s->preset_bundle->prints, "print");
+        add_legacy(s->user_filament_dir(), s->preset_bundle->filaments, "filament");
+        std::ofstream output(path);
+        output << records.dump(2);
+        if (!output.good()) throw std::runtime_error("Could not write user profile export");
+        return int(records.size());
+    } catch (const std::exception &ex) {
+        s->set_error(std::string("export user profiles: ") + ex.what());
+        return -3;
     }
 }
 

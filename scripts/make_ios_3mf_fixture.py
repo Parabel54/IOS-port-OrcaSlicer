@@ -35,9 +35,34 @@ def create_fixture(path, padding_mib=0):
                     stream.write(chunk)
 
 
+def create_preset_fixtures(directory):
+    printer = {'name': 'iOS imported printer', 'version': '2.5.1', 'from': 'User', 'type': 'machine',
+               'inherits': '', 'printer_settings_id': 'iOS imported printer', 'printer_technology': 'FFF',
+               'nozzle_diameter': ['0.4'], 'printable_area': ['0x0', '220x0', '220x220', '0x220']}
+    filament = {'name': 'iOS imported PLA', 'version': '2.5.1', 'from': 'User', 'type': 'filament',
+                'inherits': '', 'filament_settings_id': ['iOS imported PLA'], 'filament_type': ['PLA'],
+                'filament_diameter': ['1.75']}
+    with zipfile.ZipFile(directory / 'mobile-presets.orca_bundle', 'w') as archive:
+        archive.writestr('printer.json', json.dumps(printer))
+        archive.writestr('filament.json', json.dumps(filament))
+    cloud = []
+    for index, content in enumerate([printer, filament]):
+        content = dict(content)
+        content['name'] = content['name'].replace('imported', 'cloud')
+        if index == 0:
+            content['type'] = 'printer'
+            content['printer_settings_id'] = content['name']
+        else:
+            content['filament_settings_id'] = [content['name']]
+        cloud.append({'id': f'00000000-0000-4000-8000-{index + 1:012d}', 'name': content['name'],
+                      'updated_time': 42, 'content': content})
+    (directory / 'cloud-presets.json').write_text(json.dumps(cloud))
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('path', type=Path)
     parser.add_argument('--padding-mib', type=int, choices=range(0, 101), default=0)
     arguments = parser.parse_args()
     create_fixture(arguments.path, arguments.padding_mib)
+    create_preset_fixtures(arguments.path.parent)

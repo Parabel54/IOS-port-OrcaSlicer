@@ -136,6 +136,36 @@ struct OrcaCloudSession: Codable {
     }
 }
 
+struct OrcaCloudProfile: Identifiable, Equatable {
+    let id: String
+    let name: String
+    let kind: String
+    let updatedTime: Int64
+    let ownerID: String
+    let content: Data
+
+    init(record: [String: Any]) throws {
+        guard let content = record["content"] as? [String: Any],
+              let name = content["name"] as? String ?? record["name"] as? String, !name.isEmpty,
+              let rawKind = content["type"] as? String else { throw OrcaCloudError.invalidResponse }
+        switch rawKind {
+        case "printer", "machine": kind = "printer"
+        case "filament": kind = "filament"
+        case "print", "process": kind = "print"
+        default: throw OrcaCloudError.invalidResponse
+        }
+        self.name = name
+        id = record["id"] as? String ?? ""
+        updatedTime = (record["updated_time"] as? NSNumber)?.int64Value ?? 0
+        ownerID = record["user_id"] as? String ?? ""
+        self.content = try JSONSerialization.data(withJSONObject: content, options: [.sortedKeys])
+    }
+    func record() throws -> [String: Any] {
+        ["id": id, "name": name, "updated_time": updatedTime,
+         "content": try JSONSerialization.jsonObject(with: content)]
+    }
+}
+
 struct OrcaCloudPrinter: Decodable, Identifiable, Equatable {
     let id: String
     let name: String
@@ -282,6 +312,38 @@ struct OrcaCloudAPI {
         }
         return printers
     }
+    func profiles(accessToken: String) async throws -> [OrcaCloudProfile] {
+        // An absent cursor requests a complete snapshot, matching desktop startup.
+        // Never advance a cursor before the native catalog accepts its contents.
+        var request = URLRequest(url: OrcaCloudEndpoints.api.appendingPathComponent("api/v1/sync/pull"))
+        request.setValue("Bearer " + accessToken, forHTTPHeaderField: "Authorization")
+        let data = try await perform(request)
+        guard let envelope = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let records = envelope["upserts"] as? [[String: Any]] else { throw OrcaCloudError.invalidResponse }
+        let profiles = try records.map(OrcaCloudProfile.init(record:))
+        guard profiles.allSatisfy({ !$0.id.isEmpty }), Set(profiles.map(\.id)).count == profiles.count else {
+            throw OrcaCloudError.invalidResponse
+        }
+        return profiles
+    }
+    func pushProfile(_ profile: OrcaCloudProfile, id: String, originalTime: Int64?, accessToken: String) async throws -> Int64 {
+        guard UUID(uuidString: id) != nil else { throw OrcaCloudError.invalidResponse }
+        var body = try profile.record()
+        body["id"] = id
+        body.removeValue(forKey: "updated_time")
+        if let originalTime { body["original_updated_time"] = String(originalTime) }
+        var request = URLRequest(url: OrcaCloudEndpoints.api.appendingPathComponent("api/v1/sync/push"))
+        request.httpMethod = "POST"
+        request.setValue("Bearer " + accessToken, forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        guard request.httpBody!.count <= 1024 * 1024 else { throw OrcaCloudError.http(413) }
+        let data = try await perform(request)
+        guard let result = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let time = result["updated_time"] as? NSNumber else { throw OrcaCloudError.invalidResponse }
+        return time.int64Value
+    }
+
     func logout(accessToken: String) async throws {
         var parts = URLComponents(url: OrcaCloudEndpoints.auth.appendingPathComponent("auth/v1/logout"), resolvingAgainstBaseURL: false)!
         parts.queryItems = [URLQueryItem(name: "scope", value: "local")]

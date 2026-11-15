@@ -122,6 +122,21 @@ int main(int argc, char **argv)
     if (!require(orca_session_slice_to_gcode(session.get(), (directory + "/recovered.gcode").c_str()) == 0,
                  "slice again after cancellation"))
         return 16;
+    const std::string data_dir = directory + "/preset-catalog";
+    if (!require(orca_session_set_data_dir(session.get(), data_dir.c_str()) == 0, "set preset data directory") ||
+        !require(orca_session_load_all_presets(session.get()) == 0, "load official preset catalog") ||
+        !require(orca_session_import_preset_catalog(session.get(), (directory + "/mobile-presets.orca_bundle").c_str()) == 2,
+                 "import native printer and filament bundle") ||
+        !require(orca_session_select_printer(session.get(), "iOS imported printer") == 0, "select imported printer") ||
+        !require(orca_session_select_filament(session.get(), "iOS imported PLA") == 0, "select imported filament") ||
+        !require(orca_session_import_cloud_presets(session.get(), (directory + "/cloud-presets.json").c_str(), "fixture-owner") == 2,
+                 "import all cloud preset types") ||
+        !require(orca_session_select_printer(session.get(), "iOS cloud printer") == 0, "select cloud printer") ||
+        !require(orca_session_select_filament(session.get(), "iOS cloud PLA") == 0, "select cloud filament") ||
+        !require(orca_session_export_user_profiles(session.get(), (directory + "/user-profile-export.json").c_str()) >= 4,
+                 "export local and cloud profiles for sync"))
+        return 16;
+    std::printf("PASS: native preset bundle, cloud printer/filament catalog, selection and profile export\n");
     std::printf("PASS: 3MF import, slicing, G-code export, processed preview, validation, cancellation and recovery\n");
     return 0;
 }

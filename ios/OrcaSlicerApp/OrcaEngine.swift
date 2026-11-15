@@ -607,6 +607,57 @@ final class OrcaEngine: ObservableObject {
         #endif
     }
 
+    @MainActor
+    func importCloudProfiles(_ profiles: [OrcaCloudProfile], owner: String, adoptedIDs: Set<String> = []) async -> Bool {
+        guard !modelImporting, !presetsLoading, !sliceRunning, startupFinished else { return false }
+        #if ORCA_LINKED
+        guard let session else { return false }
+        modelImporting = true
+        defer { modelImporting = false }
+        do {
+            let records = try profiles.map { profile -> [String: Any] in
+                var record = try profile.record()
+                record["adopt_local"] = adoptedIDs.contains(profile.id)
+                return record
+            }
+            let data = try JSONSerialization.data(withJSONObject: records)
+            let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".json")
+            try data.write(to: path, options: .atomic)
+            defer { try? FileManager.default.removeItem(at: path) }
+            let bits = UInt(bitPattern: session)
+            let result = await Task.detached(priority: .userInitiated) {
+                path.path.withCString { path in owner.withCString { owner in
+                    orca_session_import_cloud_presets(OpaquePointer(bitPattern: bits)!, path, owner)
+                } }
+            }.value
+            guard result >= 0 else {
+                lastMessage = orca_session_last_error(session).map { String(cString: $0) } ?? "Cloud preset import failed"
+                return false
+            }
+            refreshPresetLists()
+            lastMessage = String(localized: "Imported \(result) cloud printer, filament and process presets.")
+            return true
+        } catch { lastMessage = error.localizedDescription; return false }
+        #else
+        return false
+        #endif
+    }
+
+    func exportLocalCloudProfiles() throws -> [OrcaCloudProfile] {
+        #if ORCA_LINKED
+        guard let session, !modelImporting, !presetsLoading, !sliceRunning else { throw OrcaCloudError.unavailable }
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".json")
+        defer { try? FileManager.default.removeItem(at: path) }
+        guard path.path.withCString({ orca_session_export_user_profiles(session, $0) }) >= 0,
+              let records = try JSONSerialization.jsonObject(with: Data(contentsOf: path)) as? [[String: Any]] else {
+            throw OrcaCloudError.invalidResponse
+        }
+        return try records.map(OrcaCloudProfile.init(record:))
+        #else
+        throw OrcaCloudError.unavailable
+        #endif
+    }
+
     /// Import config JSON as overlay (or as user process/filament if kind set).
     /// kind: nil = overlay only; 0 = user process; 1 = user filament
     @discardableResult
@@ -616,6 +667,21 @@ final class OrcaEngine: ObservableObject {
         let accessed = url.startAccessingSecurityScopedResource()
         defer { if accessed { url.stopAccessingSecurityScopedResource() } }
         guard let dest = copyToTemp(url) else { return false }
+        let object = url.pathExtension.lowercased() == "json"
+            ? (try? JSONSerialization.jsonObject(with: Data(contentsOf: dest))) as? [String: Any] : nil
+        let isCatalog = ["orca_printer", "orca_filament", "orca_bundle", "zip"].contains(url.pathExtension.lowercased())
+            || object?["type"] != nil || object?["printer_settings_id"] != nil
+            || object?["filament_settings_id"] != nil || object?["print_settings_id"] != nil
+        if isCatalog {
+            let count = dest.path.withCString { orca_session_import_preset_catalog(s, $0) }
+            guard count > 0 else {
+                lastMessage = orca_session_last_error(s).map { String(cString: $0) } ?? "Preset import failed"
+                return false
+            }
+            refreshPresetLists()
+            lastMessage = String(localized: "Imported \(count) presets. Select them in Process settings.")
+            return true
+        }
         if let kind {
             let rc = dest.path.withCString { orca_session_import_user_preset(s, $0, Int32(kind)) }
             if rc != 0 {
@@ -1052,7 +1118,10 @@ final class OrcaEngine: ObservableObject {
         #endif
     }
 
+    @Published private(set) var meshRevision = 0
+
     func refreshMesh() {
+        meshRevision += 1
         invalidateSlice()
         #if ORCA_LINKED
         guard let s = session, hasModel else {

@@ -4,6 +4,7 @@ from pathlib import Path
 import uuid
 import argparse
 import hashlib
+import os
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--require-engine", choices=("iphoneos", "iphonesimulator"),
@@ -117,6 +118,7 @@ for profile in sorted(PROFILES_DIR.rglob("*")):
         profile_digest.update(profile.read_bytes())
         profile_digest.update(b"\0")
 PROFILE_REVISION = profile_digest.hexdigest()
+BUILD_REVISION = os.environ.get("GITHUB_SHA", "development")[:12]
 
 # Team for Automatic signing (override with ORCA_IOS_DEVELOPMENT_TEAM).
 # Empty → Xcode shows "Signing requires a development team" until set in UI.
@@ -155,6 +157,7 @@ def tgt_settings(name: str) -> str:
         "\t\t\t\tMACOSX_DEPLOYMENT_TARGET = 13.0;",
         "\t\t\t\tMARKETING_VERSION = 2.5.1;",
         f"\t\t\t\tORCA_PROFILE_REVISION = {PROFILE_REVISION};",
+        f"\t\t\t\tORCA_BUILD_REVISION = {BUILD_REVISION};",
         # Engine bundles are arm64-only (Apple Silicon). Exclude x86_64 so Xcode
         # does not try to link Intel-sim slices that do not exist → linker fail.
         '\t\t\t\t"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = "x86_64 i386";',
