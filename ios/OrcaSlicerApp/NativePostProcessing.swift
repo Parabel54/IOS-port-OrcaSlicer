@@ -32,14 +32,21 @@ enum NativePostProcessing {
             (1...3).first(where: { match.range(at: $0).location != NSNotFound }).map { ns.substring(with: match.range(at: $0)) } ?? ""
         }
         func basename(_ token: String) -> String { token.replacingOccurrences(of: "\\", with: "/").split(separator: "/").last.map(String.init) ?? token }
-        let names = ["zmod-preprocess.py", "zmod-preprocess.sh", "zmod_preprocess", "zmod_preprocess-windows-amd64.exe", "zmod_preprocess-linux-amd64", "zmod_preprocess-darwin-arm64", "zmod_preprocess-darwin-amd64"]
+        let names = ["zmod-preprocess.py", "zmod_preprocess", "zmod_preprocess-windows-amd64.exe", "zmod_preprocess-linux-amd64", "zmod_preprocess-darwin-arm64", "zmod_preprocess-darwin-amd64"]
         var index = 0
         if let first = tokens.first, ["python", "python3", "python.exe", "python3.exe", "bash", "sh"].contains(basename(first).lowercased()) { index += 1 }
         guard index < tokens.count, names.contains(basename(tokens[index])) else { throw Failure.unsupported(command) }
         index += 1
         var result = ZmodOptions()
         while index < tokens.count {
-            switch tokens[index] {
+            let argument = tokens[index]
+            if argument.hasPrefix("--simplify-objects=") || argument.hasPrefix("-simplify-objects=") {
+                guard let equals = argument.firstIndex(of: "="), let value = Double(argument[argument.index(after: equals)...]), value.isFinite, value >= 0 else { throw Failure.invalidOptions }
+                result.tolerance = value
+                index += 1
+                continue
+            }
+            switch argument {
             case "-no-simplify-objects", "--no-simplify-objects": result.simplify = false
             case "-simplify-objects", "--simplify-objects":
                 index += 1

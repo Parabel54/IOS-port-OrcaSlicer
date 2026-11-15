@@ -20,7 +20,7 @@ cases = [b'', b'G28', b'G28\n', header+b'T2\nT0\nT2\n'+outline,
          b'G1 X5\n' * 20000]
 records=[]
 for index, payload in enumerate(cases):
-    for mode, flags in [('default', []), ('none', ['--no-simplify-objects']), ('box', ['--simplify-objects','0'])]:
+    for mode, flags in [('default', []), ('none', ['--no-simplify-objects']), ('box', ['--simplify-objects','0']), ('equals', ['--simplify-objects=0.1'])]:
         name=f'{index}-{mode}'
         original=out/(name+'.input')
         expected=out/(name+'.expected')

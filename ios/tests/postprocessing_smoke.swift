@@ -23,7 +23,7 @@ struct PostprocessingSmoke {
         let path = #""C:\Python\python.exe" "C:\scripts\zmod-preprocess.py" --no-simplify-objects"#
         let resolved = try NativePostProcessing.resolve(path)
         precondition(resolved.simplify == false)
-        for command in ["unknown.py", "zmod-preprocess.py --invalid", "zmod-preprocess.py --simplify-objects -1", "zmod-preprocess.py ; echo bad"] {
+        for command in ["unknown.py", "zmod-preprocess.sh", "zmod-preprocess.py --invalid", "zmod-preprocess.py --simplify-objects -1", "zmod-preprocess.py ; echo bad"] {
             do { _ = try NativePostProcessing.resolve(command); fatalError("Accepted unsupported command") }
             catch {}
         }
