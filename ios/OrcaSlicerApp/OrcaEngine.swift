@@ -1037,7 +1037,7 @@ final class OrcaEngine: ObservableObject {
     /// The document inbox owns these files, so native parsing can run off the UI
     /// thread while controls and memory-pressure native cache mutation are paused.
     @MainActor
-    func loadDocumentModel(url: URL, append: Bool) async -> Bool {
+    func loadDocumentModel(url: URL, append: Bool, includeSettings: Bool = true) async -> Bool {
         guard !modelImporting, !presetsLoading, !sliceRunning else { return false }
         modelImporting = true
         lastModelImportSucceeded = false
@@ -1047,7 +1047,10 @@ final class OrcaEngine: ObservableObject {
         let bits = UInt(bitPattern: session)
         let rc = await Task.detached(priority: .userInitiated) {
             let session = OpaquePointer(bitPattern: bits)!
-            return url.path.withCString { append ? orca_session_add_model(session, $0) : orca_session_load_model(session, $0) }
+            return url.path.withCString {
+                if append && !includeSettings { return orca_session_add_model_geometry(session, $0) }
+                return append ? orca_session_add_model(session, $0) : orca_session_load_model(session, $0)
+            }
         }.value
         _ = finishModelImport(url: url, append: append, rc: rc)
         return lastModelImportSucceeded

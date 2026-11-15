@@ -324,7 +324,7 @@ void orca_session_destroy(orca_session_t *s)
     delete s;
 }
 
-static int load_model_impl(orca_session_t *s, const char *path, bool append)
+static int load_model_impl(orca_session_t *s, const char *path, bool append, bool include_settings = true)
 {
     if (!s || !path)
         return -1;
@@ -375,7 +375,7 @@ static int load_model_impl(orca_session_t *s, const char *path, bool append)
             bool is_bambu = false;
             Semver file_version;
             incoming = Model::read_from_file(std::string(path), &file_config,
-                &substitutions, LoadStrategy::AddDefaultInstances | LoadStrategy::LoadModel | LoadStrategy::LoadConfig,
+                &substitutions, LoadStrategy::AddDefaultInstances | LoadStrategy::LoadModel | (include_settings ? LoadStrategy::LoadConfig : LoadStrategy::AddDefaultInstances),
                 &outputs.plates, &outputs.presets, &is_bambu, &file_version);
         } else {
             incoming = Model::read_from_file(std::string(path), &file_config,
@@ -386,7 +386,7 @@ static int load_model_impl(orca_session_t *s, const char *path, bool append)
             return -2;
         }
         DynamicPrintConfig next_config = s->has_config ? s->config : DynamicPrintAndCLIConfig::full_print_config();
-        next_config.apply(file_config);
+        if (include_settings) next_config.apply(file_config);
 
         if (!append) {
             s->model = std::move(incoming);
@@ -424,6 +424,11 @@ static int load_model_impl(orca_session_t *s, const char *path, bool append)
         s->set_error("load_model: unknown error");
         return -3;
     }
+}
+
+int orca_session_add_model_geometry(orca_session_t *s, const char *path)
+{
+    return load_model_impl(s, path, true, false);
 }
 
 int orca_session_load_model(orca_session_t *s, const char *path)

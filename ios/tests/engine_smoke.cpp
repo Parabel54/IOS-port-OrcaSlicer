@@ -55,7 +55,11 @@ int main(int argc, char **argv)
         std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
             handy(orca_session_create(argv[2]), orca_session_destroy);
         const std::string path = std::string(argv[2]) + "/handy_models/" + file;
-        if (!require(orca_session_add_model(handy.get(), path.c_str()) == 0, file) ||
+        char height[64]{};
+        if (!require(orca_session_set_option(handy.get(), "layer_height", "0.16") == 0, "handy model settings fixture") ||
+            !require(orca_session_add_model_geometry(handy.get(), path.c_str()) == 0, file) ||
+            !require(orca_session_get_option(handy.get(), "layer_height", height, sizeof(height)) == 0 &&
+                     std::fabs(std::strtof(height, nullptr) - 0.16f) < 0.001f, "handy model preserves settings") ||
             !require(orca_session_object_count(handy.get()) > 0, "handy model contains geometry")) return 4;
     }
     int scope = -1;

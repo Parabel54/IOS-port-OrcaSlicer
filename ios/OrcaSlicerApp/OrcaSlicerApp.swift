@@ -2021,7 +2021,7 @@ struct OrcaRootView: View {
                                 for file in model.1 {
                                     guard let root = Bundle.main.resourceURL else { return }
                                     let url = root.appendingPathComponent("handy_models").appendingPathComponent(file)
-                                    guard await engine.loadDocumentModel(url: url, append: true) else {
+                                    guard await engine.loadDocumentModel(url: url, append: true, includeSettings: false) else {
                                         documents.errorMessage = engine.lastMessage; return
                                     }
                                 }

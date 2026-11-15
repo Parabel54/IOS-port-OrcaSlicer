@@ -36,6 +36,8 @@ ORCA_API int orca_session_load_model(orca_session_t *s, const char *path);
 
 /** Same as load_model with append=1 (keep existing objects). */
 ORCA_API int orca_session_add_model(orca_session_t *s, const char *path);
+/** Append geometry only (desktop handy-model behavior); preserve current printer/process/filament settings. */
+ORCA_API int orca_session_add_model_geometry(orca_session_t *s, const char *path);
 
 /**
  * Load config from official .json / .ini profile.

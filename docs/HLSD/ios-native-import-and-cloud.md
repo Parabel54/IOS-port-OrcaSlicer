@@ -49,3 +49,18 @@ General desktop Python plugin packages, their dependencies and wxWidgets host AP
 ## Platform flags
 
 The UI target supports iPhone and iPad with separate iPhone and simulator engine paths. An absent device engine never falls back to the simulator archive. `ORCA_LINKED` is SDK-specific and generated only for the corresponding available archive. CI requires a real archive, builds both SDKs and audits each final app's Mach-O platform, dynamic dependencies and bundled resources. About displays the build revision for installation diagnosis.
+
+
+## Model library and transforms
+
+The Add menu exposes the desktop primitives (cube, cylinder, sphere, cone, torus and disc) and the bundled handy-model catalog. Primitive meshes use the same libslic3r mesh generators and curve tolerance as desktop. Handy models load through the engine with geometry-only flags so a bundled 3MF cannot replace the selected printer or print settings. The Xcode resource generator includes the original handy_models folder, including Draco files; decoding remains in the engine.
+
+Scale supports one-finger vertical dragging, uniform percentages and separate local-axis percentages. Engine transforms retain the selected object's visible center and bed contact; uniform group scaling shares the group's center. The transform inspector accepts relative X/Y/Z moves and axis/angle rotation. Apply dismisses the inspector so the model remains visible. Fit-to-bed and automatic orientation create undo snapshots.
+
+Preset selection uses engine ownership metadata: cloud, local user, and system presets appear in separate sections. My presets is the initial source whenever personal compatible presets exist. System and All remain available explicitly. Filament/process compatibility filtering uses PresetBundle's selected-printer compatibility.
+
+## Processed preview and flush configuration
+
+Preview hides the prepare mesh and renders extrusion width and height reported by GCodeProcessor. Z clipping splits paths at range boundaries instead of joining remaining vertices across clipped sections. Discrete printable layer heights drive the upper/lower layer controls; a compact upper-layer scrubber remains beside the viewport. Camera updates reuse the existing toolpath subtree. An unsliced plate displays an explicit slice action.
+
+Before slicing, the host checks project flush-matrix dimensions against active filament colours and physical nozzles. A staged PresetBundle runs the desktop update_multi_material_filament_presets routine when dimensions differ, preserving existing pair values and per-nozzle multipliers while initializing new pairs from the per-filament purge volumes. Fast-purge multipliers are resized separately to the nozzle count. Valid matrices are retained. This restores a desktop lifecycle step omitted by the headless host without changing desktop behavior.
