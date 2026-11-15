@@ -46,14 +46,18 @@ def create_preset_fixtures(directory):
         archive.writestr('printer.json', json.dumps(printer))
         archive.writestr('filament.json', json.dumps(filament))
     cloud = []
-    for index, content in enumerate([printer, filament]):
+    process = {'name': 'iOS imported process', 'version': '2.5.1', 'from': 'User', 'type': 'print',
+               'inherits': '', 'print_settings_id': 'iOS imported process', 'layer_height': '0.2'}
+    for index, content in enumerate([printer, filament, process]):
         content = dict(content)
         content['name'] = content['name'].replace('imported', 'cloud')
         if index == 0:
             content['type'] = 'printer'
             content['printer_settings_id'] = content['name']
-        else:
+        elif index == 1:
             content['filament_settings_id'] = [content['name']]
+        else:
+            content['print_settings_id'] = content['name']
         cloud.append({'id': f'00000000-0000-4000-8000-{index + 1:012d}', 'name': content['name'],
                       'updated_time': 42, 'content': content})
     (directory / 'cloud-presets.json').write_text(json.dumps(cloud))

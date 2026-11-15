@@ -202,15 +202,17 @@ int main(int argc, char **argv)
                  "import native printer and filament bundle") ||
         !require(orca_session_select_printer(session.get(), "iOS imported printer") == 0, "select imported printer") ||
         !require(orca_session_select_filament(session.get(), "iOS imported PLA") == 0, "select imported filament") ||
-        !require(orca_session_import_cloud_presets(session.get(), (directory + "/cloud-presets.json").c_str(), "fixture-owner") == 2,
+        !require(orca_session_import_cloud_presets(session.get(), (directory + "/cloud-presets.json").c_str(), "fixture-owner") == 3,
                  "import all cloud preset types") ||
         !require(orca_session_select_printer(session.get(), "iOS cloud printer") == 0, "select cloud printer") ||
         !require(orca_session_select_filament(session.get(), "iOS cloud PLA") == 0, "select cloud filament") ||
-        !require(orca_session_export_user_profiles(session.get(), (directory + "/user-profile-export.json").c_str()) >= 4,
+        !require(orca_session_select_process(session.get(), "iOS cloud process") == 0, "select cloud process") ||
+        !require(orca_session_export_user_profiles(session.get(), (directory + "/user-profile-export.json").c_str()) >= 5,
                  "export local and cloud profiles for sync"))
         return 16;
     if (!require(orca_session_preset_origin(session.get(), 2, "iOS cloud printer") == 2, "cloud printer ownership") ||
         !require(orca_session_preset_origin(session.get(), 1, "iOS cloud PLA") == 2, "cloud filament ownership") ||
+        !require(orca_session_preset_origin(session.get(), 0, "iOS cloud process") == 2, "cloud process ownership") ||
         !require(orca_session_preset_origin(session.get(), 2, "iOS imported printer") == 1, "local printer ownership")) return 16;
     std::printf("PASS: primitives, centered axis scaling, flush matrix repair and processed preview height\n");
     std::printf("PASS: native preset bundle, cloud printer/filament catalog, selection and profile export\n");
