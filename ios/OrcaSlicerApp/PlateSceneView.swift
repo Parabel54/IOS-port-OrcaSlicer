@@ -57,6 +57,7 @@ enum PlateTouchMode: String, CaseIterable, Identifiable {
 /// Interactive build plate with official-engine mesh geometry + optional G-code paths.
 struct PlateSceneView: UIViewRepresentable {
     var mesh: MeshGeometry?
+    var framingBounds: (min: SIMD3<Float>, max: SIMD3<Float>)? = nil
     var meshRevision: Int = 0
     /// Per-object meshes for tap-to-select (same order as engine.objectNames).
     var objectMeshes: [MeshGeometry] = []
@@ -231,7 +232,7 @@ struct PlateSceneView: UIViewRepresentable {
             context.coordinator.lastTexture = texKey
             // Re-frame when bed changes so plate stays in view
             if let mesh {
-                context.coordinator.frameCamera(view: view, mesh: mesh, bedSize: bedSize)
+                context.coordinator.frameCamera(view: view, minimum: mesh.min, maximum: mesh.max)
             } else {
                 context.coordinator.frameCameraOnBed(view: view, bedSize: bedSize)
             }
@@ -295,7 +296,9 @@ struct PlateSceneView: UIViewRepresentable {
         }
 
         if context.coordinator.lastFitRequest != fitRequest {
-            if let mesh { context.coordinator.frameCamera(view: view, mesh: mesh, bedSize: bedSize) }
+            if let bounds = framingBounds {
+                context.coordinator.frameCamera(view: view, minimum: bounds.min, maximum: bounds.max)
+            } else if let mesh { context.coordinator.frameCamera(view: view, minimum: mesh.min, maximum: mesh.max) }
             else { context.coordinator.frameCameraOnBed(view: view, bedSize: bedSize) }
             context.coordinator.lastFitRequest = fitRequest
         }
@@ -946,19 +949,19 @@ struct PlateSceneView: UIViewRepresentable {
             view.defaultCameraController.target = target
         }
 
-        func frameCamera(view: SCNView, mesh: MeshGeometry, bedSize: SIMD2<Float>) {
+        func frameCamera(view: SCNView, minimum: SIMD3<Float>, maximum: SIMD3<Float>) {
             guard let cam = view.scene?.rootNode.childNode(withName: "camera", recursively: false) else { return }
 
             // Mesh in slic3r Z-up under content; world after R_x(-90): (x, z, -y)
-            let mx = (mesh.min.x + mesh.max.x) * 0.5
-            let my = (mesh.min.y + mesh.max.y) * 0.5
-            let mz = (mesh.min.z + mesh.max.z) * 0.5
+            let mx = (minimum.x + maximum.x) * 0.5
+            let my = (minimum.y + maximum.y) * 0.5
+            let mz = (minimum.z + maximum.z) * 0.5
             let modelWorld = SCNVector3(mx, mz, -my)
 
             let target = modelWorld
-            let dx = mesh.max.x - mesh.min.x
-            let dy = mesh.max.y - mesh.min.y
-            let dz = mesh.max.z - mesh.min.z
+            let dx = maximum.x - minimum.x
+            let dy = maximum.y - minimum.y
+            let dz = maximum.z - minimum.z
             let radius = max(sqrtf(dx * dx + dy * dy + dz * dz) * 0.5, 0.5)
             let aspect = max(Float(view.bounds.width / max(view.bounds.height, 1)), 0.2)
             let verticalHalfAngle = Float(42.0 * Double.pi / 360.0)
@@ -1184,6 +1187,8 @@ struct GCodePathGeometry {
     var toolIDs: [Int] = []
     var filamentIDs: [Int] = []
     var centerOfGravity: SCNVector3?
+    var boundsMin: SIMD3<Float>?
+    var boundsMax: SIMD3<Float>?
     var features: [String] { featureNames }
     var moveCount: Int { (segments.last?.lastMove ?? -1) + 1 }
 
@@ -1278,7 +1283,7 @@ struct GCodePathGeometry {
         }
         return GCodePathGeometry(
             segments: out, zMin: zMin, zMax: zMax,
-            feedMin: feedMin, feedMax: feedMax, widthRange: widthRange, layerHeightRange: layerHeightRange, defaultWidth: defaultWidth, metricRanges: metricRanges, featureNames: featureNames, toolIDs: toolIDs, filamentIDs: filamentIDs, centerOfGravity: centerOfGravity
+            feedMin: feedMin, feedMax: feedMax, widthRange: widthRange, layerHeightRange: layerHeightRange, defaultWidth: defaultWidth, metricRanges: metricRanges, featureNames: featureNames, toolIDs: toolIDs, filamentIDs: filamentIDs, centerOfGravity: centerOfGravity, boundsMin: boundsMin, boundsMax: boundsMax
         )
     }
 
@@ -1416,10 +1421,16 @@ struct GCodePathGeometry {
     mutating func prepareColorRanges() {
         var features = Set<String>(), tools = Set<Int>(), filaments = Set<Int>()
         var weighted = SIMD3<Double>.zero, mass = 0.0
+        var low = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
+        var high = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
         // Same model-only exclusions as libvgcode's center-of-gravity marker.
         let excluded: Set<String> = ["Skirt", "Brim", "Support", "Support interface", "Support transition", "Prime tower", "Custom"]
         for seg in segments where seg.kind == .extrude {
             features.insert(seg.feature); tools.insert(seg.metrics.tool); filaments.insert(seg.metrics.colorID)
+            for p in seg.points {
+                let value = SIMD3<Float>(p.x, p.y, p.z)
+                low = simd_min(low, value); high = simd_max(high, value)
+            }
             if excluded.contains(seg.feature) { continue }
             for (a, b) in zip(seg.points, seg.points.dropFirst()) {
                 let delta = SIMD3<Double>(Double(b.x-a.x), Double(b.y-a.y), Double(b.z-a.z))
@@ -1429,6 +1440,8 @@ struct GCodePathGeometry {
             }
         }
         featureNames = features.sorted(); toolIDs = tools.sorted(); filamentIDs = filaments.sorted()
+        boundsMin = low.x <= high.x ? low : nil
+        boundsMax = low.x <= high.x ? high : nil
         if mass > 0 {
             let p = weighted / mass
             centerOfGravity = SCNVector3(Float(p.x), Float(p.y), Float(p.z))

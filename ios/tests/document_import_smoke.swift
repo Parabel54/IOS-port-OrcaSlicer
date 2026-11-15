@@ -49,6 +49,19 @@ struct DocumentImportSmoke {
             }
             try fm.removeItem(at: imported.url.deletingLastPathComponent())
         }
+        for ext in ["gcode", "gco", "g"] {
+            let source = root.appendingPathComponent("toolpaths." + ext)
+            try bytes.write(to: source)
+            inbox.receive(source, kind: .model(append: true))
+            for _ in 0..<2000 where inbox.receiving > 0 { try await Task.sleep(nanoseconds: 1_000_000) }
+            guard let imported = inbox.takeNext(), case .toolpath = imported.kind else {
+                preconditionFailure("G-code was sent to the model reader")
+            }
+            let staged = try Data(contentsOf: imported.url)
+            precondition(staged == bytes)
+            try fm.removeItem(at: imported.url.deletingLastPathComponent())
+        }
+        print("PASS: G-code aliases route to the read-only preview from Open/Add")
         print("PASS: JSON and Orca/ZIP bundles route to settings even from Open model")
         print("PASS: coordinated document imports, source preservation, same-name isolation, reopen and failure handling")
     }

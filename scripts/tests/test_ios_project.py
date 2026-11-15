@@ -27,6 +27,14 @@ class DocumentAssociationTests(unittest.TestCase):
             self.assertEqual(item['LSHandlerRank'], 'Alternate')
         self.assertNotIn('NSAllowsArbitraryLoadsInLocalNetwork', info['NSAppTransportSecurity'])
 
+    def test_gcode_is_a_viewer_document(self):
+        info = plistlib.loads((SOURCE.parent / 'OrcaSlicerApp/Info.plist').read_bytes())
+        declaration = next(item for item in info['UTImportedTypeDeclarations'] if item['UTTypeIdentifier'] == 'com.orcaslicer.ios.gcode')
+        self.assertEqual(set(declaration['UTTypeTagSpecification']['public.filename-extension']), {'gcode', 'gco', 'g'})
+        handler = next(item for item in info['CFBundleDocumentTypes'] if 'com.orcaslicer.ios.gcode' in item['LSItemContentTypes'])
+        self.assertEqual(handler['CFBundleTypeRole'], 'Viewer')
+        self.assertEqual(handler['LSHandlerRank'], 'Alternate')
+
 
 class ProjectGenerationTests(unittest.TestCase):
     def setUp(self):

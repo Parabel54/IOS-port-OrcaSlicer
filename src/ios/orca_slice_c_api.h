@@ -99,6 +99,15 @@ typedef struct orca_preview_segment {
 ORCA_API int orca_session_export_preview(
     orca_session_t *s, orca_preview_segment_t **segments, size_t *count, size_t *total_count);
 
+/** Open a text G-code through the desktop GCodeProcessor without changing the
+ * model or selected presets. Failure retains the prior preview. File bytes are
+ * never modified and post-processing hooks are not run. Caller serializes access. */
+ORCA_API int orca_session_load_gcode(orca_session_t *s, const char *path);
+
+/** Last processed file's bed dimensions and filament densities as JSON. Pointer
+ * remains valid until the next preview result/session mutation. */
+ORCA_API const char *orca_session_preview_metadata_json(orca_session_t *s);
+
 /** Official feature label; valid until the next call on this thread. */
 ORCA_API const char *orca_preview_role_name(int role);
 

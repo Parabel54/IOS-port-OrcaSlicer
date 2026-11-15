@@ -3,6 +3,7 @@ import Combine
 
 enum DocumentImportKind {
     case automatic
+    case toolpath
     case model(append: Bool)
     case settings(preset: Int?)
 }
@@ -24,6 +25,7 @@ struct ImportedDocument: Identifiable {
 
 struct DocumentImportStore {
     let directory: URL
+    static let toolpathExtensions: Set<String> = ["gcode", "gco", "g"]
     static let models = DocumentImportStore(directory: FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("OrcaSlicer/Imports", isDirectory: true))
     static let temporary = DocumentImportStore(directory: FileManager.default.temporaryDirectory
@@ -89,8 +91,8 @@ final class DocumentInbox: ObservableObject {
             }
             do {
                 let extensionName = url.pathExtension.lowercased()
-                guard ["stl", "obj", "3mf", "amf", "json", "orca_printer", "orca_filament", "orca_bundle", "zip"].contains(extensionName) else {
-                    errorMessage = String(localized: "Choose a model, JSON settings file, or Orca preset bundle.")
+                guard ["stl", "obj", "3mf", "amf", "json", "orca_printer", "orca_filament", "orca_bundle", "zip"].contains(extensionName) || DocumentImportStore.toolpathExtensions.contains(extensionName) else {
+                    errorMessage = String(localized: "Choose a model, G-code, JSON settings file, or Orca preset bundle.")
                     return
                 }
                 if case .settings = kind, !["json", "orca_printer", "orca_filament", "orca_bundle", "zip"].contains(extensionName) {
@@ -99,6 +101,8 @@ final class DocumentInbox: ObservableObject {
                 }
                 let resolved: DocumentImportKind
                 switch kind {
+                case .automatic where DocumentImportStore.toolpathExtensions.contains(extensionName): resolved = .toolpath
+                case .model where DocumentImportStore.toolpathExtensions.contains(extensionName): resolved = .toolpath
                 case .automatic: resolved = ["json", "orca_printer", "orca_filament", "orca_bundle", "zip"].contains(extensionName) ? .settings(preset: nil) : .model(append: false)
                 case .model where ["json", "orca_printer", "orca_filament", "orca_bundle", "zip"].contains(extensionName): resolved = .settings(preset: nil)
                 default: resolved = kind

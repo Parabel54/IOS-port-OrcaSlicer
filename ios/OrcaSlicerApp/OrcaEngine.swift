@@ -35,6 +35,12 @@ final class OrcaEngine: ObservableObject {
     @Published var gcodePathNode: SCNNode?
     @Published var gcodeGeometry: GCodePathGeometry?
     @Published var previewIsReduced = false
+    @Published private(set) var previewFromFile = false
+    @Published private(set) var previewBedSize: SIMD2<Float>?
+    var previewBounds: (min: SIMD3<Float>, max: SIMD3<Float>)? {
+        guard let low = gcodeGeometry?.boundsMin, let high = gcodeGeometry?.boundsMax else { return nil }
+        return (low, high)
+    }
     @Published var objectCount: Int = 0
     @Published var objectNames: [String] = []
     @Published var selectedObjectIndex: Int = -1 // -1 = all / none
@@ -218,6 +224,8 @@ final class OrcaEngine: ObservableObject {
         previewLayerHeights = []
         gcodePathNode = nil
         previewIsReduced = false
+        previewFromFile = false
+        previewBedSize = nil
         lastSliceStatsText = ""
         lastAvgLayerTimeText = ""
         lastSliceTimeSec = 0
@@ -1982,77 +1990,8 @@ final class OrcaEngine: ObservableObject {
         let preview = await Task.detached(priority: .userInitiated) {
             Self.processedPreview(sessionBits: sessionBits, defaultWidth: defaultWidth, densities: densities)
         }.value
-        await MainActor.run { [sessionBits] in
-            let sess = OpaquePointer(bitPattern: sessionBits)!
-            self.gcodeURL = out
-            self.slicePercent = 100
-            self.slicePhase = "Done"
-            var t: Float = 0, fil: Float = 0
-            var layers: Int32 = 0
-            if orca_session_last_slice_stats(sess, &t, &fil, &layers) == 0 {
-                self.lastSliceTimeSec = t
-                self.lastSliceFilamentMm3 = fil
-                self.lastSliceLayers = Int(layers)
-                let mins = Int(t) / 60
-                let secs = Int(t) % 60
-                let grams = fil * 0.00124 // approx PLA density g/mm³
-                self.lastSliceStatsText = String(
-                    format: "~%dm %02ds · %.1f g filament · %d layers",
-                    mins, secs, grams, Int(layers)
-                )
-            } else {
-                self.lastSliceStatsText = ""
-            }
-            // Extended analysis (layer times + role usage)
-            var initT: Float = 0, avgT: Float = 0, sup: Float = 0, wipe: Float = 0
-            var t2: Float = 0, fil2: Float = 0
-            var layers2: Int32 = 0
-            if orca_session_last_slice_analysis(sess, &t2, &initT, &avgT, &fil2, &sup, &wipe, &layers2) == 0 {
-                self.lastInitialLayerTimeSec = initT
-                self.lastAvgLayerTimeSec = avgT
-                self.lastSupportMm3 = sup
-                self.lastWipeTowerMm3 = wipe
-                if avgT > 0 {
-                    let am = Int(avgT) / 60
-                    let as_ = Int(avgT) % 60
-                    let im = Int(initT) / 60
-                    let is_ = Int(initT) % 60
-                    self.lastAvgLayerTimeText = String(
-                        format: "avg layer ~%dm %02ds · 1st ~%dm %02ds",
-                        am, as_, im, is_
-                    )
-                } else {
-                    self.lastAvgLayerTimeText = ""
-                }
-            } else {
-                self.lastAvgLayerTimeText = ""
-            }
-            let rc = Int(orca_session_filament_role_count(sess))
-            var roles: [(name: String, meters: Float, grams: Float)] = []
-            roles.reserveCapacity(rc)
-            for i in 0..<rc {
-                guard let c = orca_session_filament_role_name(sess, Int32(i)) else { continue }
-                let name = String(cString: c)
-                let m = orca_session_filament_role_meters(sess, Int32(i))
-                let g = orca_session_filament_role_grams(sess, Int32(i))
-                roles.append((name, m, g))
-            }
-            roles.sort { $0.grams > $1.grams }
-            self.filamentByRole = roles
-            if let preview {
-                self.previewThroughMove = .max
-                self.previewIsReduced = preview.reduced
-                self.previewLayerHeights = preview.layers
-                self.gcodeGeometry = preview.geometry
-                self.gcodeZMin = preview.geometry.zMin
-                self.gcodeZMax = max(preview.geometry.zMax, preview.geometry.zMin)
-                self.previewMinZ = self.gcodeZMin
-                self.previewMaxZ = self.gcodeZMax
-                self.applyPreviewLayer()
-            } else {
-                self.slicePhase = "G-code exported; preview unavailable"
-            }
-        }
+        publishPreview(preview, url: out)
+
         let stats = await MainActor.run { self.lastSliceStatsText }
         if stats.isEmpty {
             return "G-code written: \(out.lastPathComponent) (Print::export_gcode)"
@@ -2063,10 +2002,127 @@ final class OrcaEngine: ObservableObject {
         #endif
     }
 
+    private typealias ProcessedPreview = (geometry: GCodePathGeometry, layers: [Float], reduced: Bool, bed: SIMD2<Float>?)
+    private struct PreviewMetadata: Decodable {
+        let bed_width: Float?
+        let bed_depth: Float?
+        let filament_densities: [Float]
+    }
+
+    @MainActor
+    func loadGCode(url: URL) async -> Bool {
+        guard !sessionBusy, !presetsLoading, !sliceRunning else { return false }
+        sessionBusy = true
+        sessionBusyMessage = "Reading G-code…"
+        defer { sessionBusy = false }
+        #if ORCA_LINKED
+        guard let session else { lastMessage = "No session"; return false }
+        let bits = UInt(bitPattern: session)
+        let result = await Task.detached(priority: .userInitiated) {
+            let session = OpaquePointer(bitPattern: bits)!
+            let rc = url.path.withCString { orca_session_load_gcode(session, $0) }
+            let preview = rc == 0 ? Self.processedPreview(sessionBits: bits, defaultWidth: 0.45, densities: []) : nil
+            return (rc, preview)
+        }.value
+        guard result.0 == 0, let preview = result.1 else {
+            lastMessage = orca_session_last_error(session).map { String(cString: $0) } ?? "G-code preview could not be loaded"
+            return false
+        }
+        previewFromFile = true
+        previewShowShell = false
+        previewBedSize = preview.bed
+        publishPreview(preview, url: url)
+        lastMessage = "Opened G-code \(url.lastPathComponent)"
+        return true
+        #else
+        lastMessage = "Engine not linked"
+        return false
+        #endif
+    }
+
     #if ORCA_LINKED
+    @MainActor
+    private func publishPreview(_ preview: ProcessedPreview?, url: URL) {
+        guard let sess = session else { return }
+        gcodeURL = url
+        slicePercent = 100
+        slicePhase = "Done"
+        var t: Float = 0, fil: Float = 0
+        var layers: Int32 = 0
+        if orca_session_last_slice_stats(sess, &t, &fil, &layers) == 0 {
+            self.lastSliceTimeSec = t
+            self.lastSliceFilamentMm3 = fil
+            self.lastSliceLayers = Int(layers)
+            let mins = Int(t) / 60
+            let secs = Int(t) % 60
+            let grams = fil * 0.00124 // approx PLA density g/mm³
+            self.lastSliceStatsText = String(
+                format: "~%dm %02ds · %.1f g filament · %d layers",
+                mins, secs, grams, Int(layers)
+            )
+        } else {
+            self.lastSliceStatsText = ""
+        }
+        // Extended analysis (layer times + role usage)
+        var initT: Float = 0, avgT: Float = 0, sup: Float = 0, wipe: Float = 0
+        var t2: Float = 0, fil2: Float = 0
+        var layers2: Int32 = 0
+        if orca_session_last_slice_analysis(sess, &t2, &initT, &avgT, &fil2, &sup, &wipe, &layers2) == 0 {
+            self.lastInitialLayerTimeSec = initT
+            self.lastAvgLayerTimeSec = avgT
+            self.lastSupportMm3 = sup
+            self.lastWipeTowerMm3 = wipe
+            if avgT > 0 {
+                let am = Int(avgT) / 60
+                let as_ = Int(avgT) % 60
+                let im = Int(initT) / 60
+                let is_ = Int(initT) % 60
+                self.lastAvgLayerTimeText = String(
+                    format: "avg layer ~%dm %02ds · 1st ~%dm %02ds",
+                    am, as_, im, is_
+                )
+            } else {
+                self.lastAvgLayerTimeText = ""
+            }
+        } else {
+            self.lastAvgLayerTimeText = ""
+        }
+        let rc = Int(orca_session_filament_role_count(sess))
+        var roles: [(name: String, meters: Float, grams: Float)] = []
+        roles.reserveCapacity(rc)
+        for i in 0..<rc {
+            guard let c = orca_session_filament_role_name(sess, Int32(i)) else { continue }
+            let name = String(cString: c)
+            let m = orca_session_filament_role_meters(sess, Int32(i))
+            let g = orca_session_filament_role_grams(sess, Int32(i))
+            roles.append((name, m, g))
+        }
+        roles.sort { $0.grams > $1.grams }
+        self.filamentByRole = roles
+        if let preview {
+            self.previewThroughMove = .max
+            self.previewIsReduced = preview.reduced
+            self.previewLayerHeights = preview.layers
+            self.gcodeGeometry = preview.geometry
+            self.gcodeZMin = preview.geometry.zMin
+            self.gcodeZMax = max(preview.geometry.zMax, preview.geometry.zMin)
+            self.previewMinZ = self.gcodeZMin
+            self.previewMaxZ = self.gcodeZMax
+            self.applyPreviewLayer()
+        } else {
+            self.slicePhase = "G-code exported; preview unavailable"
+        }
+    }
+
     private static func processedPreview(sessionBits: UInt, defaultWidth: Float, densities: [Float]) ->
-        (geometry: GCodePathGeometry, layers: [Float], reduced: Bool)? {
+        ProcessedPreview? {
         guard let session = OpaquePointer(bitPattern: sessionBits) else { return nil }
+        let metadata = orca_session_preview_metadata_json(session).flatMap { text -> PreviewMetadata? in
+            let data = Data(String(cString: text).utf8)
+            return try? JSONDecoder().decode(PreviewMetadata.self, from: data)
+        }
+        let fileDensities = metadata?.filament_densities ?? []
+        let filamentDensities = fileDensities.isEmpty ? densities : fileDensities
         var segments: UnsafeMutablePointer<orca_preview_segment_t>?
         var count = 0
         var totalCount = 0
@@ -2102,7 +2158,7 @@ final class OrcaEngine: ObservableObject {
                     }
                 }
                 let tool = Int(move.extruder_id)
-                let density = densities.indices.contains(tool) ? densities[tool] : (densities.first ?? 1.24)
+                let density = filamentDensities.indices.contains(tool) ? filamentDensities[tool] : (filamentDensities.first ?? 1.24)
                 let massPerMM = move.feedrate > 0 ? move.volumetric_flow / (move.feedrate / 60) * density : 0
                 let metrics = GCodePathGeometry.Metrics(massPerMM: massPerMM, actualSpeed: move.actual_speed,
                     flow: move.volumetric_flow, actualFlow: move.actual_volumetric_flow,
@@ -2134,7 +2190,11 @@ final class OrcaEngine: ObservableObject {
                 layerHeightRange: (minHeight <= maxHeight ? minHeight : 0.2)...(maxHeight > 0 ? maxHeight : 0.2),
                 defaultWidth: defW)
             path.prepareColorRanges()
-            return (path, Array(Set(layerZ.values)).sorted(), totalCount > count)
+            var bed: SIMD2<Float>?
+            if let width = metadata?.bed_width, let depth = metadata?.bed_depth, width > 0, depth > 0 {
+                bed = SIMD2(width, depth)
+            }
+            return (path, Array(Set(layerZ.values)).sorted(), totalCount > count, bed)
         }
         return nil
     }

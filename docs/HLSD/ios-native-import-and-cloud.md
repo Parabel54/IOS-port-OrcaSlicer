@@ -10,6 +10,8 @@ STL, OBJ, 3MF and AMF go to the model reader. Orca/Bambu 3MF requests model and 
 
 JSON containing a preset type or a single preset identity goes to the official preset catalog importer. `.orca_printer`, `.orca_filament`, `.orca_bundle` and ZIP exports use the official bundle importer. This preserves printer, filament and process inheritance instead of applying every file as a session overlay. Untyped JSON containing all three session identities remains a config overlay. Incomplete preset JSON may use the explicitly selected legacy process/filament import. Parser failures are reported; missing inherited presets are not silently replaced with unrelated profiles.
 
+Text G-code (.gcode, .gco and .g) opens in a read-only Preview through the same GCodeProcessor used by desktop. The native parser stages a complete result before committing; a failed open retains the previous preview. Models and selected presets remain unchanged, and the viewer never rewrites the file or runs post-processing hooks. File bed dimensions and material densities travel with the processed result; camera framing uses the toolpath bounds. Slicing and file opening share the same preview/statistics capture path, with actual processed print-layer counts instead of a model-height estimate. G-code document associations use Viewer role and alternate-handler rank. Binary G-code is not advertised.
+
 File associations use the model UTIs and Orca archive extensions with alternate-handler rank. OBJ also advertises its platform geometry UTI. The app offers ZIP/JSON import without claiming default ownership of all such documents.
 
 ## Cloud profiles and printer inventory

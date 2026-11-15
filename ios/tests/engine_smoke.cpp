@@ -88,8 +88,9 @@ int main(int argc, char **argv)
             !require(orca_session_mesh_stats(edited.get(), 0, &facets, &edges, &parts, &volume) == 0, "initial cylinder facets")) return 4;
         if (!require(facets > 64, "cylinder exposes its actual topology count")) return 4;
         const int before = facets;
+        const int paint_states[] = {2, 1, 3, 1};
         for (int kind = 0; kind < 4; ++kind)
-            if (!require(orca_session_paint_fill(edited.get(), 0, kind, 1) > 0, "paint simplify fixture")) return 4;
+            if (!require(orca_session_paint_fill(edited.get(), 0, kind, paint_states[kind]) > 0, "paint simplify fixture")) return 4;
         if (!require(orca_session_simplify_mesh(edited.get(), 0, 64) > 0, "simplify native mesh") ||
             !require(orca_session_mesh_stats(edited.get(), 0, &facets, &edges, &parts, &volume) == 0 && facets < before,
                      "simplify reduces the actual mesh")) return 4;
@@ -119,13 +120,13 @@ int main(int argc, char **argv)
         if (!require(base_area > 0 && base_count / 3 == size_t(facets), "mesh statistics match actual exported topology")) return 4;
         for (int kind = 0; kind < 4; ++kind) {
             int painted = 0;
-            const int stats = orca_session_paint_stats(edited.get(), 0, kind, 1, &painted);
+            const int stats = orca_session_paint_stats(edited.get(), 0, kind, paint_states[kind], &painted);
             std::printf("Simplify painting kind=%d before=%d after=%d painted=%d\n", kind, before, facets, painted);
             if (!require(stats == 0 && painted > 0, "simplify retains painting")) return 4;
             float *positions = nullptr;
             uint32_t *indices = nullptr;
             size_t vertices = 0, count = 0;
-            if (!require(orca_session_export_paint_mesh(edited.get(), 0, kind, 1, &positions, &vertices, &indices, &count) == 0,
+            if (!require(orca_session_export_paint_mesh(edited.get(), 0, kind, paint_states[kind], &positions, &vertices, &indices, &count) == 0,
                          "export remapped painting")) return 4;
             std::unique_ptr<float, decltype(&orca_free)> vertex_owner(positions, orca_free);
             std::unique_ptr<uint32_t, decltype(&orca_free)> index_owner(indices, orca_free);
@@ -263,6 +264,42 @@ int main(int argc, char **argv)
     }
     if (!require(has_metrics, "preview includes desktop speed, flow and layer time") || !require(has_height, "preview includes processed bead height") || !require(max_z > 19.f, "preview reaches the top of the cube"))
         return 11;
+    {
+        std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+            viewer(orca_session_create(argv[2]), orca_session_destroy);
+        diagnostic_session = viewer.get();
+        if (!require(orca_session_add_primitive(viewer.get(), 0, 5, 5, 5) == 0, "G-code viewer preserves plate fixture") ||
+            !require(orca_session_set_option(viewer.get(), "layer_height", "0.16") == 0, "G-code viewer profile fixture") ||
+            !require(orca_session_load_gcode(viewer.get(), output.c_str()) == 0, "open existing G-code") ||
+            !require(orca_session_object_count(viewer.get()) == 1, "G-code opening keeps the prepare model")) return 11;
+        char height[64] = {};
+        if (!require(orca_session_get_option(viewer.get(), "layer_height", height, sizeof(height)) == 0 &&
+                     std::fabs(std::strtof(height, nullptr) - 0.16f) < 0.001f,
+                     "G-code embedded settings do not overwrite the selected presets")) return 11;
+        orca_preview_segment_t *opened = nullptr;
+        size_t opened_count = 0, opened_total = 0;
+        if (!require(orca_session_export_preview(viewer.get(), &opened, &opened_count, &opened_total) == 0 && opened_count > 0,
+                     "opened G-code has processed toolpaths")) return 11;
+        orca_free(opened);
+        const char *metadata = orca_session_preview_metadata_json(viewer.get());
+        if (!require(metadata && std::string(metadata).find("bed_width") != std::string::npos &&
+                     std::string(metadata).find("filament_densities") != std::string::npos,
+                     "preview metadata uses the file's bed and materials")) return 11;
+        const std::string invalid_gcode = directory + "/invalid-preview.gcode";
+        { std::ofstream bad(invalid_gcode); bad << "M117 No extrusion\nG1 X10 Y10\n"; }
+        if (!require(orca_session_load_gcode(viewer.get(), invalid_gcode.c_str()) != 0, "reject G-code without extrusion")) return 11;
+        opened = nullptr;
+        size_t retained_count = 0, retained_total = 0;
+        if (!require(orca_session_export_preview(viewer.get(), &opened, &retained_count, &retained_total) == 0 &&
+                     retained_count == opened_count && orca_session_object_count(viewer.get()) == 1,
+                     "failed G-code open preserves preview and prepare model")) return 11;
+        orca_free(opened);
+        std::ifstream after_open(output);
+        const std::string untouched((std::istreambuf_iterator<char>(after_open)), std::istreambuf_iterator<char>());
+        if (!require(untouched == gcode, "G-code viewer never rewrites the opened file")) return 11;
+        std::printf("PASS: standalone G-code preview, file metadata, preserved model/presets/source and failed-open recovery\n");
+    }
+    diagnostic_session = session.get();
     // A reader failure must leave the existing model/config/preview usable.
     const std::string broken = directory + "/broken.3mf";
     { std::ofstream invalid(broken); invalid << "not a 3MF archive"; }

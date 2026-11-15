@@ -13,14 +13,17 @@
 #include "orca_slice_c_api.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <exception>
 #include <fstream>
+#include <iterator>
 #include <sstream>
 #include <stdexcept>
 #include <nlohmann/json.hpp>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <unordered_map>
 #include <atomic>
 #include <string>
@@ -85,6 +88,7 @@ struct orca_session {
     bool        has_slice_stats{false};
     std::vector<orca_preview_segment_t> preview_segments;
     size_t preview_total_segments{0};
+    std::string preview_metadata;
     float       last_time_sec{0.f};
     float       last_initial_layer_time_sec{0.f};
     float       last_filament_mm3{0.f};
@@ -287,6 +291,97 @@ static void ensure_default_config(orca_session *s)
     // Official defaults from libslic3r (API lives on DynamicPrintAndCLIConfig)
     s->config = DynamicPrintAndCLIConfig::full_print_config();
     s->has_config = true;
+}
+
+// Sliced and opened G-code use the same interpreted motion/statistics contract.
+static void capture_processed_gcode(orca_session_t *s, const GCodeProcessorResult &result)
+{
+    // Preserve the desktop processor's complete motion and event stream.
+    // SceneKit batches these into shared-material geometry on the Swift side;
+    // dropping moves here leaves holes and can erase whole fine-detail layers.
+    std::unordered_map<unsigned int, float> layer_times;
+    for (const auto &move : result.moves)
+        layer_times[move.layer_id] += move.time[static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal)];
+    s->preview_segments.reserve(result.moves.size());
+    Vec3f previous_position = Vec3f::Zero();
+    if (!result.moves.empty())
+        previous_position = result.moves.front().position;
+    for (size_t i = 1; i < result.moves.size(); ++i) {
+        const auto &move = result.moves[i];
+        // Internal speed-analysis points are not physical endpoints.
+        if (move.internal_only)
+            continue;
+        const Vec3f start = previous_position;
+        if (move.type == EMoveType::Extrude || move.type == EMoveType::Travel || move.type == EMoveType::Wipe)
+            previous_position = move.position;
+        if (move.type == EMoveType::Noop)
+            continue;
+        const auto &end = move.position;
+        const bool extrusion = move.type == EMoveType::Extrude;
+        uint32_t rgba = 0x009688ff;
+        if (size_t(move.cp_color_id) < result.extruder_colors.size()) {
+            const auto &hex = result.extruder_colors[move.cp_color_id];
+            if (hex.size() == 7 && hex.front() == '#') {
+                char *end_hex = nullptr;
+                const auto rgb = std::strtoul(hex.c_str() + 1, &end_hex, 16);
+                if (end_hex == hex.c_str() + hex.size())
+                    rgba = (uint32_t(rgb) << 8) | 0xff;
+            }
+        }
+        s->preview_segments.push_back({start.x(), start.y(), start.z(),
+            end.x(), end.y(), end.z(), extrusion ? move.width : 0.f,
+            move.feedrate * 60.f, int(move.extrusion_role), extrusion ? 0 : 1,
+            extrusion ? move.height : 0.f, move.actual_feedrate,
+            move.volumetric_rate(), move.actual_volumetric_rate(),
+            move.fan_speed, move.temperature, move.pressure_advance,
+            move.acceleration, move.jerk, layer_times[move.layer_id],
+            int(move.extruder_id), int(move.cp_color_id), int(move.type),
+            move.layer_id, move.gcode_id, rgba});
+    }
+    s->preview_total_segments = s->preview_segments.size();
+    // Capture official GCodeProcessor statistics for UI
+    s->last_time_sec = result.print_statistics.modes[
+        static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal)].time;
+    s->last_initial_layer_time_sec = result.initial_layer_time;
+    double vol = 0.0;
+    for (const auto &kv : result.print_statistics.model_volumes_per_extruder)
+        vol += kv.second;
+    s->last_filament_mm3 = float(vol);
+    double support_vol = 0.0;
+    for (const auto &kv : result.print_statistics.support_volumes_per_extruder)
+        support_vol += kv.second;
+    s->last_support_mm3 = float(support_vol);
+    double wipe_vol = 0.0;
+    for (const auto &kv : result.print_statistics.wipe_tower_volumes_per_extruder)
+        wipe_vol += kv.second;
+    s->last_wipe_tower_mm3 = float(wipe_vol);
+    // Filament usage by extrusion role (meters + grams)
+    s->role_names.clear();
+    s->role_meters.clear();
+    s->role_grams.clear();
+    for (const auto &kv : result.print_statistics.used_filaments_per_role) {
+        std::string name = ExtrusionEntity::role_to_string(kv.first);
+        s->role_names.push_back(name);
+        s->role_meters.push_back(float(kv.second.first));
+        s->role_grams.push_back(float(kv.second.second));
+    }
+    std::set<unsigned int> layers;
+    for (const auto &move : result.moves)
+        if (move.type == EMoveType::Extrude && move.extrusion_role != erCustom)
+            layers.insert(move.layer_id);
+    s->last_layers = int(layers.size());
+    nlohmann::json metadata = {{"filament_densities", result.filament_densities}};
+    if (!result.printable_area.empty()) {
+        double min_x = result.printable_area.front().x(), max_x = min_x;
+        double min_y = result.printable_area.front().y(), max_y = min_y;
+        for (const auto &point : result.printable_area) {
+            min_x = std::min(min_x, point.x()); max_x = std::max(max_x, point.x());
+            min_y = std::min(min_y, point.y()); max_y = std::max(max_y, point.y());
+        }
+        metadata["bed_width"] = max_x - min_x;
+        metadata["bed_depth"] = max_y - min_y;
+    }
+    s->preview_metadata = metadata.dump();
 }
 
 extern "C" {
@@ -605,86 +700,7 @@ int orca_session_slice_to_gcode(orca_session_t *s, const char *gcode_out_path)
             s->set_error("export_gcode returned empty path");
             return -4;
         }
-        // Preserve the desktop processor's complete motion and event stream.
-        // SceneKit batches these into shared-material geometry on the Swift side;
-        // dropping moves here leaves holes and can erase whole fine-detail layers.
-        std::unordered_map<unsigned int, float> layer_times;
-        for (const auto &move : result.moves)
-            layer_times[move.layer_id] += move.time[static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal)];
-        s->preview_segments.reserve(result.moves.size());
-        Vec3f previous_position = Vec3f::Zero();
-        if (!result.moves.empty())
-            previous_position = result.moves.front().position;
-        for (size_t i = 1; i < result.moves.size(); ++i) {
-            const auto &move = result.moves[i];
-            // Internal speed-analysis points are not physical endpoints.
-            if (move.internal_only)
-                continue;
-            const Vec3f start = previous_position;
-            if (move.type == EMoveType::Extrude || move.type == EMoveType::Travel || move.type == EMoveType::Wipe)
-                previous_position = move.position;
-            if (move.type == EMoveType::Noop)
-                continue;
-            const auto &end = move.position;
-            const bool extrusion = move.type == EMoveType::Extrude;
-            uint32_t rgba = 0x009688ff;
-            if (size_t(move.cp_color_id) < result.extruder_colors.size()) {
-                const auto &hex = result.extruder_colors[move.cp_color_id];
-                if (hex.size() == 7 && hex.front() == '#') {
-                    char *end_hex = nullptr;
-                    const auto rgb = std::strtoul(hex.c_str() + 1, &end_hex, 16);
-                    if (end_hex == hex.c_str() + hex.size())
-                        rgba = (uint32_t(rgb) << 8) | 0xff;
-                }
-            }
-            s->preview_segments.push_back({start.x(), start.y(), start.z(),
-                end.x(), end.y(), end.z(), extrusion ? move.width : 0.f,
-                move.feedrate * 60.f, int(move.extrusion_role), extrusion ? 0 : 1,
-                extrusion ? move.height : 0.f, move.actual_feedrate,
-                move.volumetric_rate(), move.actual_volumetric_rate(),
-                move.fan_speed, move.temperature, move.pressure_advance,
-                move.acceleration, move.jerk, layer_times[move.layer_id],
-                int(move.extruder_id), int(move.cp_color_id), int(move.type),
-                move.layer_id, move.gcode_id, rgba});
-        }
-        s->preview_total_segments = s->preview_segments.size();
-        // Capture official GCodeProcessor statistics for UI
-        s->last_time_sec = result.print_statistics.modes[
-            static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal)].time;
-        s->last_initial_layer_time_sec = result.initial_layer_time;
-        double vol = 0.0;
-        for (const auto &kv : result.print_statistics.model_volumes_per_extruder)
-            vol += kv.second;
-        s->last_filament_mm3 = float(vol);
-        double support_vol = 0.0;
-        for (const auto &kv : result.print_statistics.support_volumes_per_extruder)
-            support_vol += kv.second;
-        s->last_support_mm3 = float(support_vol);
-        double wipe_vol = 0.0;
-        for (const auto &kv : result.print_statistics.wipe_tower_volumes_per_extruder)
-            wipe_vol += kv.second;
-        s->last_wipe_tower_mm3 = float(wipe_vol);
-        // Filament usage by extrusion role (meters + grams)
-        s->role_names.clear();
-        s->role_meters.clear();
-        s->role_grams.clear();
-        for (const auto &kv : result.print_statistics.used_filaments_per_role) {
-            std::string name = ExtrusionEntity::role_to_string(kv.first);
-            s->role_names.push_back(name);
-            s->role_meters.push_back(float(kv.second.first));
-            s->role_grams.push_back(float(kv.second.second));
-        }
-        // Layer count estimate from model height / layer_height
-        s->last_layers = 0;
-        try {
-            BoundingBoxf3 bb = s->model.bounding_box_exact();
-            double lh = 0.2;
-            if (const ConfigOptionFloat *opt = s->config.option<ConfigOptionFloat>("layer_height"))
-                lh = opt->value > 1e-6 ? opt->value : 0.2;
-            s->last_layers = std::max(1, int(std::ceil(bb.size().z() / lh)));
-        } catch (...) {
-            s->last_layers = 0;
-        }
+        capture_processed_gcode(s, result);
         if (s->cancel_requested)
             throw CanceledException();
         s->has_slice_stats = true;
@@ -701,6 +717,49 @@ int orca_session_slice_to_gcode(orca_session_t *s, const char *gcode_out_path)
         s->set_error("slice: unknown error");
         return -5;
     }
+}
+
+int orca_session_load_gcode(orca_session_t *s, const char *path)
+{
+    if (!s || !path) return -1;
+    s->clear_error();
+    try {
+        GCodeProcessor processor;
+        processor.process_file(path);
+        const auto &result = processor.get_result();
+        if (std::none_of(result.moves.begin(), result.moves.end(), [](const auto &move) {
+                return move.type == EMoveType::Extrude && move.width > 0 && move.height > 0;
+            })) {
+            s->set_error("G-code contains no printable extrusion paths");
+            return -2;
+        }
+        // Parsing/allocation failures must leave the existing plate, presets and
+        // preview untouched. Only preview results are committed after success.
+        orca_session_t staged;
+        capture_processed_gcode(&staged, result);
+        s->preview_segments = std::move(staged.preview_segments);
+        s->preview_total_segments = staged.preview_total_segments;
+        s->preview_metadata = std::move(staged.preview_metadata);
+        s->last_time_sec = staged.last_time_sec;
+        s->last_initial_layer_time_sec = staged.last_initial_layer_time_sec;
+        s->last_filament_mm3 = staged.last_filament_mm3;
+        s->last_support_mm3 = staged.last_support_mm3;
+        s->last_wipe_tower_mm3 = staged.last_wipe_tower_mm3;
+        s->last_layers = staged.last_layers;
+        s->role_names = std::move(staged.role_names);
+        s->role_meters = std::move(staged.role_meters);
+        s->role_grams = std::move(staged.role_grams);
+        s->has_slice_stats = true;
+        return 0;
+    } catch (const std::exception &ex) {
+        s->set_error(std::string("load_gcode: ") + ex.what());
+        return -3;
+    }
+}
+
+const char *orca_session_preview_metadata_json(orca_session_t *s)
+{
+    return s && s->has_slice_stats ? s->preview_metadata.c_str() : nullptr;
 }
 
 void orca_session_cancel_slice(orca_session_t *s)
@@ -4064,12 +4123,39 @@ int orca_session_simplify_mesh(
                 total_faces += cur;
                 continue;
             }
-            const auto painting = vol->save_painting();
+            std::array<int, 4> uniform_states;
+            for (int kind = 0; kind < 4; ++kind) {
+                uniform_states[kind] = -1;
+                const auto &annotation = paint_annotation_for(vol, kind)->get_data();
+                if (annotation.triangles_to_split.size() != size_t(cur)) continue;
+                // Normalize through the official selector so omitted/unpainted
+                // roots and stale serialized state flags cannot look uniform.
+                TriangleSelector selector(mesh);
+                selector.deserialize(annotation, false);
+                const auto data = selector.serialize();
+                if (data.triangles_to_split.size() == size_t(cur) && !data.used_states[0] &&
+                    std::count(data.used_states.begin(), data.used_states.end(), true) == 1)
+                    uniform_states[kind] = int(std::distance(data.used_states.begin(),
+                        std::find(data.used_states.begin(), data.used_states.end(), true)));
+            }
+            auto painting = vol->save_painting();
+            if (painting) {
+                std::array<TriangleSelector::TriangleSplittingData *, 4> channels = {
+                    &painting->supported, &painting->seam, &painting->mmu, &painting->fuzzy};
+                for (int kind = 0; kind < 4; ++kind)
+                    if (uniform_states[kind] >= 0) *channels[kind] = {};
+            }
             its_quadric_edge_collapse(its, want, nullptr, nullptr, nullptr);
             // Rebuild cached statistics after editing the indexed triangles,
             // and remap annotations through the desktop simplify path.
             vol->set_mesh(TriangleMesh(std::move(its)));
             vol->restore_painting(painting);
+            // Uniform paint is independent of surface tessellation. Spatial
+            // remapping it can create hundreds of thousands of subdivisions and
+            // leave holes when simplification moves the surface inward.
+            for (int kind = 0; kind < 4; ++kind)
+                if (uniform_states[kind] >= 0)
+                    paint_volume_all(vol, kind, EnforcerBlockerType(uniform_states[kind]));
             vol->calculate_convex_hull();
             vol->invalidate_convex_hull_2d();
             vol->set_new_unique_id();

@@ -531,6 +531,7 @@ struct OrcaRootView: View {
             ForEach(MainTab.allCases, id: \.self) { tab in
                 Button {
                     mainTab = tab
+                    if engine.previewFromFile { fitCameraRequest = UUID() }
                     if tab != .preview { showPreviewControls = false }
                     if tab != .prepare { moveMode = false }
                     if tab == .preview && engine.gcodeURL == nil {
@@ -2347,14 +2348,15 @@ struct OrcaRootView: View {
         AnyView(ZStack {
             PlateSceneView(
                 mesh: engine.mesh,
+                framingBounds: mainTab == .preview && engine.previewFromFile ? engine.previewBounds : nil,
                 meshRevision: engine.meshRevision,
                 objectMeshes: engine.objectMeshes,
                 selectedObjectIndex: engine.selectedObjectIndex,
                 gcodeNode: engine.gcodePathNode,
                 showGCode: mainTab == .preview,
                 showShell: engine.previewShowShell,
-                bedSize: engine.bedSize,
-                bedTexturePath: engine.bedTexturePath,
+                bedSize: mainTab == .preview && engine.previewFromFile ? (engine.previewBedSize ?? engine.bedSize) : engine.bedSize,
+                bedTexturePath: mainTab == .preview && engine.previewFromFile ? nil : engine.bedTexturePath,
                 accent: UIColor(red: 0, green: 150 / 255, blue: 136 / 255, alpha: 1),
                 touchMode: activePlateTouchMode,
                 fitRequest: fitCameraRequest,
@@ -2437,9 +2439,14 @@ struct OrcaRootView: View {
             }
             .overlay(alignment: .topLeading) {
                 Menu {
-                    if let name = engine.modelName { Text(name) }
-                    if !engine.boundsText.isEmpty { Text(engine.boundsText) }
-                    if !engine.selectedPrinter.isEmpty { Text(engine.selectedPrinter) }
+                    if mainTab == .preview && engine.previewFromFile {
+                        if let url = engine.gcodeURL { Text(url.lastPathComponent) }
+                        Text("G-code preview")
+                    } else {
+                        if let name = engine.modelName { Text(name) }
+                        if !engine.boundsText.isEmpty { Text(engine.boundsText) }
+                        if !engine.selectedPrinter.isEmpty { Text(engine.selectedPrinter) }
+                    }
                     if !status.isEmpty { Text(status) }
                     Text(engine.lastSliceStatsText)
                     Button("Fit model") { fitCameraRequest = UUID() }
@@ -2962,6 +2969,7 @@ struct OrcaRootView: View {
         VStack(alignment: .leading, spacing: 12) {
             if engine.gcodeGeometry == nil { Text("Slice the plate to preview toolpaths.") }
             else {
+                if engine.previewFromFile, let url = engine.gcodeURL { Text(url.lastPathComponent).font(.headline) }
                 Text(engine.lastSliceStatsText).font(.subheadline).fixedSize(horizontal: false, vertical: true)
                 if engine.previewIsReduced {
                     Text("Toolpaths are reduced to fit available memory.").font(.caption).foregroundStyle(.secondary)
@@ -3011,7 +3019,7 @@ struct OrcaRootView: View {
                     }
                 }.accessibilityIdentifier("preview-line-types")
                 DisclosureGroup("Options") {
-                    Toggle("Model shell", isOn: $engine.previewShowShell)
+                    if !engine.previewFromFile { Toggle("Model shell", isOn: $engine.previewShowShell) }
                     Toggle("Tool marker", isOn: Binding(get: { engine.previewShowToolMarker }, set: {
                         engine.previewShowToolMarker = $0; engine.requestPreviewLayer()
                     }))
@@ -3615,6 +3623,10 @@ struct OrcaRootView: View {
             var success = false
             switch document.kind {
             case .automatic: break // Resolved before staging.
+            case .toolpath:
+                success = await engine.loadGCode(url: document.url)
+                status = engine.lastMessage
+                if success { fitCameraRequest = UUID(); engine.rememberRecent(url: document.url) }
             case .model(let append):
                 success = await engine.loadDocumentModel(url: document.url, append: append)
                 if success { fitCameraRequest = UUID() }
@@ -3626,7 +3638,8 @@ struct OrcaRootView: View {
             }
             if !success { documents.errorMessage = status }
             syncProcessFieldsFromEngine()
-            mainTab = .prepare
+            if success, case .toolpath = document.kind { mainTab = .preview }
+            else { mainTab = .prepare }
             if ProcessInfo.processInfo.arguments.contains("--test-document-import"), success,
                engine.hasModel, engine.objectCount == 1 {
                 try? "PASS: app document inbox imported a 3MF model".write(
