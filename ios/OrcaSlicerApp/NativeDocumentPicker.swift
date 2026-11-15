@@ -19,7 +19,11 @@ struct NativeDocumentPicker: UIViewControllerRepresentable {
                 let marker = FileManager.default.temporaryDirectory.appendingPathComponent("orca-document-picker-smoke.txt")
                 try? "PASS: native document picker presented".write(to: marker, atomically: true, encoding: .utf8)
                 let fixture = StartupRecovery().dataDirectory.deletingLastPathComponent().appendingPathComponent("ios-import-smoke.3mf")
-                DispatchQueue.main.async { context.coordinator.completion(fixture) }
+                // A real selection follows the remote service's presentation.
+                // Wait one transition in the synthetic picker test too.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                    context.coordinator.finish(picker, url: fixture)
+                }
             }
         }
         return picker
@@ -29,11 +33,30 @@ struct NativeDocumentPicker: UIViewControllerRepresentable {
 
     final class Coordinator: NSObject, UIDocumentPickerDelegate {
         let completion: (URL?) -> Void
+        private var finished = false
         init(completion: @escaping (URL?) -> Void) { self.completion = completion }
-        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-            completion(urls.first)
+
+        func finish(_ controller: UIDocumentPickerViewController, url: URL?) {
+            guard !finished else { return }
+            finished = true
+            let deliver = { [self] in
+                // Keep the representable mounted until UIKit and its remote
+                // DocumentManager toolbar have completed their dismissal.
+                DispatchQueue.main.async { self.completion(url) }
+            }
+            if controller.isBeingDismissed, let transition = controller.transitionCoordinator {
+                transition.animate(alongsideTransition: nil) { _ in deliver() }
+            } else if controller.presentingViewController != nil {
+                controller.dismiss(animated: true, completion: deliver)
+            } else {
+                deliver()
+            }
         }
-        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { completion(nil) }
+
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            finish(controller, url: urls.first)
+        }
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { finish(controller, url: nil) }
     }
 }
 
