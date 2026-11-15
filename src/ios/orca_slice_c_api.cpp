@@ -504,9 +504,11 @@ int orca_session_slice_to_gcode(orca_session_t *s, const char *gcode_out_path)
         s->report_progress(15, "Slicing (Print::process)");
         if (s->cancel_requested)
             print.cancel();
-        print.throw_if_canceled();
+        if (print.canceled())
+            throw CanceledException();
         print.process();
-        print.throw_if_canceled();
+        if (print.canceled())
+            throw CanceledException();
 
         s->report_progress(85, "Exporting G-code");
         GCodeProcessorResult result;
