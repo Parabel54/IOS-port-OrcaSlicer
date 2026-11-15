@@ -66,16 +66,12 @@ final class OrcaCloudAccount: ObservableObject {
         defer { busy = false }
         do {
             if session.expiry.timeIntervalSinceNow < 60 {
-                session = try await api.refresh(session.refresh_token)
-                guard generation == current else { return }
-                try install(session)
+                session = try await refreshSession(session, generation: current)
             }
             let result: [OrcaCloudPrinter]
             do { result = try await api.printers(accessToken: session.access_token) }
             catch OrcaCloudError.http(401) {
-                session = try await api.refresh(session.refresh_token)
-                guard generation == current else { return }
-                try install(session)
+                session = try await refreshSession(session, generation: current)
                 result = try await api.printers(accessToken: session.access_token)
             }
             guard generation == current else { return }
@@ -102,6 +98,28 @@ final class OrcaCloudAccount: ObservableObject {
         lastSynced = nil
         message = ""
         if let token { try? await api.logout(accessToken: token) }
+    }
+
+    private func refreshSession(_ session: OrcaCloudSession, generation current: UUID) async throws -> OrcaCloudSession {
+        let refreshed: OrcaCloudSession
+        do { refreshed = try await api.refresh(session.refresh_token) }
+        catch OrcaCloudError.http(let status) where status == 400 || status == 401 {
+            guard generation == current else { throw CancellationError() }
+            do { try credentials.remove(Self.credentialID) }
+            catch { throw OrcaCloudError.storage }
+            generation = UUID()
+            cloudSession = nil
+            signedIn = false
+            displayName = ""
+            printers = []
+            lastSynced = nil
+            message = String(localized: "Your cloud session has expired. Sign in again.")
+            throw OrcaCloudError.http(status)
+        }
+        guard generation == current else { throw CancellationError() }
+        guard refreshed.user.id == session.user.id else { throw OrcaCloudError.invalidResponse }
+        try install(refreshed)
+        return refreshed
     }
 
     private func install(_ session: OrcaCloudSession) throws {

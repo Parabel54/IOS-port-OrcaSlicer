@@ -65,7 +65,11 @@ struct OrcaPKCE {
               let url = URLComponents(string: "http://localhost:\(port)" + target),
               url.path == "/callback", url.fragment == nil else { throw OrcaCloudError.invalidCallback }
         let items = url.queryItems ?? []
-        let states = items.filter { $0.name == "orca_state" || $0.name == "state" }
+        let primaryStates = items.filter { $0.name == "orca_state" }
+        let fallbackStates = items.filter { $0.name == "state" }
+        guard primaryStates.count <= 1, fallbackStates.count <= 1 else { throw OrcaCloudError.invalidCallback }
+        // Upstream prefers the app's orca_state over a provider's own state.
+        let states = primaryStates.isEmpty ? fallbackStates : primaryStates
         let codes = items.filter { $0.name == "code" }
         guard states.count == 1, states[0].value == state,
               codes.count == 1, let code = codes[0].value, !code.isEmpty,
@@ -179,7 +183,9 @@ struct OrcaCloudAPI {
         return printers
     }
     func logout(accessToken: String) async throws {
-        var request = URLRequest(url: OrcaCloudEndpoints.auth.appendingPathComponent("auth/v1/logout"))
+        var parts = URLComponents(url: OrcaCloudEndpoints.auth.appendingPathComponent("auth/v1/logout"), resolvingAgainstBaseURL: false)!
+        parts.queryItems = [URLQueryItem(name: "scope", value: "local")]
+        var request = URLRequest(url: parts.url!)
         request.httpMethod = "POST"
         request.setValue(OrcaCloudEndpoints.publicKey, forHTTPHeaderField: "apikey")
         request.setValue("Bearer " + accessToken, forHTTPHeaderField: "Authorization")

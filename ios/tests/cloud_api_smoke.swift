@@ -43,10 +43,12 @@ struct CloudAPISmoke {
         precondition(redirect == "http://localhost:41172/callback?orca_state=expected-state")
         let valid = try pkce.code(from: "/callback?code=one-time-code&orca_state=expected-state")
         precondition(valid == "one-time-code")
-        for invalid in ["/callback?code=x&orca_state=wrong", "/callback?code=x", "/other?code=x&state=expected-state", "/callback?code=x&code=y&state=expected-state", "/callback?code=x&state=expected-state&orca_state=expected-state", "//evil/callback?code=x&state=expected-state", "/callback?error=denied&code=x&state=expected-state"] {
+        for invalid in ["/callback?code=x&orca_state=wrong", "/callback?code=x", "/other?code=x&state=expected-state", "/callback?code=x&code=y&state=expected-state", "/callback?code=x&orca_state=expected-state&orca_state=expected-state", "//evil/callback?code=x&state=expected-state", "/callback?error=denied&code=x&state=expected-state"] {
             do { _ = try pkce.code(from: invalid); preconditionFailure("Unverified callback accepted") }
             catch OrcaCloudError.invalidCallback {}
         }
+        let preferred = try pkce.code(from: "/callback?code=x&state=provider-state&orca_state=expected-state")
+        precondition(preferred == "x")
         let first = try OrcaPKCE(), second = try OrcaPKCE()
         precondition(first.state != second.state && first.verifier != second.verifier && first.verifier.count >= 43)
         let config = URLSessionConfiguration.ephemeral
@@ -91,6 +93,12 @@ struct CloudAPISmoke {
         CloudFixtureProtocol.handler = { _ in (200, Data(#"{"data":[{"id":"duplicate","name":"A"},{"id":"duplicate","name":"B"}]}"#.utf8)) }
         do { _ = try await api.printers(accessToken: "fixture-access"); preconditionFailure("Duplicate printer IDs accepted") }
         catch OrcaCloudError.invalidResponse {}
+        CloudFixtureProtocol.handler = { request in
+            precondition(request.url!.path == "/auth/v1/logout" && request.httpMethod == "POST")
+            precondition(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!.first?.value == "local")
+            return (204, Data())
+        }
+        try await api.logout(accessToken: "fixture-access")
         print("PASS: native PKCE, callback validation, token exchange/rotation, absolute expiry, printer sync and HTTP failures")
     }
 }
