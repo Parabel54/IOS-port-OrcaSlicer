@@ -1847,12 +1847,14 @@ final class OrcaEngine: ObservableObject {
     func cancelSlice() {
         #if ORCA_LINKED
         guard sliceRunning, let s = session else { return }
+        postProcessingTask?.cancel()
         orca_session_cancel_slice(s)
         slicePhase = "Cancelling…"
         #endif
     }
 
     private var sliceRunning = false
+    private var postProcessingTask: Task<Void, Error>?
 
     @MainActor
     func slice() async -> String {
@@ -1908,7 +1910,15 @@ final class OrcaEngine: ObservableObject {
         }
         do {
             self.slicePhase = "Post-processing"
-            try await Task.detached { try NativePostProcessing.run(file: out, commands: commands) }.value
+            let processing = Task.detached { try NativePostProcessing.run(file: out, commands: commands) }
+            postProcessingTask = processing
+            defer { postProcessingTask = nil }
+            try await processing.value
+            if processing.isCancelled { throw CancellationError() }
+        } catch is CancellationError {
+            try? FileManager.default.removeItem(at: out)
+            self.slicePhase = "Cancelled"
+            return "Cancelled"
         } catch {
             try? FileManager.default.removeItem(at: out)
             self.slicePhase = "Post-processing failed"

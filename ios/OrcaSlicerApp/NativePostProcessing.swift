@@ -60,6 +60,7 @@ enum NativePostProcessing {
     }
 
     static func run(file: URL, commands: [String]) throws {
+        try Task.checkCancellation()
         // Validate the whole sequence before changing any bytes.
         let options = try commands.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.map(resolve)
         for option in options { try zmod(file: file, options: option) }
@@ -73,6 +74,7 @@ enum NativePostProcessing {
         var line = Data()
         var previousCR = false
         while let block = try input.read(upToCount: 65536), !block.isEmpty {
+            try Task.checkCancellation()
             for byte in block {
                 if previousCR && byte == 10 { previousCR = false; continue }
                 previousCR = byte == 13
@@ -149,6 +151,7 @@ enum NativePostProcessing {
         try output.write(contentsOf: Data(("; MD5:" + hex + "\n").utf8))
         try output.synchronize()
         try output.close()
+        try Task.checkCancellation()
         _ = try FileManager.default.replaceItemAt(file, withItemAt: temporary)
     }
 

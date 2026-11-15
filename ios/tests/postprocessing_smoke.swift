@@ -3,7 +3,7 @@ import CryptoKit
 
 @main
 struct PostprocessingSmoke {
-    static func main() throws {
+    static func main() async throws {
         let directory = URL(fileURLWithPath: CommandLine.arguments[1])
         let cases = try JSONSerialization.jsonObject(with: Data(contentsOf: directory.appendingPathComponent("cases.json"))) as! [[String: String]]
         for test in cases {
@@ -27,6 +27,20 @@ struct PostprocessingSmoke {
             do { _ = try NativePostProcessing.resolve(command); fatalError("Accepted unsupported command") }
             catch {}
         }
+        let protectedFile = directory.appendingPathComponent("cancelled.gcode")
+        let original = Data("G28\n".utf8)
+        try original.write(to: protectedFile)
+        let cancelled = Task.detached {
+            withUnsafeCurrentTask { $0?.cancel() }
+            do {
+                try NativePostProcessing.run(file: protectedFile, commands: ["zmod-preprocess.py"])
+                return false
+            } catch is CancellationError { return true }
+            catch { return false }
+        }
+        let respectedCancellation = await cancelled.value
+        let unchanged = try Data(contentsOf: protectedFile)
+        precondition(respectedCancellation && unchanged == original)
         print("PASS: \(cases.count) upstream Zmod byte-for-byte cases, checksum, idempotence and command validation")
     }
 }
