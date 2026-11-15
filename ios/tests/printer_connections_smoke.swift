@@ -30,6 +30,13 @@ struct PrinterConnectionsSmoke {
         precondition(restored.printers == store.printers)
         let restoredKey = try restored.apiKey(for: first)
         precondition(restoredKey == "updated-secret")
+        store.link(first, toCloudPrinter: "cloud-printer-1")
+        let linked = PrinterConnections(defaults: defaults, credentials: credentials)
+        precondition(linked.printers[0].cloudPrinterID == "cloud-printer-1")
+        let linkedKey = try linked.apiKey(for: linked.printers[0])
+        precondition(linkedKey == "updated-secret")
+        store.link(store.printers[1], toCloudPrinter: "cloud-printer-1")
+        precondition(store.printers[0].cloudPrinterID == nil && store.printers[1].cloudPrinterID == "cloud-printer-1")
         let data = defaults.data(forKey: "orca.ios.printer-connections.v1")!
         precondition(!String(decoding: data, as: UTF8.self).contains("secret"))
         failWrites = true

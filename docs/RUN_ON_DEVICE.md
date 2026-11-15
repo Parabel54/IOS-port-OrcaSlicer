@@ -175,3 +175,15 @@ The iOS resource generator excludes desktop executables, libraries and `.opc` pr
 If the app closes before displaying recovery, or still closes with system profiles bypassed, collect its crash report from **Settings → Privacy & Security → Analytics & Improvements → Analytics Data**. Look for `OrcaSlicer` or a matching `JetsamEvent` and share the `.ips` report. It can distinguish a signing or dynamic-loader failure, an exception and an OS memory termination. Deleting the app is not required to try recovery and can remove its local projects.
 
 The supplied LiveContainer crash report on iOS 26.4 showed `EXC_BAD_ACCESS / KERN_PROTECTION_FAILURE` in a main-thread stack-guard page while Swift and SwiftUI were resolving generic view metadata during first layout. It did not show a desktop library-loader failure. Screen-sized `AnyView` boundaries now limit the root composition's metadata depth. The simulator launch check also requests root view metadata on a 1 MB worker stack before UI startup. These checks do not reproduce LiveContainer or establish physical iOS 26.4 compatibility; that still requires retesting the rebuilt app on the affected phone.
+
+### Opening models and settings
+
+Open/Add use a native document picker. Preset import first dismisses the process sheet so the picker has a free presenter. STL, OBJ, 3MF and AMF are supported model inputs; JSON is a settings input. The app also registers these document types for Files/Share opening.
+
+Selected and externally opened files are read under security-scoped access with `NSFileCoordinator`, then copied into uniquely named folders in `Documents/OrcaSlicer/Imports`. Recent-file entries refer to those local copies. The import queue waits for profile startup and slicing to finish before calling the engine. Temporary engine staging also uses unique directories and never removes an identically named source before copying.
+
+### Native Orca Cloud account and printers
+
+The Device page signs in with Google through `ASWebAuthenticationSession` using the upstream PKCE protocol and registered `http://localhost:41172/callback` redirect. Only loopback peers, the expected host/path, and a single matching state/code are accepted. Authentication codes are exchanged at the official token endpoint; refresh/access tokens stay in a distinct device-only Keychain item. HTTP redirects are rejected on token and printer API requests.
+
+The account restores its session, refreshes tokens, and fetches `/api/v1/printers` manually or while the account panel is visible. Cloud printer metadata, connection state and job state appear natively. A cloud printer can be linked to one saved local connection; this association persists without uploading LAN addresses or access codes. Registration of new cloud printers remains on the cloud website. Native printer transport and cloud account membership are separate: account synchronization does not discover a Flashforge IP address or obtain its LAN access code automatically.

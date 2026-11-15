@@ -19,7 +19,13 @@ xcrun --sdk "$SDK" swiftc -typecheck -parse-as-library -swift-version 5 \
   "$ROOT/ios/OrcaSlicerApp/PrinterConnections.swift" \
   "$ROOT/ios/OrcaSlicerApp/ConnectionsPanel.swift" \
   "$ROOT/ios/OrcaSlicerApp/StartupRecovery.swift" \
-  "$ROOT/ios/OrcaSlicerApp/StartupRecoveryView.swift"
+  "$ROOT/ios/OrcaSlicerApp/StartupRecoveryView.swift" \
+  "$ROOT/ios/OrcaSlicerApp/DocumentImport.swift" \
+  "$ROOT/ios/OrcaSlicerApp/NativeDocumentPicker.swift" \
+  "$ROOT/ios/OrcaSlicerApp/OrcaCloudAPI.swift" \
+  "$ROOT/ios/OrcaSlicerApp/NativeCloudSignIn.swift" \
+  "$ROOT/ios/OrcaSlicerApp/OrcaCloudAccount.swift" \
+  "$ROOT/ios/OrcaSlicerApp/CloudAccountPanel.swift"
 
 # Run storage and credential-isolation checks with injected secrets on the Mac host.
 TEST_DIR="$(mktemp -d)"
@@ -33,3 +39,12 @@ xcrun --sdk macosx swiftc -parse-as-library -swift-version 5 \
   "$ROOT/ios/OrcaSlicerApp/StartupRecovery.swift" \
   "$ROOT/ios/tests/startup_recovery_smoke.swift" -o "$TEST_DIR/startup-recovery"
 "$TEST_DIR/startup-recovery"
+
+xcrun --sdk macosx swiftc -parse-as-library -swift-version 5 \
+  "$ROOT/ios/OrcaSlicerApp/DocumentImport.swift" \
+  "$ROOT/ios/tests/document_import_smoke.swift" -o "$TEST_DIR/document-import"
+"$TEST_DIR/document-import"
+xcrun --sdk macosx swiftc -parse-as-library -swift-version 5 \
+  "$ROOT/ios/OrcaSlicerApp/OrcaCloudAPI.swift" \
+  "$ROOT/ios/tests/cloud_api_smoke.swift" -o "$TEST_DIR/cloud-api"
+"$TEST_DIR/cloud-api"

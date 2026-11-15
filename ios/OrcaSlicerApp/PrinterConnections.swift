@@ -7,6 +7,7 @@ struct PrinterConnection: Codable, Identifiable, Equatable {
     var name: String
     let address: String
     let kind: String
+    var cloudPrinterID: String? = nil
 
     static func validatedURL(_ address: String) -> URL? {
         guard let parts = URLComponents(string: address.trimmingCharacters(in: .whitespacesAndNewlines)),
@@ -115,7 +116,8 @@ final class PrinterConnections: ObservableObject {
             let address = url.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             let existing = printers.firstIndex { $0.address == address && $0.kind == kind }
             let printer = PrinterConnection(id: existing.map { printers[$0].id } ?? UUID(),
-                                            name: name, address: address, kind: kind)
+                                            name: name, address: address, kind: kind,
+                                            cloudPrinterID: existing.flatMap { printers[$0].cloudPrinterID })
             var updated = printers
             if let existing { updated[existing] = printer } else { updated.append(printer) }
             let data = try JSONEncoder().encode(updated)
@@ -123,6 +125,23 @@ final class PrinterConnections: ObservableObject {
             defaults.set(data, forKey: storageKey)
             printers = updated
             message = String(localized: "Printer connection saved.")
+        } catch { message = error.localizedDescription }
+    }
+
+    func link(_ printer: PrinterConnection, toCloudPrinter cloudID: String?) {
+        guard canSave, let index = printers.firstIndex(where: { $0.id == printer.id }) else { return }
+        var updated = printers
+        // A cloud printer has at most one corresponding local connection.
+        if let cloudID {
+            for i in updated.indices where updated[i].cloudPrinterID == cloudID {
+                updated[i].cloudPrinterID = nil
+            }
+        }
+        updated[index].cloudPrinterID = cloudID
+        do {
+            defaults.set(try JSONEncoder().encode(updated), forKey: storageKey)
+            printers = updated
+            message = ""
         } catch { message = error.localizedDescription }
     }
 

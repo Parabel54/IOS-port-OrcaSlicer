@@ -12,6 +12,7 @@ import UIKit
 final class OrcaEngine: ObservableObject {
     @Published var modelName: String?
     @Published var hasModel = false
+    @Published private(set) var lastModelImportSucceeded = false
     @Published var gcodeURL: URL?
     @Published var lastMessage = ""
     @Published var lastSliceTimeSec: Float = 0
@@ -62,6 +63,7 @@ final class OrcaEngine: ObservableObject {
     @Published var previewColorMode: GCodePathGeometry.ColorMode = .feature
 
     // MARK: System presets (all vendors / printers / process / filament)
+    @Published private(set) var startupFinished = false
     @Published var presetsLoaded = false
     @Published var presetsLoading = false
     @Published var printerNames: [String] = []
@@ -161,6 +163,7 @@ final class OrcaEngine: ObservableObject {
         let res = Bundle.main.resourcePath
         session = orca_session_create(res)
         if session == nil {
+            startupFinished = true
             lastMessage = "orca_session_create failed"
             StartupRecovery().finish()
         } else {
@@ -168,12 +171,17 @@ final class OrcaEngine: ObservableObject {
             applyDefaultFFF()
             // Writable data dir for installed system vendor trees
             guard configureDataDir() else {
+                startupFinished = true
                 StartupRecovery().finish()
                 return
             }
             if loadSystemProfiles {
-                Task { await loadAllSystemPresets() }
+                Task {
+                    await loadAllSystemPresets()
+                    await MainActor.run { self.startupFinished = true }
+                }
             } else {
+                startupFinished = true
                 lastMessage = "Recovery mode: engine ready without system profiles"
                 StartupRecovery().finish()
             }
@@ -187,6 +195,7 @@ final class OrcaEngine: ObservableObject {
             self?.handleMemoryWarning()
         }
         #else
+        startupFinished = true
         lastMessage = "Build with ORCA_LINKED + liborca_engine.a"
         StartupRecovery().finish()
         #endif
@@ -907,14 +916,9 @@ final class OrcaEngine: ObservableObject {
 
     /// Copy security-scoped URL into temp for the C engine.
     private func copyToTemp(_ url: URL) -> URL? {
-        let dest = FileManager.default.temporaryDirectory
-            .appendingPathComponent(url.lastPathComponent)
         do {
-            if FileManager.default.fileExists(atPath: dest.path) {
-                try FileManager.default.removeItem(at: dest)
-            }
-            try FileManager.default.copyItem(at: url, to: dest)
-            return dest
+            if DocumentImportStore.models.owns(url) { return url }
+            return try DocumentImportStore.temporary.copy(url)
         } catch {
             lastMessage = "Copy failed: \(error.localizedDescription)"
             return nil
@@ -932,6 +936,7 @@ final class OrcaEngine: ObservableObject {
     }
 
     func loadModel(url: URL, append: Bool) -> String {
+        lastModelImportSucceeded = false
         let accessed = url.startAccessingSecurityScopedResource()
         defer { if accessed { url.stopAccessingSecurityScopedResource() } }
 
@@ -958,6 +963,7 @@ final class OrcaEngine: ObservableObject {
             }
             return lastMessage
         }
+        lastModelImportSucceeded = true
         modelName = append
             ? "\(objectCount + 1) objects · last \(url.lastPathComponent)"
             : url.lastPathComponent

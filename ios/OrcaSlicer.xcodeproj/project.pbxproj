@@ -20,6 +20,12 @@
 		813CEBEA572C51708ACA02B1 /* ConnectionsPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000000F /* ConnectionsPanel.swift */; };
 		E8A18B52768B53BAB1A690B8 /* StartupRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000010 /* StartupRecovery.swift */; };
 		295B927B229952BE9F1A6DAA /* StartupRecoveryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000011 /* StartupRecoveryView.swift */; };
+		2354FD61C9BA50E59322E0A8 /* DocumentImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000012 /* DocumentImport.swift */; };
+		0BB60DC9117C5565947C8370 /* NativeDocumentPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000013 /* NativeDocumentPicker.swift */; };
+		4DF56F99C35D55BE87DC4B0D /* OrcaCloudAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000014 /* OrcaCloudAPI.swift */; };
+		4795CB2431E15812A1FF3E10 /* NativeCloudSignIn.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000015 /* NativeCloudSignIn.swift */; };
+		956626E18BA154CB8EB418B9 /* OrcaCloudAccount.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000016 /* OrcaCloudAccount.swift */; };
+		0D224B673BC459A887228267 /* CloudAccountPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000017 /* CloudAccountPanel.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -40,6 +46,12 @@
 		A1000000000000000000000F /* ConnectionsPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionsPanel.swift; sourceTree = "<group>"; };
 		A10000000000000000000010 /* StartupRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StartupRecovery.swift; sourceTree = "<group>"; };
 		A10000000000000000000011 /* StartupRecoveryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StartupRecoveryView.swift; sourceTree = "<group>"; };
+		A10000000000000000000012 /* DocumentImport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentImport.swift; sourceTree = "<group>"; };
+		A10000000000000000000013 /* NativeDocumentPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeDocumentPicker.swift; sourceTree = "<group>"; };
+		A10000000000000000000014 /* OrcaCloudAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrcaCloudAPI.swift; sourceTree = "<group>"; };
+		A10000000000000000000015 /* NativeCloudSignIn.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeCloudSignIn.swift; sourceTree = "<group>"; };
+		A10000000000000000000016 /* OrcaCloudAccount.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrcaCloudAccount.swift; sourceTree = "<group>"; };
+		A10000000000000000000017 /* CloudAccountPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudAccountPanel.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -58,6 +70,12 @@
 				A10000000000000000000002 /* OrcaEngine.swift */,
 				A10000000000000000000008 /* PlateSceneView.swift */,
 				A1000000000000000000000C /* ProcessOptions.swift */,
+				A10000000000000000000017 /* CloudAccountPanel.swift */,
+				A10000000000000000000016 /* OrcaCloudAccount.swift */,
+				A10000000000000000000015 /* NativeCloudSignIn.swift */,
+				A10000000000000000000014 /* OrcaCloudAPI.swift */,
+				A10000000000000000000013 /* NativeDocumentPicker.swift */,
+				A10000000000000000000012 /* DocumentImport.swift */,
 				A10000000000000000000011 /* StartupRecoveryView.swift */,
 				A10000000000000000000010 /* StartupRecovery.swift */,
 				A1000000000000000000000F /* ConnectionsPanel.swift */,
@@ -165,6 +183,12 @@
 				F5D701F3F6A64A75B3859D69 /* OrcaEngine.swift in Sources */,
 				951D0BA3C945455EA139190F /* PlateSceneView.swift in Sources */,
 				143431BE0F474D7CB36C4F5E /* ProcessOptions.swift in Sources */,
+				0D224B673BC459A887228267 /* CloudAccountPanel.swift in Sources */,
+				956626E18BA154CB8EB418B9 /* OrcaCloudAccount.swift in Sources */,
+				4795CB2431E15812A1FF3E10 /* NativeCloudSignIn.swift in Sources */,
+				4DF56F99C35D55BE87DC4B0D /* OrcaCloudAPI.swift in Sources */,
+				0BB60DC9117C5565947C8370 /* NativeDocumentPicker.swift in Sources */,
+				2354FD61C9BA50E59322E0A8 /* DocumentImport.swift in Sources */,
 				295B927B229952BE9F1A6DAA /* StartupRecoveryView.swift in Sources */,
 				E8A18B52768B53BAB1A690B8 /* StartupRecovery.swift in Sources */,
 				813CEBEA572C51708ACA02B1 /* ConnectionsPanel.swift in Sources */,

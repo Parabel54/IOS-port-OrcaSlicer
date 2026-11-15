@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct StartupRecoveryView: View {
+    @StateObject private var documents = DocumentInbox()
     @State private var loadProfiles: Bool?
     @State private var needsRecovery = StartupRecovery().interrupted
     @State private var preparing = false
@@ -10,7 +11,7 @@ struct StartupRecoveryView: View {
     var body: some View {
         Group {
             if let loadProfiles {
-                OrcaRootView(loadSystemProfiles: loadProfiles)
+                OrcaRootView(loadSystemProfiles: loadProfiles, documents: documents)
             } else {
                 VStack(spacing: 20) {
                     Text(needsRecovery ? "Startup recovery" : "Starting OrcaSlicer")
@@ -34,6 +35,7 @@ struct StartupRecoveryView: View {
                 .disabled(preparing)
             }
         }
+        .onOpenURL { documents.receive($0) }
         .task {
             guard !checkedStartup else { return }
             checkedStartup = true

@@ -61,5 +61,105 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>UTImportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.orcaslicer.ios.stl</string>
+			<key>UTTypeDescription</key>
+			<string>STL model</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>stl</string>
+				</array>
+				<key>public.mime-type</key>
+				<string>model/stl</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.orcaslicer.ios.obj</string>
+			<key>UTTypeDescription</key>
+			<string>OBJ model</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>obj</string>
+				</array>
+				<key>public.mime-type</key>
+				<string>model/obj</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.orcaslicer.ios.3mf</string>
+			<key>UTTypeDescription</key>
+			<string>3MF model</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>3mf</string>
+				</array>
+				<key>public.mime-type</key>
+				<string>model/3mf</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.orcaslicer.ios.amf</string>
+			<key>UTTypeDescription</key>
+			<string>AMF model</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>amf</string>
+				</array>
+				<key>public.mime-type</key>
+				<string>application/amf+xml</string>
+			</dict>
+		</dict>
+	</array>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>3D models and Orca settings</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>com.orcaslicer.ios.stl</string>
+				<string>com.orcaslicer.ios.obj</string>
+				<string>com.orcaslicer.ios.3mf</string>
+				<string>com.orcaslicer.ios.amf</string>
+				<string>public.json</string>
+				<string>public.standard-tesselated-geometry-format</string>
+				<string>org.3mfconsortium.3mf</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

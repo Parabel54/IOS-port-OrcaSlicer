@@ -31,7 +31,10 @@ xcrun simctl spawn "$DEVICE" "$TEST_DIR/engine_smoke" "$TEST_DIR" "$APP_BUNDLE" 
   2>&1 | tee "$TEST_DIR/result.log"
 python3 "$ROOT/scripts/audit_ios_app.py" "$APP_BUNDLE" iphonesimulator
 xcrun simctl install "$DEVICE" "$APP_BUNDLE"
-xcrun simctl launch --terminate-running-process "$DEVICE" com.orcaslicer.ios --test-view-metadata \
+APP_DATA="$(xcrun simctl get_app_container "$DEVICE" com.orcaslicer.ios data)"
+mkdir -p "$APP_DATA/Documents"
+cp "$TEST_DIR/cube.3mf" "$APP_DATA/Documents/ios-import-smoke.3mf"
+xcrun simctl launch --terminate-running-process "$DEVICE" com.orcaslicer.ios --test-view-metadata --test-document-import \
   | tee "$TEST_DIR/app-launch.log"
 # Wait for the app's full profile startup, not just its initial process spawn.
 APP_DATA="$(xcrun simctl get_app_container "$DEVICE" com.orcaslicer.ios data)"
@@ -41,7 +44,8 @@ import sys
 import time
 stamp = Path(sys.argv[1]) / 'Documents/OrcaSlicer/.ios-system-profiles-revision'
 deadline = time.monotonic() + 180
-while not stamp.is_file():
+import_result = Path(sys.argv[1]) / 'tmp/orca-document-import-smoke.txt'
+while not stamp.is_file() or not import_result.is_file():
     if time.monotonic() >= deadline:
         raise SystemExit('App did not finish system-profile startup within 180 seconds')
     time.sleep(2)
@@ -49,6 +53,7 @@ metadata = Path(sys.argv[1]) / 'tmp/orca-view-metadata-smoke.txt'
 if not metadata.is_file():
     raise SystemExit('Missing small-stack view metadata test result')
 print(metadata.read_text())
+print(import_result.read_text())
 print('PASS: app completed engine and system-profile startup')
 PYTEST
 # Allow the first SwiftUI frame before preserving a diagnostic screenshot.

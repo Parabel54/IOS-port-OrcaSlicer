@@ -12,6 +12,7 @@ struct ConnectionBrowser: UIViewControllerRepresentable {
 }
 
 struct PrinterConnectionsPanel: View {
+    @ObservedObject var account: OrcaCloudAccount
     @ObservedObject var connections: PrinterConnections
     let address: String
     let kind: String
@@ -27,12 +28,10 @@ struct PrinterConnectionsPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Button("Open Orca Cloud / Sign in") {
+            CloudAccountPanel(account: account, connections: connections)
+            Button("Open cloud website") {
                 browser = BrowserDestination(url: URL(string: "https://cloud.orcaslicer.com")!)
             }
-            Text("Sign in on the official Orca Cloud website. Native preset sync and printer account linking are not connected yet.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
             Divider()
             Text("Saved printers").font(.headline)
             ForEach(connections.printers) { printer in

@@ -60,16 +60,19 @@ private enum OrcaTheme {
 struct OrcaRootView: View {
     @StateObject private var engine: OrcaEngine
 
-    init(loadSystemProfiles: Bool = true) {
+    @ObservedObject private var documents: DocumentInbox
+
+    init(loadSystemProfiles: Bool = true, documents: DocumentInbox? = nil) {
+        _documents = ObservedObject(wrappedValue: documents ?? DocumentInbox())
         _engine = StateObject(wrappedValue: OrcaEngine(loadSystemProfiles: loadSystemProfiles))
     }
     @StateObject private var connections = PrinterConnections()
-    @State private var showImporter = false
-    @State private var importAppend = false
+    @StateObject private var cloudAccount = OrcaCloudAccount()
+    @State private var documentPicker: DocumentImportRequest?
+    @State private var pendingDocumentPicker: DocumentImportRequest?
+    @State private var didTestImport = false
     @State private var showProcess = false
     @State private var showCalibration = false
-    @State private var showPresetImporter = false
-    @State private var presetImportKind: Int = 0 // 0 process, 1 filament, 2 overlay
     @State private var exportShareURL: URL?
     @State private var projectURL: URL?
     @State private var layerHeight = "0.20"
@@ -228,7 +231,7 @@ struct OrcaRootView: View {
 
     private var primaryPresentations: AnyView {
         AnyView(rootLayout
-        .sheet(isPresented: $showProcess) {
+        .sheet(isPresented: $showProcess, onDismiss: presentPendingDocumentPicker) {
             processSheet
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
@@ -317,30 +320,27 @@ struct OrcaRootView: View {
                 wizardVendors = Set(OrcaEngine.preferredVendors)
             }
         }
-        .fileImporter(
-            isPresented: $showImporter,
-            allowedContentTypes: modelTypes,
-            allowsMultipleSelection: false
-        ) { handleImport($0) }
-        .fileImporter(
-            isPresented: $showPresetImporter,
-            allowedContentTypes: [.json, .data],
-            allowsMultipleSelection: false
-        ) { result in
-            switch result {
-            case .success(let urls):
-                guard let url = urls.first else { return }
-                let kind: Int? = presetImportKind == 2 ? nil : presetImportKind
-                if engine.importConfigJSON(url: url, asUserPreset: kind) {
-                    status = engine.lastMessage
-                    syncProcessFieldsFromEngine()
-                } else {
-                    status = engine.lastMessage
-                }
-            case .failure(let err):
-                status = err.localizedDescription
+        .sheet(item: $documentPicker) { request in
+            NativeDocumentPicker(settingsOnly: request.isSettings) { url in
+                documentPicker = nil
+                if let url { documents.receive(url, kind: request.kind) }
             }
         }
+        .onAppear {
+            if ProcessInfo.processInfo.arguments.contains("--test-document-import"), !didTestImport {
+                didTestImport = true
+                let fixture = StartupRecovery().dataDirectory.deletingLastPathComponent().appendingPathComponent("ios-import-smoke.3mf")
+                documents.receive(fixture)
+            }
+            importPendingDocuments()
+        }
+        .onChange(of: documents.pending.count) { _ in importPendingDocuments() }
+        .onChange(of: engine.presetsLoading) { _ in importPendingDocuments() }
+        .onChange(of: engine.startupFinished) { _ in importPendingDocuments() }
+        .onChange(of: isSlicing) { _ in importPendingDocuments() }
+        .alert("Import failed", isPresented: Binding(get: { !documents.errorMessage.isEmpty }, set: { if !$0 { documents.errorMessage = "" } })) {
+            Button("OK", role: .cancel) { documents.errorMessage = "" }
+        } message: { Text(documents.errorMessage) }
     }
 
     private var headerBar: AnyView {
@@ -556,7 +556,7 @@ struct OrcaRootView: View {
                     .buttonStyle(.plain)
                 }
 
-                PrinterConnectionsPanel(connections: connections, address: printerHost,
+                PrinterConnectionsPanel(account: cloudAccount, connections: connections, address: printerHost,
                                         kind: hostType.rawValue, apiKey: octoApiKey) { printer in
                     selectPrinterConnection(printer)
                 }
@@ -1718,12 +1718,10 @@ struct OrcaRootView: View {
 
             HStack(spacing: 10) {
                 actionButton(title: "Open", systemImage: "folder.fill") {
-                    importAppend = false
-                    showImporter = true
+                    requestDocumentPicker(.model(append: false))
                 }
                 actionButton(title: "Add", systemImage: "plus.rectangle.on.folder") {
-                    importAppend = true
-                    showImporter = true
+                    requestDocumentPicker(.model(append: true))
                 }
                 actionButton(title: "Process", systemImage: "slider.horizontal.3") {
                     showProcess = true
@@ -3297,24 +3295,21 @@ struct OrcaRootView: View {
                         .listRowBackground(OrcaTheme.panel)
                     }
                     Button {
-                        presetImportKind = 0
-                        showPresetImporter = true
+                        requestDocumentPicker(.settings(preset: 0))
                     } label: {
                         Text("Import process JSON from Files…")
                             .foregroundStyle(OrcaTheme.accent)
                     }
                     .listRowBackground(OrcaTheme.panel)
                     Button {
-                        presetImportKind = 1
-                        showPresetImporter = true
+                        requestDocumentPicker(.settings(preset: 1))
                     } label: {
                         Text("Import filament JSON from Files…")
                             .foregroundStyle(OrcaTheme.accent)
                     }
                     .listRowBackground(OrcaTheme.panel)
                     Button {
-                        presetImportKind = 2
-                        showPresetImporter = true
+                        requestDocumentPicker(.settings(preset: nil))
                     } label: {
                         Text("Import config overlay JSON…")
                             .foregroundStyle(OrcaTheme.accent)
@@ -4183,14 +4178,6 @@ struct OrcaRootView: View {
         .listRowBackground(OrcaTheme.panel)
     }
 
-    private var modelTypes: [UTType] {
-        var types: [UTType] = [.data]
-        if let stl = UTType(filenameExtension: "stl") { types.append(stl) }
-        if let m3 = UTType(filenameExtension: "3mf") { types.append(m3) }
-        if let obj = UTType(filenameExtension: "obj") { types.append(obj) }
-        return types
-    }
-
     private func sliceNow() {
         guard !isSlicing else { return }
         status = ""
@@ -4246,23 +4233,45 @@ struct OrcaRootView: View {
         }
     }
 
-    private func handleImport(_ result: Result<[URL], Error>) {
-        switch result {
-        case .success(let urls):
-            guard let url = urls.first else { return }
-            if importAppend {
-                status = engine.addModel(url: url)
-            } else {
-                status = engine.loadModel(url: url)
+    private func requestDocumentPicker(_ kind: DocumentImportKind) {
+        let request = DocumentImportRequest(kind: kind)
+        if showProcess {
+            pendingDocumentPicker = request
+            showProcess = false
+        } else { documentPicker = request }
+    }
+
+    private func presentPendingDocumentPicker() {
+        documentPicker = pendingDocumentPicker
+        pendingDocumentPicker = nil
+    }
+
+    private func importPendingDocuments() {
+        guard !isSlicing, !engine.presetsLoading, engine.startupFinished else { return }
+        while let document = documents.takeNext() {
+            var success = false
+            switch document.kind {
+            case .automatic: break // Resolved before staging.
+            case .model(let append):
+                status = engine.loadModel(url: document.url, append: append)
+                success = engine.lastModelImportSucceeded
+                if success { engine.rememberRecent(url: document.url) }
+            case .settings(let preset):
+                success = engine.importConfigJSON(url: document.url, asUserPreset: preset)
+                status = engine.lastMessage
             }
-            engine.rememberRecent(url: url)
-            // 3MF / profile-bearing loads refresh process sheet fields (config applied in engine)
+            if !success { documents.errorMessage = status }
             syncProcessFieldsFromEngine()
             mainTab = .prepare
-        case .failure(let err):
-            status = err.localizedDescription
+            if ProcessInfo.processInfo.arguments.contains("--test-document-import"), success,
+               engine.hasModel, engine.objectCount == 1 {
+                try? "PASS: app document inbox imported a 3MF model".write(
+                    to: FileManager.default.temporaryDirectory.appendingPathComponent("orca-document-import-smoke.txt"),
+                    atomically: true, encoding: .utf8)
+            }
         }
     }
+
 }
 
 private struct OrcaLogoMark: View {
