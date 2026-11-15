@@ -8,6 +8,7 @@ struct PrinterConnection: Codable, Identifiable, Equatable {
     let address: String
     let kind: String
     var cloudPrinterID: String? = nil
+    var serialNumber: String? = nil
 
     static func validatedURL(_ address: String) -> URL? {
         guard let parts = URLComponents(string: address.trimmingCharacters(in: .whitespacesAndNewlines)),
@@ -76,11 +77,12 @@ struct PrinterCredentialStore {
 }
 
 enum ConnectionError: LocalizedError {
-    case invalidAddress, invalidName, credential
+    case invalidAddress, invalidName, credential, flashforgeCredentials
     var errorDescription: String? {
         switch self {
         case .invalidAddress: return String(localized: "Enter an HTTP or HTTPS printer URL without a username, password, query, or fragment.")
         case .invalidName: return String(localized: "Enter a name for this printer.")
+        case .flashforgeCredentials: return String(localized: "Enter the Flashforge serial number and LAN access code.")
         case .credential: return String(localized: "Could not access printer credentials in Keychain. Unlock your device and try again.")
         }
     }
@@ -107,17 +109,21 @@ final class PrinterConnections: ObservableObject {
         }
     }
 
-    func save(name: String, address: String, kind: String, apiKey: String) {
+    func save(name: String, address: String, kind: String, apiKey: String, serialNumber: String? = nil) {
         guard canSave else { return }
         do {
             let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            if kind == "Flashforge", (serialNumber?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) || apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                throw ConnectionError.flashforgeCredentials
+            }
             guard !name.isEmpty else { throw ConnectionError.invalidName }
             guard let url = PrinterConnection.validatedURL(address) else { throw ConnectionError.invalidAddress }
             let address = url.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             let existing = printers.firstIndex { $0.address == address && $0.kind == kind }
             let printer = PrinterConnection(id: existing.map { printers[$0].id } ?? UUID(),
                                             name: name, address: address, kind: kind,
-                                            cloudPrinterID: existing.flatMap { printers[$0].cloudPrinterID })
+                                            cloudPrinterID: existing.flatMap { printers[$0].cloudPrinterID },
+                                            serialNumber: serialNumber?.trimmingCharacters(in: .whitespacesAndNewlines))
             var updated = printers
             if let existing { updated[existing] = printer } else { updated.append(printer) }
             let data = try JSONEncoder().encode(updated)

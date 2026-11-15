@@ -25,7 +25,8 @@ xcrun --sdk "$SDK" swiftc -typecheck -parse-as-library -swift-version 5 \
   "$ROOT/ios/OrcaSlicerApp/OrcaCloudAPI.swift" \
   "$ROOT/ios/OrcaSlicerApp/NativeCloudSignIn.swift" \
   "$ROOT/ios/OrcaSlicerApp/OrcaCloudAccount.swift" \
-  "$ROOT/ios/OrcaSlicerApp/CloudAccountPanel.swift"
+  "$ROOT/ios/OrcaSlicerApp/CloudAccountPanel.swift" \
+  "$ROOT/ios/OrcaSlicerApp/FlashforgeClient.swift"
 
 # Run storage and credential-isolation checks with injected secrets on the Mac host.
 TEST_DIR="$(mktemp -d)"
@@ -48,3 +49,9 @@ xcrun --sdk macosx swiftc -parse-as-library -swift-version 5 \
   "$ROOT/ios/OrcaSlicerApp/OrcaCloudAPI.swift" \
   "$ROOT/ios/tests/cloud_api_smoke.swift" -o "$TEST_DIR/cloud-api"
 "$TEST_DIR/cloud-api"
+
+xcrun --sdk macosx swiftc -parse-as-library -swift-version 5 \
+  "$ROOT/ios/OrcaSlicerApp/PrinterConnections.swift" \
+  "$ROOT/ios/OrcaSlicerApp/FlashforgeClient.swift" \
+  "$ROOT/ios/tests/flashforge_smoke.swift" -o "$TEST_DIR/flashforge"
+"$TEST_DIR/flashforge"

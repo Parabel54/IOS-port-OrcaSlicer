@@ -53,6 +53,10 @@ metadata = Path(sys.argv[1]) / 'tmp/orca-view-metadata-smoke.txt'
 if not metadata.is_file():
     raise SystemExit('Missing small-stack view metadata test result')
 print(metadata.read_text())
+picker = Path(sys.argv[1]) / 'tmp/orca-document-picker-smoke.txt'
+if not picker.is_file():
+    raise SystemExit('Native document picker did not present')
+print(picker.read_text())
 print(import_result.read_text())
 print('PASS: app completed engine and system-profile startup')
 PYTEST

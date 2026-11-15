@@ -17,6 +17,7 @@ struct PrinterConnectionsPanel: View {
     let address: String
     let kind: String
     let apiKey: String
+    let serialNumber: String?
     let onSelect: (PrinterConnection) -> Void
     @State private var name = ""
     @State private var browser: BrowserDestination?
@@ -52,14 +53,14 @@ struct PrinterConnectionsPanel: View {
             TextField("Printer name", text: $name)
                 .textFieldStyle(.roundedBorder)
             Button("Save current connection") {
-                connections.save(name: name, address: address, kind: kind, apiKey: apiKey)
+                connections.save(name: name, address: address, kind: kind, apiKey: apiKey, serialNumber: serialNumber)
             }
             if !connections.message.isEmpty {
                 Text(connections.message).font(.caption)
             }
             Divider()
             Text("Plugins").font(.headline)
-            Text("Moonraker, OctoPrint, and PrusaLink connections are built in. Open your printer’s web interface to use its installed web plugins. Desktop networking plugins require an iOS-compatible build and are not loaded by this app.")
+            Text("Flashforge AD5X/5M, Moonraker, OctoPrint, and PrusaLink connections are built in. Open your printer’s web interface to use its installed web plugins. Desktop networking plugins require an iOS-compatible build and are not loaded by this app.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Button("Open printer web interface") {

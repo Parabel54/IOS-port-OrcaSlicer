@@ -50,7 +50,7 @@ class ProjectGenerationTests(unittest.TestCase):
         first = project.read_bytes()
         self.assertIn(b'ORCA_LINKED', first)
         self.assertIn(b'iphoneos*', first)
-        for source in (b'PrinterConnections.swift', b'ConnectionsPanel.swift', b'StartupRecovery.swift', b'StartupRecoveryView.swift', b'DocumentImport.swift', b'NativeDocumentPicker.swift', b'OrcaCloudAPI.swift', b'NativeCloudSignIn.swift', b'OrcaCloudAccount.swift', b'CloudAccountPanel.swift'):
+        for source in (b'PrinterConnections.swift', b'ConnectionsPanel.swift', b'StartupRecovery.swift', b'StartupRecoveryView.swift', b'DocumentImport.swift', b'NativeDocumentPicker.swift', b'OrcaCloudAPI.swift', b'NativeCloudSignIn.swift', b'OrcaCloudAccount.swift', b'CloudAccountPanel.swift', b'FlashforgeClient.swift'):
             self.assertIn(source + b' in Sources', first)
         stale = self.root / 'ios/OrcaSlicerApp/Resources/profiles/stale.json'
         stale.write_text('{}')
