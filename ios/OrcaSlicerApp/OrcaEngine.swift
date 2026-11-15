@@ -1607,6 +1607,17 @@ final class OrcaEngine: ObservableObject {
 
     // MARK: - Full settings browser (print_config_def + session values)
 
+    func postProcessingScripts() -> [String] {
+        #if ORCA_LINKED
+        guard let session else { return [] }
+        return (0..<orca_session_post_process_count(session)).compactMap { index in
+            orca_session_post_process_script(session, index).map { String(cString: $0) }
+        }
+        #else
+        return []
+        #endif
+    }
+
     /// Snapshot of DynamicPrintConfig keys for the searchable browser.
     /// Enum choice lists are loaded lazily via `enumChoices(for:)` to save RAM.
     func allConfigOptions() -> [ConfigOptionEntry] {

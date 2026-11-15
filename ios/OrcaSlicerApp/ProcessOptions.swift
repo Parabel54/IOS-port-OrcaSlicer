@@ -1105,10 +1105,12 @@ struct NativeProcessingPanel: View {
         Form {
             Section("G-code post-processing") {
                 Text("Hooks run after slicing, before sharing or sending G-code.")
-                TextField("Serialized desktop script list", text: $commands, axis: .vertical)
+                TextField("Scripts (one command per line)", text: $commands, axis: .vertical)
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
                 Button("Apply") {
-                    if engine.applyConfigOption(key: "post_process", value: commands) { message = "Saved to the current process preset." }
+                    let lines = commands.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+                    let value = NativePostProcessing.serializeCommands(lines)
+                    if engine.applyConfigOption(key: "post_process", value: value) { message = "Saved to the current process preset." }
                     else { message = engine.lastMessage }
                 }
                 Button("Use Zmod preprocessing") {
@@ -1132,6 +1134,6 @@ struct NativeProcessingPanel: View {
             }
             if !message.isEmpty { Text(message).font(.caption) }
         }.navigationTitle("Post-processing plugins")
-            .onAppear { commands = engine.getOption("post_process") ?? "" }
+            .onAppear { commands = engine.postProcessingScripts().joined(separator: "\n") }
     }
 }

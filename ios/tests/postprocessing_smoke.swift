@@ -21,6 +21,10 @@ struct PostprocessingSmoke {
             precondition(String(decoding: actual[..<newline], as: UTF8.self) == "; MD5:" + hash)
         }
         let path = #""C:\Python\python.exe" "C:\scripts\zmod-preprocess.py" --no-simplify-objects"#
+        let serialized = NativePostProcessing.serializeCommands([path, "zmod-preprocess.py"])
+        let jsonList = "[" + serialized.replacingOccurrences(of: ";", with: ",") + "]"
+        let roundTrip = try JSONDecoder().decode([String].self, from: Data(jsonList.utf8))
+        precondition(roundTrip == [path, "zmod-preprocess.py"])
         let resolved = try NativePostProcessing.resolve(path)
         precondition(resolved.simplify == false)
         for command in ["unknown.py", "zmod-preprocess.sh", "zmod-preprocess.py --invalid", "zmod-preprocess.py --simplify-objects -1", "zmod-preprocess.py ; echo bad"] {

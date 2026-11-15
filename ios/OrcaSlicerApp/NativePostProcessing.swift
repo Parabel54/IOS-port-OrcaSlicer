@@ -24,6 +24,17 @@ enum NativePostProcessing {
         }
     }
 
+    /// The editor uses ordinary commands; the C ABI stores Orca's quoted list.
+    static func serializeCommands(_ commands: [String]) -> String {
+        commands.map { command in
+            let escaped = command.replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+                .replacingOccurrences(of: "\r", with: "\\r")
+                .replacingOccurrences(of: "\n", with: "\\n")
+            return "\"" + escaped + "\""
+        }.joined(separator: ";")
+    }
+
     static func resolve(_ command: String) throws -> ZmodOptions {
         let pattern = #""([^"]*)"|'([^']*)'|([^\s]+)"#
         let regex = try NSRegularExpression(pattern: pattern)
