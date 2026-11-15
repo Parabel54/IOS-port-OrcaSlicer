@@ -4,7 +4,7 @@ import Network
 import UIKit
 
 @MainActor
-final class NativeCloudSignIn: NSObject, ASWebAuthenticationPresentationContextProviding {
+final class NativeCloudSignIn: NSObject, ASWebAuthenticationPresentationContextProviding, OrcaCloudAuthenticating {
     private var browser: ASWebAuthenticationSession?
     private var server: OrcaOAuthLoopbackServer?
     private var continuation: CheckedContinuation<(code: String, verifier: String), Error>?
@@ -152,4 +152,9 @@ private final class OrcaOAuthLoopbackServer {
             }
         }
     }
+}
+
+@MainActor
+extension OrcaCloudAccount {
+    convenience init() { self.init(authentication: NativeCloudSignIn()) }
 }

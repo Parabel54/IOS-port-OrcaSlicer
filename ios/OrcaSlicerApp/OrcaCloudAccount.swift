@@ -2,6 +2,12 @@ import Foundation
 import Combine
 
 @MainActor
+protocol OrcaCloudAuthenticating: AnyObject {
+    func signIn(provider: String) async throws -> (code: String, verifier: String)
+    func cancel()
+}
+
+@MainActor
 final class OrcaCloudAccount: ObservableObject {
     @Published private(set) var signedIn = false
     @Published private(set) var displayName = ""
@@ -13,12 +19,13 @@ final class OrcaCloudAccount: ObservableObject {
     private var cloudSession: OrcaCloudSession?
     private let api: OrcaCloudAPI
     private let credentials: PrinterCredentialStore
-    private let authentication = NativeCloudSignIn()
+    private let authentication: OrcaCloudAuthenticating
     private var generation = UUID()
     // A distinct stable Keychain item; never serialize tokens into preferences.
     private static let credentialID = UUID(uuidString: "C8CD1A34-87A2-49B5-905C-94015DFEA763")!
 
-    init(api: OrcaCloudAPI = OrcaCloudAPI(), credentials: PrinterCredentialStore = .keychain) {
+    init(api: OrcaCloudAPI = OrcaCloudAPI(), credentials: PrinterCredentialStore = .keychain, authentication: OrcaCloudAuthenticating) {
+        self.authentication = authentication
         self.api = api
         self.credentials = credentials
         do {

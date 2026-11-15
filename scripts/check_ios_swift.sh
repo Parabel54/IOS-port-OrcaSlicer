@@ -55,3 +55,9 @@ xcrun --sdk macosx swiftc -parse-as-library -swift-version 5 \
   "$ROOT/ios/OrcaSlicerApp/FlashforgeClient.swift" \
   "$ROOT/ios/tests/flashforge_smoke.swift" -o "$TEST_DIR/flashforge"
 "$TEST_DIR/flashforge"
+xcrun --sdk macosx swiftc -parse-as-library -swift-version 5 \
+  "$ROOT/ios/OrcaSlicerApp/PrinterConnections.swift" \
+  "$ROOT/ios/OrcaSlicerApp/OrcaCloudAPI.swift" \
+  "$ROOT/ios/OrcaSlicerApp/OrcaCloudAccount.swift" \
+  "$ROOT/ios/tests/cloud_account_smoke.swift" -o "$TEST_DIR/cloud-account"
+"$TEST_DIR/cloud-account"
