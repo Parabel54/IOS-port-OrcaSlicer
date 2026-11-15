@@ -1145,7 +1145,7 @@ struct GCodePathGeometry {
             flush()
         }
         return GCodePathGeometry(
-            segments: out, zMin: max(zMin, minZ), zMax: maxZ,
+            segments: out, zMin: zMin, zMax: zMax,
             feedMin: feedMin, feedMax: feedMax, widthRange: widthRange, layerHeightRange: layerHeightRange, defaultWidth: defaultWidth
         )
     }
@@ -1170,10 +1170,11 @@ struct GCodePathGeometry {
         guard (longPath.childNodes.first?.boundingBox.max.y ?? 0) >= 99 else { return false }
         var thick = bead
         thick.width = 0.8; thick.height = 0.4
-        let colors = GCodePathGeometry(segments: [bead, thick], widthRange: 0.45...0.8, layerHeightRange: 0.3...0.4)
+        let colors = GCodePathGeometry(segments: [bead, thick], zMin: 0, zMax: 2, widthRange: 0.45...0.8, layerHeightRange: 0.3...0.4)
         return !colors.color(for: bead, mode: .layerHeight).isEqual(colors.color(for: thick, mode: .layerHeight)) &&
             !colors.color(for: bead, mode: .lineWidth).isEqual(colors.color(for: thick, mode: .lineWidth)) &&
-            colors.filtered(minZ: 1, maxZ: 1).widthRange == colors.widthRange
+            colors.filtered(minZ: 1, maxZ: 1).widthRange == colors.widthRange &&
+            colors.filtered(minZ: 1, maxZ: 1).colorRange(for: .height) == colors.colorRange(for: .height)
     }
 
     static func color(for feature: String) -> UIColor {

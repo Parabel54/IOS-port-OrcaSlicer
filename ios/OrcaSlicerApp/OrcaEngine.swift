@@ -2064,7 +2064,7 @@ final class OrcaEngine: ObservableObject {
                 self.previewLayerHeights = Array(Set(records.filter { $0.travel == 0 }.map { $0.end_z })).sorted()
                 self.gcodeGeometry = path
                 self.gcodeZMin = path.zMin
-                self.gcodeZMax = max(path.zMax, path.zMin + 0.2)
+                self.gcodeZMax = max(path.zMax, path.zMin)
                 self.previewMinZ = self.gcodeZMin
                 self.previewMaxZ = self.gcodeZMax
                 self.applyPreviewLayer()
