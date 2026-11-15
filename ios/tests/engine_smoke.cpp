@@ -93,10 +93,49 @@ int main(int argc, char **argv)
         if (!require(orca_session_simplify_mesh(edited.get(), 0, 64) > 0, "simplify native mesh") ||
             !require(orca_session_mesh_stats(edited.get(), 0, &facets, &edges, &parts, &volume) == 0 && facets < before,
                      "simplify reduces the actual mesh")) return 4;
+        auto surface_area = [](const float *positions, size_t vertices, const uint32_t *indices, size_t count) {
+            double area = 0;
+            for (size_t i = 0; i < count; i += 3) {
+                if (i + 2 >= count || indices[i] >= vertices || indices[i+1] >= vertices || indices[i+2] >= vertices)
+                    return -1.0;
+                const float *a = positions + 3 * indices[i], *b = positions + 3 * indices[i+1], *c = positions + 3 * indices[i+2];
+                const double ux = b[0]-a[0], uy = b[1]-a[1], uz = b[2]-a[2];
+                const double vx = c[0]-a[0], vy = c[1]-a[1], vz = c[2]-a[2];
+                const double x = uy*vz-uz*vy, y = uz*vx-ux*vz, z = ux*vy-uy*vx;
+                const double triangle_area = 0.5 * std::sqrt(x*x+y*y+z*z);
+                if (!std::isfinite(triangle_area)) return -1.0;
+                area += triangle_area;
+            }
+            return area;
+        };
+        float *base_positions = nullptr;
+        uint32_t *base_indices = nullptr;
+        size_t base_vertices = 0, base_count = 0;
+        if (!require(orca_session_export_object_mesh(edited.get(), 0, &base_positions, &base_vertices, &base_indices, &base_count) == 0,
+                     "export simplified topology")) return 4;
+        std::unique_ptr<float, decltype(&orca_free)> base_vertex_owner(base_positions, orca_free);
+        std::unique_ptr<uint32_t, decltype(&orca_free)> base_index_owner(base_indices, orca_free);
+        const double base_area = surface_area(base_positions, base_vertices, base_indices, base_count);
+        if (!require(base_area > 0 && base_count / 3 == size_t(facets), "mesh statistics match actual exported topology")) return 4;
         for (int kind = 0; kind < 4; ++kind) {
             int painted = 0;
-            if (!require(orca_session_paint_stats(edited.get(), 0, kind, 1, &painted) == 0 && painted > 0 && painted <= facets,
-                         "simplify remaps valid painting onto the reduced mesh")) return 4;
+            const int stats = orca_session_paint_stats(edited.get(), 0, kind, 1, &painted);
+            std::printf("Simplify painting kind=%d before=%d after=%d painted=%d\n", kind, before, facets, painted);
+            if (!require(stats == 0 && painted > 0, "simplify retains painting")) return 4;
+            float *positions = nullptr;
+            uint32_t *indices = nullptr;
+            size_t vertices = 0, count = 0;
+            if (!require(orca_session_export_paint_mesh(edited.get(), 0, kind, 1, &positions, &vertices, &indices, &count) == 0,
+                         "export remapped painting")) return 4;
+            std::unique_ptr<float, decltype(&orca_free)> vertex_owner(positions, orca_free);
+            std::unique_ptr<uint32_t, decltype(&orca_free)> index_owner(indices, orca_free);
+            const double painted_area = surface_area(positions, vertices, indices, count);
+            std::printf("Simplify painting area=%.4f mesh area=%.4f\n", painted_area, base_area);
+            // Painting has its own sub-triangulation and can legitimately exceed
+            // the base face count. Validate topology and coverage, not that count.
+            if (!require(count / 3 == size_t(painted) && painted_area > 0 &&
+                         std::fabs(painted_area - base_area) / base_area < 0.01,
+                         "remapped full painting covers the simplified mesh")) return 4;
         }
     }
     {
