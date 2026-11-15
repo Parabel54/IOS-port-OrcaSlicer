@@ -15,4 +15,14 @@ xcrun --sdk "$SDK" swiftc -typecheck -parse-as-library -swift-version 5 \
   "$ROOT/ios/OrcaSlicerApp/OrcaSlicerApp.swift" \
   "$ROOT/ios/OrcaSlicerApp/OrcaEngine.swift" \
   "$ROOT/ios/OrcaSlicerApp/PlateSceneView.swift" \
-  "$ROOT/ios/OrcaSlicerApp/ProcessOptions.swift"
+  "$ROOT/ios/OrcaSlicerApp/ProcessOptions.swift" \
+  "$ROOT/ios/OrcaSlicerApp/PrinterConnections.swift" \
+  "$ROOT/ios/OrcaSlicerApp/ConnectionsPanel.swift"
+
+# Run storage and credential-isolation checks with injected secrets on the Mac host.
+TEST_DIR="$(mktemp -d)"
+trap 'rm -rf "$TEST_DIR"' EXIT
+xcrun --sdk macosx swiftc -parse-as-library -swift-version 5 \
+  "$ROOT/ios/OrcaSlicerApp/PrinterConnections.swift" \
+  "$ROOT/ios/tests/printer_connections_smoke.swift" -o "$TEST_DIR/printer-connections"
+"$TEST_DIR/printer-connections"

@@ -49,6 +49,8 @@ class ProjectGenerationTests(unittest.TestCase):
         first = project.read_bytes()
         self.assertIn(b'ORCA_LINKED', first)
         self.assertIn(b'iphoneos*', first)
+        for source in (b'PrinterConnections.swift', b'ConnectionsPanel.swift'):
+            self.assertIn(source + b' in Sources', first)
         stale = self.root / 'ios/OrcaSlicerApp/Resources/profiles/stale.json'
         stale.write_text('{}')
         result = self.generate('iphoneos')

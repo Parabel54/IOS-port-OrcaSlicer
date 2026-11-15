@@ -16,6 +16,8 @@
 		7622C24F05724694A57FF5AF /* process_0.16mm_Fine.json in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000000A /* process_0.16mm_Fine.json */; };
 		714FBD10005643E49921539B /* profiles in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000000B /* profiles */; };
 		B75665EBD9984A01AAF5D2A2 /* calib in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000000D /* calib */; };
+		02C874951D9255BEA0228555 /* PrinterConnections.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000000E /* PrinterConnections.swift */; };
+		813CEBEA572C51708ACA02B1 /* ConnectionsPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000000F /* ConnectionsPanel.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -32,6 +34,8 @@
 		A1000000000000000000000B /* profiles */ = {isa = PBXFileReference; lastKnownFileType = folder; name = profiles; path = Resources/profiles; sourceTree = "<group>"; };
 		A1000000000000000000000D /* calib */ = {isa = PBXFileReference; lastKnownFileType = folder; name = calib; path = Resources/calib; sourceTree = "<group>"; };
 		08C6B202102448FF82C2AFE1 /* OrcaSlicer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OrcaSlicer.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A1000000000000000000000E /* PrinterConnections.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrinterConnections.swift; sourceTree = "<group>"; };
+		A1000000000000000000000F /* ConnectionsPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionsPanel.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -50,6 +54,8 @@
 				A10000000000000000000002 /* OrcaEngine.swift */,
 				A10000000000000000000008 /* PlateSceneView.swift */,
 				A1000000000000000000000C /* ProcessOptions.swift */,
+				A1000000000000000000000F /* ConnectionsPanel.swift */,
+				A1000000000000000000000E /* PrinterConnections.swift */,
 				A10000000000000000000003 /* Info.plist */,
 				A10000000000000000000004 /* Bridging-Header.h */,
 				A10000000000000000000006 /* OrcaSlicerLogo.png */,
@@ -153,6 +159,8 @@
 				F5D701F3F6A64A75B3859D69 /* OrcaEngine.swift in Sources */,
 				951D0BA3C945455EA139190F /* PlateSceneView.swift in Sources */,
 				143431BE0F474D7CB36C4F5E /* ProcessOptions.swift in Sources */,
+				813CEBEA572C51708ACA02B1 /* ConnectionsPanel.swift in Sources */,
+				02C874951D9255BEA0228555 /* PrinterConnections.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

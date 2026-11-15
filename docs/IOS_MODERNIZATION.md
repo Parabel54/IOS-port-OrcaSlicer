@@ -69,3 +69,11 @@ need review before claiming support for the minimum iOS 16 deployment target.
 | Release | Passing CI and unsigned app artifacts | Physical-device checks, signing, full regression coverage and distribution readiness |
 
 No completion percentage is assigned: historical checkboxes are not device or parity evidence.
+
+## Accounts and printer connections
+
+The Device page stores named Moonraker, OctoPrint and PrusaLink connections on the device. Connection metadata lives in preferences; each connection's API key lives in Keychain with device-only, unlocked access. Selecting another connection clears uploaded-file and job state. Uploads and control requests use the selected connection's key, including authenticated Moonraker hosts.
+
+The Orca Cloud button opens the official hosted portal in Safari Services. The browser owns its sign-in session; the app does not receive cloud tokens or report native account authentication. Native preset synchronization and vendor cloud printer binding remain unimplemented. Upstream Orca Cloud account services and vendor printer agents are separate interfaces; an Orca Cloud login does not establish a Bambu Cloud session.
+
+The printer web-interface button opens host dashboards, including web interfaces supplied by host-installed plugins. This does not install desktop Orca networking plugins. Those binaries target desktop platforms; iOS requires a compatible implementation built and signed into the app. Bambu Cloud/LAN networking and other vendor plugins still need individual ports and device testing.

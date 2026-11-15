@@ -40,6 +40,7 @@ private enum OrcaTheme {
 
 struct OrcaRootView: View {
     @StateObject private var engine = OrcaEngine()
+    @StateObject private var connections = PrinterConnections()
     @State private var showImporter = false
     @State private var importAppend = false
     @State private var showProcess = false
@@ -510,6 +511,12 @@ struct OrcaRootView: View {
                     .buttonStyle(.plain)
                 }
 
+                PrinterConnectionsPanel(connections: connections, address: printerHost,
+                                        kind: hostType.rawValue, apiKey: octoApiKey) { printer in
+                    selectPrinterConnection(printer)
+                }
+                .disabled(isConnecting || isJobBusy)
+
                 // Live temps from host
                 if !liveTempText.isEmpty || liveNozzleActual != nil {
                     VStack(alignment: .leading, spacing: 6) {
@@ -572,6 +579,9 @@ struct OrcaRootView: View {
                     }
                     ForEach(discoveredPrinters) { p in
                         Button {
+                            guard !isConnecting, !isJobBusy else { return }
+                            resetPrinterConnection()
+                            octoApiKey = ""
                             printerHost = p.urlString
                             if p.serviceType.contains("octoprint") {
                                 hostType = .octoprint
@@ -579,7 +589,6 @@ struct OrcaRootView: View {
                                 hostType = .moonraker
                             }
                             printerStatus = "Selected \(p.name)"
-                            Task { await connectPrinterHost() }
                         } label: {
                             HStack {
                                 VStack(alignment: .leading, spacing: 2) {
@@ -610,16 +619,8 @@ struct OrcaRootView: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                .onChange(of: hostType) { _ in
-                    printerStatus = "Not connected"
-                    jobState = ""
-                    jobMessage = ""
-                    lastUploadedFilename = nil
-                    liveNozzleActual = nil
-                    liveBedActual = nil
-                    liveTempText = ""
-                    statusPollTask?.cancel()
-                }
+                .disabled(isConnecting || isJobBusy)
+                .onChange(of: hostType) { _ in resetPrinterConnection() }
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text(
@@ -633,21 +634,27 @@ struct OrcaRootView: View {
                         hostType == .moonraker ? "http://printer.local"
                             : hostType == .prusalink ? "http://prusa.local"
                             : "http://octopi.local",
-                        text: $printerHost
+                        text: Binding(get: { printerHost }, set: { value in
+                            resetPrinterConnection()
+                            octoApiKey = ""
+                            printerHost = value
+                        })
                     )
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
+                        .disabled(isConnecting || isJobBusy)
                         .font(.system(size: 15, design: .monospaced))
                         .foregroundStyle(OrcaTheme.text)
                         .padding(12)
                         .background(OrcaTheme.elevated)
                         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    if hostType == .octoprint || hostType == .prusalink {
+                    if PrinterConnection.validatedURL(printerHost) != nil {
                         SecureField(
-                            hostType == .prusalink ? "API key (PrusaLink)" : "API key (OctoPrint)",
+                            "API key (optional)",
                             text: $octoApiKey
                         )
+                            .disabled(isConnecting || isJobBusy)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                             .font(.system(size: 14, design: .monospaced))
@@ -852,8 +859,36 @@ struct OrcaRootView: View {
         .frame(maxWidth: .infinity)
     }
 
+    private func resetPrinterConnection() {
+        statusPollTask?.cancel()
+        statusPollTask = nil
+        printerStatus = "Not connected"
+        lastUploadedFilename = nil
+        jobState = ""
+        jobMessage = ""
+        jobProgress = 0
+        liveNozzleActual = nil
+        liveNozzleTarget = nil
+        liveBedActual = nil
+        liveBedTarget = nil
+        liveTempText = ""
+    }
+
+    private func selectPrinterConnection(_ printer: PrinterConnection) {
+        guard !isConnecting, !isJobBusy,
+              let type = PrinterHostType(rawValue: printer.kind) else { return }
+        do {
+            let key = try connections.apiKey(for: printer)
+            resetPrinterConnection()
+            hostType = type
+            printerHost = printer.address
+            octoApiKey = key
+            printerStatus = "Selected \(printer.name)"
+        } catch { connections.message = error.localizedDescription }
+    }
+
     private func printerBaseURL() -> URL? {
-        URL(string: printerHost.trimmingCharacters(in: .whitespacesAndNewlines))
+        PrinterConnection.validatedURL(printerHost)
     }
 
     private func moonrakerBaseURL() -> URL? { printerBaseURL() }
@@ -893,7 +928,7 @@ struct OrcaRootView: View {
         }
     }
 
-    private func octoHeaders(for req: inout URLRequest) {
+    private func printerHeaders(for req: inout URLRequest) {
         let key = octoApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         if !key.isEmpty {
             req.setValue(key, forHTTPHeaderField: "X-Api-Key")
@@ -909,9 +944,11 @@ struct OrcaRootView: View {
         }
         let info = base.appendingPathComponent("server/info")
         var req = URLRequest(url: info)
+        printerHeaders(for: &req)
         req.timeoutInterval = 5
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
+            guard !Task.isCancelled else { return }
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             if code == 200 {
                 if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -943,9 +980,10 @@ struct OrcaRootView: View {
         }
         var req = URLRequest(url: base.appendingPathComponent("api/version"))
         req.timeoutInterval = 5
-        octoHeaders(for: &req)
+        printerHeaders(for: &req)
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
+            guard !Task.isCancelled else { return }
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             if code == 200 {
                 if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
@@ -998,6 +1036,7 @@ struct OrcaRootView: View {
         let uploadURL = base.appendingPathComponent("server/files/upload")
         let boundary = "OrcaBoundary\(UUID().uuidString)"
         var req = URLRequest(url: uploadURL)
+        printerHeaders(for: &req)
         req.httpMethod = "POST"
         req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         req.timeoutInterval = 60
@@ -1018,6 +1057,7 @@ struct OrcaRootView: View {
         req.httpBody = body
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
+            guard !Task.isCancelled else { return }
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             if (200...299).contains(code) {
                 // Prefer path returned by Moonraker; fall back to filename in gcodes/
@@ -1068,10 +1108,12 @@ struct OrcaRootView: View {
             return
         }
         var req = URLRequest(url: url)
+        printerHeaders(for: &req)
         req.httpMethod = "POST"
         req.timeoutInterval = 15
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
+            guard !Task.isCancelled else { return }
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             if (200...299).contains(code) {
                 jobState = "printing"
@@ -1098,6 +1140,7 @@ struct OrcaRootView: View {
         isJobBusy = true
         defer { isJobBusy = false }
         var req = URLRequest(url: base.appendingPathComponent("printer/print/cancel"))
+        printerHeaders(for: &req)
         req.httpMethod = "POST"
         req.timeoutInterval = 10
         do {
@@ -1133,9 +1176,11 @@ struct OrcaRootView: View {
         ]
         guard let url = comps?.url else { return }
         var req = URLRequest(url: url)
+        printerHeaders(for: &req)
         req.timeoutInterval = 8
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
+            guard !Task.isCancelled else { return }
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             guard (200...299).contains(code),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -1261,9 +1306,11 @@ struct OrcaRootView: View {
         ]
         guard let url = comps?.url else { return }
         var req = URLRequest(url: url)
+        printerHeaders(for: &req)
         req.timeoutInterval = 5
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
+            guard !Task.isCancelled else { return }
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             guard (200...299).contains(code),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -1280,9 +1327,10 @@ struct OrcaRootView: View {
         guard let base = printerBaseURL() else { return }
         var req = URLRequest(url: base.appendingPathComponent("api/printer"))
         req.timeoutInterval = 5
-        octoHeaders(for: &req)
+        printerHeaders(for: &req)
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
+            guard !Task.isCancelled else { return }
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             guard (200...299).contains(code),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -1450,7 +1498,7 @@ struct OrcaRootView: View {
         var req = URLRequest(url: uploadURL)
         req.httpMethod = "POST"
         req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        octoHeaders(for: &req)
+        printerHeaders(for: &req)
         req.timeoutInterval = 90
         guard let fileData = try? Data(contentsOf: gcode) else {
             printerStatus = "Could not read G-code file"
@@ -1472,6 +1520,7 @@ struct OrcaRootView: View {
         req.httpBody = body
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
+            guard !Task.isCancelled else { return }
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             if (200...299).contains(code) {
                 var remoteName = filename
@@ -1517,11 +1566,12 @@ struct OrcaRootView: View {
         var req = URLRequest(url: base.appendingPathComponent("api/job"))
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        octoHeaders(for: &req)
+        printerHeaders(for: &req)
         req.timeoutInterval = 15
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["command": "start"])
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
+            guard !Task.isCancelled else { return }
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             if (200...299).contains(code) {
                 jobState = "Printing"
@@ -1550,7 +1600,7 @@ struct OrcaRootView: View {
         var req = URLRequest(url: base.appendingPathComponent("api/job"))
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        octoHeaders(for: &req)
+        printerHeaders(for: &req)
         req.timeoutInterval = 10
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["command": "cancel"])
         do {
@@ -1575,9 +1625,10 @@ struct OrcaRootView: View {
         guard let base = printerBaseURL() else { return }
         var req = URLRequest(url: base.appendingPathComponent("api/job"))
         req.timeoutInterval = 8
-        octoHeaders(for: &req)
+        printerHeaders(for: &req)
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
+            guard !Task.isCancelled else { return }
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             guard (200...299).contains(code),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
