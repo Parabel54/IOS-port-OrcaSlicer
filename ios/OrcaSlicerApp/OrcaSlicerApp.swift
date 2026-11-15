@@ -76,6 +76,7 @@ struct OrcaRootView: View {
     @State private var didTestImport = false
     @State private var processingDocument = false
     @State private var cloudPresetRevision: UUID?
+    @State private var operationError: String?
     @State private var showProcess = false
     @State private var showPlateInspector = false
     @State private var showPreviewControls = false
@@ -409,9 +410,12 @@ struct OrcaRootView: View {
         }
         .onChange(of: isSlicing) { _ in importPendingDocuments(); importCloudPresetsIfReady() }
         .onChange(of: editingModalPresented) { _ in importPendingDocuments(); importCloudPresetsIfReady() }
-        .alert("Import failed", isPresented: Binding(get: { !documents.errorMessage.isEmpty }, set: { if !$0 { documents.errorMessage = "" } })) {
-            Button("OK", role: .cancel) { documents.errorMessage = "" }
-        } message: { Text(documents.errorMessage) }
+        .alert(operationError == nil ? "Import failed" : "Operation failed", isPresented: Binding(
+            get: { operationError != nil || !documents.errorMessage.isEmpty },
+            set: { if !$0 { operationError = nil; documents.errorMessage = "" } }
+        )) {
+            Button("OK", role: .cancel) { operationError = nil; documents.errorMessage = "" }
+        } message: { Text(operationError ?? documents.errorMessage) }
     }
 
     private func headerBar(inlineInspector: Bool) -> AnyView {
@@ -3307,6 +3311,8 @@ struct OrcaRootView: View {
                 isSlicing = false
                 if engine.gcodeURL != nil {
                     mainTab = .preview
+                } else if engine.slicePhase != "Cancelled" {
+                    operationError = msg
                 }
             }
         }
