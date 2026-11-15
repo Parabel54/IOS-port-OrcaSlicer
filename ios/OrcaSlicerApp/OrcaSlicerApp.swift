@@ -1211,6 +1211,7 @@ struct OrcaRootView: View {
                 printerStatus = "Job · \(jobState) · \(String(format: "%.0f%%", jobProgress * 100))"
             }
         } catch {
+            guard !Task.isCancelled else { return }
             jobMessage = error.localizedDescription
         }
     }
@@ -1655,6 +1656,7 @@ struct OrcaRootView: View {
                 printerStatus = "Octo · \(jobState) · \(String(format: "%.0f%%", jobProgress * 100))"
             }
         } catch {
+            guard !Task.isCancelled else { return }
             jobMessage = error.localizedDescription
         }
     }
