@@ -117,7 +117,15 @@ struct PlateSceneView: UIViewRepresentable {
         let focus = view.unprojectPoint(SCNVector3(Float(anchor.x), Float(anchor.y), depth))
         coordinator.zoom(scale: 1.5, view: view, anchor: anchor)
         let projected = view.projectPoint(focus)
-        return abs(projected.x - Float(anchor.x)) < 0.5 && abs(projected.y - Float(anchor.y)) < 0.5
+        guard abs(projected.x - Float(anchor.x)) < 0.5,
+              abs(projected.y - Float(anchor.y)) < 0.5 else { return false }
+        let finalTarget = view.defaultCameraController.target
+        camera.position = SCNVector3(finalTarget.x, finalTarget.y + 100, finalTarget.z + 0.01)
+        camera.look(at: finalTarget)
+        let top = camera.simdPosition
+        coordinator.cameraDrag(delta: .zero, view: view, mode: .orbit)
+        coordinator.cameraDrag(delta: CGPoint(x: 10, y: 0), view: view, mode: .orbit)
+        return abs(camera.simdPosition.y - top.y) < 0.001
 
     }
 
@@ -573,7 +581,11 @@ struct PlateSceneView: UIViewRepresentable {
                 let elevation = asinf(min(max(offset.y / distance, -1), 1))
                 let requested = Float(delta.y / max(view.bounds.height, 1)) * Float.pi
                 let limit = Float.pi * 0.47
-                let next = min(max(elevation + requested, -limit), limit)
+                // Preserve an existing top/bottom view: clamping must prevent
+                // moving farther past a pole, never snap a valid saved framing.
+                let lower = min(-limit, elevation)
+                let upper = max(limit, elevation)
+                let next = min(max(elevation + requested, lower), upper)
                 let right = yaw.act(camera.simdWorldRight)
                 let pitch = simd_quatf(angle: -(next - elevation), axis: right)
                 let rotation = pitch * yaw
