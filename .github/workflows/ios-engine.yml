@@ -23,6 +23,9 @@ jobs:
   build:
     runs-on: macos-15
     timeout-minutes: 360
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.cache/ios-ccache-${{ matrix.sdk }}
+      ORCA_IOS_COMPILER_LAUNCHER: ccache
     strategy:
       fail-fast: false
       matrix:
@@ -36,7 +39,7 @@ jobs:
       - name: Check Swift and C interface
         run: bash scripts/check_ios_swift.sh "${{ matrix.sdk }}"
       - name: Install build tools
-        run: brew install cmake autoconf automake libtool pkg-config
+        run: brew install cmake autoconf automake libtool pkg-config ccache
       - name: Restore SDK dependencies
         id: deps-cache
         uses: actions/cache/restore@v4
@@ -51,8 +54,24 @@ jobs:
         with:
           path: deps/build-ios-${{ matrix.sdk }}-arm64
           key: ${{ steps.deps-cache.outputs.cache-primary-key }}
+      - name: Restore compiler cache
+        id: compiler-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ios-ccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.sdk }}-${{ github.sha }}
+          restore-keys: ios-ccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.sdk }}-
+      - name: Bound compiler cache
+        run: ccache --max-size 1G
       - name: Build and bundle engine
         run: bash scripts/build_ios_engine_after_deps.sh "${{ matrix.sdk }}" arm64
+      - name: Save compiler cache
+        if: always() && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
       - name: Require linked engine and current profiles
         run: python3 ios/generate_xcodeproj.py --require-engine "${{ matrix.sdk }}"
       - name: Compile unsigned app
