@@ -21,7 +21,7 @@ PYRUN
 SDK_PATH="$(xcrun --sdk iphonesimulator --show-sdk-path)"
 TEST_DIR="$ROOT/build_logs/simulator-smoke"
 mkdir -p "$TEST_DIR"
-python3 "$ROOT/scripts/make_ios_3mf_fixture.py" "$TEST_DIR/orca-project.3mf"
+python3 "$ROOT/scripts/make_ios_3mf_fixture.py" "$TEST_DIR/orca-project.3mf" --padding-mib 100
 xcrun --sdk iphonesimulator clang++ -std=c++17 -arch arm64 \
   -isysroot "$SDK_PATH" -mios-simulator-version-min=16.0 \
   -I "$ROOT/src/ios" "$ROOT/ios/tests/engine_smoke.cpp" \

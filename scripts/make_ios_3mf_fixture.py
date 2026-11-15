@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Create a minimal Orca-format 3MF for the native mobile import regression."""
+import argparse
 import json
 from pathlib import Path
-import sys
 import zipfile
 
 
-def create_fixture(path):
+def create_fixture(path, padding_mib=0):
     vertices = [(0, 0, 0), (20, 0, 0), (20, 20, 0), (0, 20, 0),
                 (0, 0, 20), (20, 0, 20), (20, 20, 20), (0, 20, 20)]
     triangles = [(0, 2, 1), (0, 3, 2), (4, 5, 6), (4, 6, 7),
@@ -24,7 +24,20 @@ def create_fixture(path):
         archive.writestr('_rels/.rels', '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/></Relationships>')
         archive.writestr('3D/3dmodel.model', model)
         archive.writestr('Metadata/project_settings.config', json.dumps({'layer_height': '0.16'}))
+        # Exercise document staging and ZIP offsets beyond 100 MB without a
+        # huge mesh or a huge in-memory buffer. This is not a mesh stress test.
+        if padding_mib:
+            padding = zipfile.ZipInfo('Metadata/import-regression.bin')
+            padding.compress_type = zipfile.ZIP_STORED
+            with archive.open(padding, 'w') as stream:
+                chunk = bytes(1024 * 1024)
+                for _ in range(padding_mib):
+                    stream.write(chunk)
 
 
 if __name__ == '__main__':
-    create_fixture(Path(sys.argv[1]))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('path', type=Path)
+    parser.add_argument('--padding-mib', type=int, choices=range(0, 101), default=0)
+    arguments = parser.parse_args()
+    create_fixture(arguments.path, arguments.padding_mib)
