@@ -18,6 +18,8 @@
 		B75665EBD9984A01AAF5D2A2 /* calib in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000000D /* calib */; };
 		02C874951D9255BEA0228555 /* PrinterConnections.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000000E /* PrinterConnections.swift */; };
 		813CEBEA572C51708ACA02B1 /* ConnectionsPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000000F /* ConnectionsPanel.swift */; };
+		E8A18B52768B53BAB1A690B8 /* StartupRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000010 /* StartupRecovery.swift */; };
+		295B927B229952BE9F1A6DAA /* StartupRecoveryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000011 /* StartupRecoveryView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -36,6 +38,8 @@
 		08C6B202102448FF82C2AFE1 /* OrcaSlicer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OrcaSlicer.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A1000000000000000000000E /* PrinterConnections.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrinterConnections.swift; sourceTree = "<group>"; };
 		A1000000000000000000000F /* ConnectionsPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionsPanel.swift; sourceTree = "<group>"; };
+		A10000000000000000000010 /* StartupRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StartupRecovery.swift; sourceTree = "<group>"; };
+		A10000000000000000000011 /* StartupRecoveryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StartupRecoveryView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -54,6 +58,8 @@
 				A10000000000000000000002 /* OrcaEngine.swift */,
 				A10000000000000000000008 /* PlateSceneView.swift */,
 				A1000000000000000000000C /* ProcessOptions.swift */,
+				A10000000000000000000011 /* StartupRecoveryView.swift */,
+				A10000000000000000000010 /* StartupRecovery.swift */,
 				A1000000000000000000000F /* ConnectionsPanel.swift */,
 				A1000000000000000000000E /* PrinterConnections.swift */,
 				A10000000000000000000003 /* Info.plist */,
@@ -159,6 +165,8 @@
 				F5D701F3F6A64A75B3859D69 /* OrcaEngine.swift in Sources */,
 				951D0BA3C945455EA139190F /* PlateSceneView.swift in Sources */,
 				143431BE0F474D7CB36C4F5E /* ProcessOptions.swift in Sources */,
+				295B927B229952BE9F1A6DAA /* StartupRecoveryView.swift in Sources */,
+				E8A18B52768B53BAB1A690B8 /* StartupRecovery.swift in Sources */,
 				813CEBEA572C51708ACA02B1 /* ConnectionsPanel.swift in Sources */,
 				02C874951D9255BEA0228555 /* PrinterConnections.swift in Sources */,
 			);

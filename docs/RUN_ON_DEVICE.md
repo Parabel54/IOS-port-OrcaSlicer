@@ -163,3 +163,13 @@ Official libslic3r (C++ — upstream engine sources)
 This is a **port host** for the official engine, not a reimplementation of Arachne, supports, or G-code export in Swift.
 
 **License:** same as upstream — **AGPL-3.0**. Review obligations before any App Store or closed distribution.
+
+### App closes during startup
+
+A startup marker is written before entering the native engine. If startup is interrupted, reopen the app to reach **Startup recovery** before the engine is constructed. Choose **Open without system profiles** to bypass profile loading, or **Rebuild profile cache and retry** to recreate the generated system profiles.
+
+Rebuilding moves only `Documents/OrcaSlicer/system` into `Documents/OrcaSlicer/Recovered system profiles/<unique ID>`. Projects, plates, user presets, saved printer connections and Keychain credentials remain in place. A changed bundled profile revision also replaces that generated mirror. Profile-cache completion is recorded only after profile loading succeeds.
+
+The iOS resource generator excludes desktop executables, libraries and `.opc` profile caches. The simulator package audit rejects Windows/ELF binaries, desktop caches, wrong-platform Mach-O binaries and unexpected dynamic dependencies. These checks do not diagnose every possible device crash.
+
+If the app closes before displaying recovery, or still closes with system profiles bypassed, collect its crash report from **Settings → Privacy & Security → Analytics & Improvements → Analytics Data**. Look for `OrcaSlicer` or a matching `JetsamEvent` and share the `.ips` report. It can distinguish a signing or dynamic-loader failure, an exception and an OS memory termination. Deleting the app is not required to try recovery and can remove its local projects.

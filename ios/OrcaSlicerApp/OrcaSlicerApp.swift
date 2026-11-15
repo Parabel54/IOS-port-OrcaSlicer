@@ -13,7 +13,7 @@ import UIKit
 struct OrcaSlicerApp: App {
     var body: some Scene {
         WindowGroup {
-            OrcaRootView()
+            StartupRecoveryView()
                 .preferredColorScheme(.dark)
         }
     }
@@ -39,7 +39,11 @@ private enum OrcaTheme {
 // MARK: - Root
 
 struct OrcaRootView: View {
-    @StateObject private var engine = OrcaEngine()
+    @StateObject private var engine: OrcaEngine
+
+    init(loadSystemProfiles: Bool = true) {
+        _engine = StateObject(wrappedValue: OrcaEngine(loadSystemProfiles: loadSystemProfiles))
+    }
     @StateObject private var connections = PrinterConnections()
     @State private var showImporter = false
     @State private var importAppend = false
@@ -165,6 +169,11 @@ struct OrcaRootView: View {
                 OrcaTheme.bg.ignoresSafeArea()
                 VStack(spacing: 0) {
                     headerBar
+                    if !engine.automaticProfileLoading {
+                        Text("Recovery mode: system profiles are not loaded. Reopen the app to retry startup.")
+                            .font(.caption)
+                            .padding(8)
+                    }
                     tabBar
                     plateStage
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -2382,7 +2391,7 @@ struct OrcaRootView: View {
                 }
             }
             .task {
-                if engine.vendorList.isEmpty && !engine.presetsLoading {
+                if engine.automaticProfileLoading && engine.vendorList.isEmpty && !engine.presetsLoading {
                     await engine.loadAllSystemPresets()
                 }
             }

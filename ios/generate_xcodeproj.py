@@ -3,6 +3,7 @@
 from pathlib import Path
 import uuid
 import argparse
+import hashlib
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--require-engine", choices=("iphoneos", "iphonesimulator"),
@@ -35,7 +36,7 @@ def uid(key):
 
 IDs = {k: uid(k) for k in [
     "project", "target", "sources", "resources", "frameworks", "product",
-    "swift_app", "swift_engine", "swift_plate", "swift_process", "swift_connections", "swift_connections_panel", "logo", "assets",
+    "swift_app", "swift_engine", "swift_plate", "swift_process", "swift_connections", "swift_connections_panel", "swift_startup", "swift_startup_view", "logo", "assets",
     "process_profile", "process_profile_fine", "profiles_folder", "calib_folder", "scenekit_fw",
     "config_list_proj", "config_list_tgt",
     "debug_proj", "release_proj", "debug_tgt", "release_tgt",
@@ -46,11 +47,17 @@ IDs = {k: uid(k) for k in [
 PROFILES_DIR = ROOT / "OrcaSlicerApp" / "Resources" / "profiles"
 # Keep profiles in sync with the engine revision, including upstream removals.
 import shutil
+
+# Desktop preset caches and native executables are not portable iOS resources.
+def ignore_desktop_files(directory, names):
+    excluded = {".opc", ".dll", ".exe", ".so", ".dylib", ".pdb", ".lib", ".a"}
+    return [name for name in names if Path(name).suffix.lower() in excluded or ".so." in name.lower()]
+
 if (REPO / "resources" / "profiles").is_dir():
     PROFILES_DIR.parent.mkdir(parents=True, exist_ok=True)
     if PROFILES_DIR.exists():
         shutil.rmtree(PROFILES_DIR)
-    shutil.copytree(REPO / "resources" / "profiles", PROFILES_DIR)
+    shutil.copytree(REPO / "resources" / "profiles", PROFILES_DIR, ignore=ignore_desktop_files)
 has_profiles = PROFILES_DIR.is_dir() and any(PROFILES_DIR.glob("*.json"))
 if args.require_engine and not has_profiles:
     parser.error("Official resources/profiles must be present for an engine build")
@@ -63,7 +70,7 @@ if _SRC_CALIB.is_dir():
     CALIB_DIR.parent.mkdir(parents=True, exist_ok=True)
     if CALIB_DIR.exists():
         _shutil.rmtree(CALIB_DIR)
-    _shutil.copytree(_SRC_CALIB, CALIB_DIR)
+    _shutil.copytree(_SRC_CALIB, CALIB_DIR, ignore=ignore_desktop_files)
     print("Synced calib →", CALIB_DIR)
 has_calib = CALIB_DIR.is_dir() and any(CALIB_DIR.rglob("*"))
 
@@ -75,7 +82,7 @@ for folder in ("info", "flush", "filament_mixing"):
     if source.is_dir():
         if destination.exists():
             shutil.rmtree(destination)
-        shutil.copytree(source, destination)
+        shutil.copytree(source, destination, ignore=ignore_desktop_files)
         engine_resource_folders.append(folder)
     elif args.require_engine:
         parser.error(f"Missing required engine resources: {source}")
@@ -100,6 +107,16 @@ ios_ld = (
     "-framework SceneKit -framework UIKit -framework Network"
 )
 
+
+# A changed profile tree invalidates only the generated on-device system mirror.
+profile_digest = hashlib.sha256()
+for profile in sorted(PROFILES_DIR.rglob("*")):
+    if profile.is_file():
+        profile_digest.update(profile.relative_to(PROFILES_DIR).as_posix().encode())
+        profile_digest.update(b"\0")
+        profile_digest.update(profile.read_bytes())
+        profile_digest.update(b"\0")
+PROFILE_REVISION = profile_digest.hexdigest()
 
 # Team for Automatic signing (override with ORCA_IOS_DEVELOPMENT_TEAM).
 # Empty → Xcode shows "Signing requires a development team" until set in UI.
@@ -137,6 +154,7 @@ def tgt_settings(name: str) -> str:
         "\t\t\t\t);",
         "\t\t\t\tMACOSX_DEPLOYMENT_TARGET = 13.0;",
         "\t\t\t\tMARKETING_VERSION = 2.5.1;",
+        f"\t\t\t\tORCA_PROFILE_REVISION = {PROFILE_REVISION};",
         # Engine bundles are arm64-only (Apple Silicon). Exclude x86_64 so Xcode
         # does not try to link Intel-sim slices that do not exist → linker fail.
         '\t\t\t\t"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = "x86_64 i386";',
@@ -225,6 +243,8 @@ pbx = f'''// !$*UTF8*$!
 		{IDs["swift_engine"]} /* OrcaEngine.swift in Sources */ = {{isa = PBXBuildFile; fileRef = A10000000000000000000002 /* OrcaEngine.swift */; }};
 		{IDs["swift_plate"]} /* PlateSceneView.swift in Sources */ = {{isa = PBXBuildFile; fileRef = A10000000000000000000008 /* PlateSceneView.swift */; }};
 		{IDs["swift_process"]} /* ProcessOptions.swift in Sources */ = {{isa = PBXBuildFile; fileRef = A1000000000000000000000C /* ProcessOptions.swift */; }};
+		{IDs["swift_startup_view"]} /* StartupRecoveryView.swift in Sources */ = {{isa = PBXBuildFile; fileRef = A10000000000000000000011 /* StartupRecoveryView.swift */; }};
+		{IDs["swift_startup"]} /* StartupRecovery.swift in Sources */ = {{isa = PBXBuildFile; fileRef = A10000000000000000000010 /* StartupRecovery.swift */; }};
 		{IDs["swift_connections_panel"]} /* ConnectionsPanel.swift in Sources */ = {{isa = PBXBuildFile; fileRef = A1000000000000000000000F /* ConnectionsPanel.swift */; }};
 		{IDs["swift_connections"]} /* PrinterConnections.swift in Sources */ = {{isa = PBXBuildFile; fileRef = A1000000000000000000000E /* PrinterConnections.swift */; }};
 		{IDs["logo"]} /* OrcaSlicerLogo.png in Resources */ = {{isa = PBXBuildFile; fileRef = A10000000000000000000006 /* OrcaSlicerLogo.png */; }};
@@ -244,6 +264,8 @@ pbx = f'''// !$*UTF8*$!
 		A10000000000000000000007 /* Assets.xcassets */ = {{isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; }};
 		A10000000000000000000008 /* PlateSceneView.swift */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlateSceneView.swift; sourceTree = "<group>"; }};
 		A1000000000000000000000C /* ProcessOptions.swift */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessOptions.swift; sourceTree = "<group>"; }};
+		A10000000000000000000011 /* StartupRecoveryView.swift */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StartupRecoveryView.swift; sourceTree = "<group>"; }};
+		A10000000000000000000010 /* StartupRecovery.swift */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StartupRecovery.swift; sourceTree = "<group>"; }};
 		A1000000000000000000000F /* ConnectionsPanel.swift */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionsPanel.swift; sourceTree = "<group>"; }};
 		A1000000000000000000000E /* PrinterConnections.swift */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrinterConnections.swift; sourceTree = "<group>"; }};
 		A10000000000000000000009 /* process_0.20mm_Standard.json */ = {{isa = PBXFileReference; lastKnownFileType = text.json; path = process_0.20mm_Standard.json; sourceTree = "<group>"; }};
@@ -269,6 +291,8 @@ pbx = f'''// !$*UTF8*$!
 				A10000000000000000000002 /* OrcaEngine.swift */,
 				A10000000000000000000008 /* PlateSceneView.swift */,
 				A1000000000000000000000C /* ProcessOptions.swift */,
+				A10000000000000000000011 /* StartupRecoveryView.swift */,
+				A10000000000000000000010 /* StartupRecovery.swift */,
 				A1000000000000000000000F /* ConnectionsPanel.swift */,
 				A1000000000000000000000E /* PrinterConnections.swift */,
 				A10000000000000000000003 /* Info.plist */,
@@ -374,6 +398,8 @@ pbx = f'''// !$*UTF8*$!
 				{IDs["swift_engine"]} /* OrcaEngine.swift in Sources */,
 				{IDs["swift_plate"]} /* PlateSceneView.swift in Sources */,
 				{IDs["swift_process"]} /* ProcessOptions.swift in Sources */,
+				{IDs["swift_startup_view"]} /* StartupRecoveryView.swift in Sources */,
+				{IDs["swift_startup"]} /* StartupRecovery.swift in Sources */,
 				{IDs["swift_connections_panel"]} /* ConnectionsPanel.swift in Sources */,
 				{IDs["swift_connections"]} /* PrinterConnections.swift in Sources */,
 			);

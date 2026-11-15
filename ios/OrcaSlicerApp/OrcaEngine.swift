@@ -153,19 +153,30 @@ final class OrcaEngine: ObservableObject {
         #endif
     }
 
-    init() {
+    let automaticProfileLoading: Bool
+
+    init(loadSystemProfiles: Bool = true) {
+        automaticProfileLoading = loadSystemProfiles
         #if ORCA_LINKED
         let res = Bundle.main.resourcePath
         session = orca_session_create(res)
         if session == nil {
             lastMessage = "orca_session_create failed"
+            StartupRecovery().finish()
         } else {
             lastMessage = "Engine ready (official libslic3r)"
             applyDefaultFFF()
             // Writable data dir for installed system vendor trees
-            configureDataDir()
-            // Kick off full system profile install+load in background
-            Task { await loadAllSystemPresets() }
+            guard configureDataDir() else {
+                StartupRecovery().finish()
+                return
+            }
+            if loadSystemProfiles {
+                Task { await loadAllSystemPresets() }
+            } else {
+                lastMessage = "Recovery mode: engine ready without system profiles"
+                StartupRecovery().finish()
+            }
         }
         // Free heavy preview caches under OS memory pressure (full profile tree is large).
         NotificationCenter.default.addObserver(
@@ -177,6 +188,7 @@ final class OrcaEngine: ObservableObject {
         }
         #else
         lastMessage = "Build with ORCA_LINKED + liborca_engine.a"
+        StartupRecovery().finish()
         #endif
     }
 
@@ -200,7 +212,7 @@ final class OrcaEngine: ObservableObject {
         gcodePathNode = nil
         gcodeGeometry = nil
         gcodeURL = nil
-        if let s = session {
+        if let s = session, !presetsLoading, !sliceRunning {
             orca_session_purge_option_caches(s)
         }
         lastMessage = "Freed preview/settings caches (memory pressure)"
@@ -225,13 +237,20 @@ final class OrcaEngine: ObservableObject {
     }
 
     #if ORCA_LINKED
-    private func configureDataDir() {
-        guard let s = session else { return }
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
-        let data = (docs ?? FileManager.default.temporaryDirectory)
-            .appendingPathComponent("OrcaSlicer", isDirectory: true)
-        try? FileManager.default.createDirectory(at: data, withIntermediateDirectories: true)
-        _ = data.path.withCString { orca_session_set_data_dir(s, $0) }
+    private func configureDataDir() -> Bool {
+        guard let s = session else { return false }
+        let data = StartupRecovery().dataDirectory
+        do {
+            try FileManager.default.createDirectory(at: data, withIntermediateDirectories: true)
+            guard data.path.withCString({ orca_session_set_data_dir(s, $0) }) == 0 else {
+                lastMessage = "Could not configure writable engine storage"
+                return false
+            }
+            return true
+        } catch {
+            lastMessage = "Could not create engine storage: \(error.localizedDescription)"
+            return false
+        }
     }
     #endif
 
@@ -242,6 +261,15 @@ final class OrcaEngine: ObservableObject {
         guard let s = session else { return }
         if presetsLoaded || presetsLoading { return }
         presetsLoading = true
+        let recovery = StartupRecovery()
+        recovery.begin()
+        defer {
+            if presetsLoaded {
+                do { try recovery.profilesLoaded() }
+                catch { lastMessage = "Profiles loaded, but cache metadata could not be saved: \(error.localizedDescription)" }
+            }
+            recovery.finish()
+        }
         lastMessage = "Loading all system profiles…"
         let sessionBits = UInt(bitPattern: s)
         let rc = await Task.detached(priority: .userInitiated) {
