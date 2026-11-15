@@ -2536,8 +2536,8 @@ struct OrcaRootView: View {
     }
 
     private var objectSettingsSheet: AnyView {
-        AnyView(let idx = engine.selectedObjectIndex >= 0 ? engine.selectedObjectIndex : 0
-        return NavigationStack {
+        let idx = engine.selectedObjectIndex >= 0 ? engine.selectedObjectIndex : 0
+        return AnyView(NavigationStack {
             List {
                 Section("Object \(idx + 1)") {
                     labeled("Name", engine.objectNames.indices.contains(idx) ? engine.objectNames[idx] : "—")
