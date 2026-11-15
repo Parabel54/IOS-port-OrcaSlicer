@@ -21,6 +21,7 @@
 #include <nlohmann/json.hpp>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <atomic>
 #include <string>
 
@@ -604,45 +605,49 @@ int orca_session_slice_to_gcode(orca_session_t *s, const char *gcode_out_path)
             s->set_error("export_gcode returned empty path");
             return -4;
         }
-        // Use the same interpreted motion as the desktop viewer, including arcs,
-        // extrusion modes and coordinate resets. Bound mobile preview memory while
-        // sampling the entire job, rather than truncating its later layers.
-        auto visible_move = [](const GCodeProcessorResult::MoveVertex &move) {
-            return !move.internal_only &&
-                (move.type == EMoveType::Extrude || move.type == EMoveType::Travel);
-        };
-        for (size_t i = 1; i < result.moves.size(); ++i)
-            if (visible_move(result.moves[i]))
-                ++s->preview_total_segments;
-        constexpr size_t preview_budget = 60000;
-        s->preview_segments.reserve(std::min(preview_budget, s->preview_total_segments));
-        size_t ordinal = 0;
-        size_t previous_slot = std::numeric_limits<size_t>::max();
+        // Preserve the desktop processor's complete motion and event stream.
+        // SceneKit batches these into shared-material geometry on the Swift side;
+        // dropping moves here leaves holes and can erase whole fine-detail layers.
+        std::unordered_map<unsigned int, float> layer_times;
+        for (const auto &move : result.moves)
+            layer_times[move.layer_id] += move.time[static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal)];
+        s->preview_segments.reserve(result.moves.size());
         Vec3f previous_position = Vec3f::Zero();
         if (!result.moves.empty())
             previous_position = result.moves.front().position;
         for (size_t i = 1; i < result.moves.size(); ++i) {
             const auto &move = result.moves[i];
-            // Speed-analysis points are not physical G-code endpoints. Ignoring
-            // them must not shorten the next visible segment.
+            // Internal speed-analysis points are not physical endpoints.
             if (move.internal_only)
                 continue;
             const Vec3f start = previous_position;
-            previous_position = move.position;
-            if (!visible_move(move))
+            if (move.type == EMoveType::Extrude || move.type == EMoveType::Travel || move.type == EMoveType::Wipe)
+                previous_position = move.position;
+            if (move.type == EMoveType::Noop)
                 continue;
-            const size_t slot = s->preview_total_segments <= preview_budget ? ordinal :
-                size_t(double(ordinal) * (preview_budget - 1) / (s->preview_total_segments - 1));
-            ++ordinal;
-            if (slot == previous_slot)
-                continue;
-            previous_slot = slot;
             const auto &end = move.position;
-            const bool travel = move.type == EMoveType::Travel;
+            const bool extrusion = move.type == EMoveType::Extrude;
+            uint32_t rgba = 0x009688ff;
+            if (size_t(move.cp_color_id) < result.extruder_colors.size()) {
+                const auto &hex = result.extruder_colors[move.cp_color_id];
+                if (hex.size() == 7 && hex.front() == '#') {
+                    char *end_hex = nullptr;
+                    const auto rgb = std::strtoul(hex.c_str() + 1, &end_hex, 16);
+                    if (end_hex == hex.c_str() + hex.size())
+                        rgba = (uint32_t(rgb) << 8) | 0xff;
+                }
+            }
             s->preview_segments.push_back({start.x(), start.y(), start.z(),
-                end.x(), end.y(), end.z(), travel ? 0.f : move.width,
-                move.feedrate * 60.f, int(move.extrusion_role), travel ? 1 : 0, travel ? 0.f : move.height});
+                end.x(), end.y(), end.z(), extrusion ? move.width : 0.f,
+                move.feedrate * 60.f, int(move.extrusion_role), extrusion ? 0 : 1,
+                extrusion ? move.height : 0.f, move.actual_feedrate,
+                move.volumetric_rate(), move.actual_volumetric_rate(),
+                move.fan_speed, move.temperature, move.pressure_advance,
+                move.acceleration, move.jerk, layer_times[move.layer_id],
+                int(move.extruder_id), int(move.cp_color_id), int(move.type),
+                move.layer_id, move.gcode_id, rgba});
         }
+        s->preview_total_segments = s->preview_segments.size();
         // Capture official GCodeProcessor statistics for UI
         s->last_time_sec = result.print_statistics.modes[
             static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal)].time;
@@ -2845,10 +2850,18 @@ int orca_session_mesh_stats(
     s->clear_error();
     try {
         TriangleMeshStats st;
+        size_t triangle_count = 0;
+        auto accumulate = [&](const ModelObject &object) {
+            st = st.merge(object.get_object_stl_stats());
+            // get_object_stl_stats aggregates repair/volume statistics, but does
+            // not populate number_of_facets. Read the actual topology instead.
+            for (const ModelVolume *volume : object.volumes)
+                if (volume) triangle_count += volume->mesh().facets_count();
+        };
         if (index < 0) {
             for (ModelObject *obj : s->model.objects) {
                 if (!obj) continue;
-                st = st.merge(obj->get_object_stl_stats());
+                accumulate(*obj);
             }
         } else {
             if (index >= int(s->model.objects.size()))
@@ -2856,9 +2869,9 @@ int orca_session_mesh_stats(
             ModelObject *obj = s->model.objects[size_t(index)];
             if (!obj)
                 return -2;
-            st = obj->get_object_stl_stats();
+            accumulate(*obj);
         }
-        if (facets) *facets = int(st.number_of_facets);
+        if (facets) *facets = int(triangle_count);
         if (open_edges) *open_edges = st.open_edges;
         if (parts) *parts = st.number_of_parts;
         if (volume_mm3) *volume_mm3 = st.volume;

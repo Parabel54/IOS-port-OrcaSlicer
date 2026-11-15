@@ -56,14 +56,13 @@ final class OrcaEngine: ObservableObject {
     @Published var gcodeZMax: Float = 20
     /// Assembly explode factor (0 = collapsed layout)
     @Published var explodeFactor: Float = 0
-    /// Preview feature toggles (wall / infill / support / travel / other)
-    @Published var previewShowWall = true
-    @Published var previewShowInfill = true
-    @Published var previewShowSupport = true
-    @Published var previewShowTravel = false
-    @Published var previewShowOther = true
-    /// Color toolpaths by feature type, height, or feedrate
+    @Published var previewHiddenTools: Set<Int> = []
+    @Published var previewHiddenFilaments: Set<Int> = []
+    @Published var previewHiddenFeatures: Set<String> = []
+    @Published var previewEnabledMoves: Set<GCodePathGeometry.MoveKind> = [.extrude]
     @Published var previewColorMode: GCodePathGeometry.ColorMode = .feature
+    @Published var previewThroughMove = Int.max
+    @Published private(set) var previewBuilding = false
 
     // MARK: System presets (all vendors / printers / process / filament)
     @Published private(set) var startupFinished = false
@@ -208,6 +207,9 @@ final class OrcaEngine: ObservableObject {
     /// Results belong to one exact model/configuration and cannot survive an edit.
     private func invalidateSlice() {
         previewRefreshTask?.cancel()
+        previewBuildTask?.cancel()
+        previewGeneration = UUID()
+        previewBuilding = false
         gcodeURL = nil
         gcodeGeometry = nil
         previewLayerHeights = []
@@ -224,6 +226,9 @@ final class OrcaEngine: ObservableObject {
     /// Drop G-code preview + settings-browser caches. Model mesh kept for prepare.
     func handleMemoryWarning() {
         previewRefreshTask?.cancel()
+        previewBuildTask?.cancel()
+        previewGeneration = UUID()
+        previewBuilding = false
         #if ORCA_LINKED
         gcodePathNode = nil
         gcodeGeometry = nil
@@ -1068,32 +1073,37 @@ final class OrcaEngine: ObservableObject {
         }
     }
 
-    /// Rebuild G-code SceneKit node from geometry filtered by min/max Z clip + feature toggles
+    private var previewBuildTask: Task<SCNNode, Never>?
+    private var previewGeneration = UUID()
+
+    /// Build CPU geometry away from UIKit's event/termination thread. A cancelled
+    /// slider build must never replace a newer result or a different project's slice.
     func applyPreviewLayer() {
+        previewBuildTask?.cancel()
+        let generation = UUID()
+        previewGeneration = generation
         guard let geo = gcodeGeometry else {
             gcodePathNode = nil
+            previewBuilding = false
             return
         }
-        var groups = Set<GCodePathGeometry.FeatureGroup>()
-        if previewShowWall { groups.insert(.wall) }
-        if previewShowInfill { groups.insert(.infill) }
-        if previewShowSupport { groups.insert(.support) }
-        if previewShowTravel { groups.insert(.travel) }
-        if previewShowOther { groups.insert(.other) }
-        // Clamp min ≤ max
-        let lo = min(previewMinZ, previewMaxZ)
-        let hi = max(previewMinZ, previewMaxZ)
-        let filtered = geo.filtered(
-            minZ: lo,
-            maxZ: hi,
-            enabledGroups: groups
-        )
-        #if canImport(UIKit)
-        gcodePathNode = filtered.makeNode(
-            color: UIColor(red: 0, green: 150 / 255, blue: 136 / 255, alpha: 1),
-            colorMode: previewColorMode
-        )
-        #endif
+        let lo = min(previewMinZ, previewMaxZ), hi = max(previewMinZ, previewMaxZ)
+        let hidden = previewHiddenFeatures, moves = previewEnabledMoves
+        let tools = previewHiddenTools, filaments = previewHiddenFilaments
+        let through = previewThroughMove, mode = previewColorMode
+        previewBuilding = true
+        let work = Task.detached(priority: .userInitiated) {
+            let filtered = geo.filtered(minZ: lo, maxZ: hi, hiddenFeatures: hidden,
+                enabledMoves: moves, hiddenTools: tools, hiddenFilaments: filaments, throughMove: through, cancelled: { Task.isCancelled })
+            return filtered.makeNode(color: .white, colorMode: mode, cancelled: { Task.isCancelled })
+        }
+        previewBuildTask = work
+        Task { @MainActor [weak self] in
+            let node = await work.value
+            guard let self, self.previewGeneration == generation, !work.isCancelled else { return }
+            self.gcodePathNode = node
+            self.previewBuilding = false
+        }
     }
 
     @Published private(set) var meshRevision = 0
@@ -1959,6 +1969,14 @@ final class OrcaEngine: ObservableObject {
             self.slicePhase = "Post-processing failed"
             return error.localizedDescription
         }
+        let defaultWidth: Float = {
+            if let width = getOptionFirst("line_width").flatMap(Float.init), width > 0.05 { return width }
+            return (getOptionFirst("nozzle_diameter").flatMap(Float.init) ?? 0.4) * 1.1
+        }()
+        slicePhase = "Preparing preview"
+        let preview = await Task.detached(priority: .userInitiated) {
+            Self.processedPreview(sessionBits: sessionBits, defaultWidth: defaultWidth)
+        }.value
         await MainActor.run { [sessionBits] in
             let sess = OpaquePointer(bitPattern: sessionBits)!
             self.gcodeURL = out
@@ -2016,58 +2034,18 @@ final class OrcaEngine: ObservableObject {
             }
             roles.sort { $0.grams > $1.grams }
             self.filamentByRole = roles
-            // Default ribbon width from official line_width / nozzle_diameter
-            var defW: Float = 0.45
-            if let lw = self.getOptionFirst("line_width").flatMap(Float.init), lw > 0.05 {
-                defW = lw
-            } else if let nd = self.getOptionFirst("nozzle_diameter").flatMap(Float.init), nd > 0.05 {
-                defW = nd * 1.1
-            }
-            var segments: UnsafeMutablePointer<orca_preview_segment_t>?
-            var count = 0
-            var totalCount = 0
-            if orca_session_export_preview(sess, &segments, &count, &totalCount) == 0,
-               let segments {
-                defer { orca_free(segments) }
-                let records = UnsafeBufferPointer(start: segments, count: count)
-                var paths: [GCodePathGeometry.Segment] = []
-                for move in records {
-                    let start = SCNVector3(move.start_x, move.start_y, move.start_z)
-                    let end = SCNVector3(move.end_x, move.end_y, move.end_z)
-                    let feature = move.travel != 0 ? "Travel" :
-                        String(cString: orca_preview_role_name(move.role))
-                    if !paths.isEmpty {
-                        let index = paths.count - 1
-                        if let previousEnd = paths[index].points.last,
-                           paths[index].feature == feature, paths[index].width == move.width, paths[index].height == move.height,
-                           paths[index].feedrate == move.feedrate,
-                           previousEnd.x == start.x, previousEnd.y == start.y, previousEnd.z == start.z {
-                            paths[index].points.append(end)
-                            continue
-                        }
-                    }
-                    paths.append(GCodePathGeometry.Segment(points: [start, end],
-                        feature: feature, width: move.width, feedrate: move.feedrate, height: move.height))
-                }
-                // Parking and homing travels are not printable layer heights.
-                let zs = records.filter { $0.travel == 0 }.flatMap { [$0.start_z, $0.end_z] }
-                let feeds = paths.map { $0.feedrate }.filter { $0 > 0 }
-                let widths = records.filter { $0.travel == 0 && $0.width > 0 }.map { $0.width }
-                let heights = records.filter { $0.travel == 0 && $0.height > 0 }.map { $0.height }
-                let path = GCodePathGeometry(segments: paths,
-                    zMin: zs.min() ?? 0, zMax: zs.max() ?? 0.2,
-                    feedMin: feeds.min() ?? 0, feedMax: feeds.max() ?? 1,
-                    widthRange: (widths.min() ?? defW)...(widths.max() ?? defW),
-                    layerHeightRange: (heights.min() ?? 0.2)...(heights.max() ?? 0.2),
-                    defaultWidth: defW)
-                self.previewIsReduced = totalCount > count
-                self.previewLayerHeights = Array(Set(records.filter { $0.travel == 0 }.map { $0.end_z })).sorted()
-                self.gcodeGeometry = path
-                self.gcodeZMin = path.zMin
-                self.gcodeZMax = max(path.zMax, path.zMin)
+            if let preview {
+                self.previewThroughMove = .max
+                self.previewIsReduced = preview.reduced
+                self.previewLayerHeights = preview.layers
+                self.gcodeGeometry = preview.geometry
+                self.gcodeZMin = preview.geometry.zMin
+                self.gcodeZMax = max(preview.geometry.zMax, preview.geometry.zMin)
                 self.previewMinZ = self.gcodeZMin
                 self.previewMaxZ = self.gcodeZMax
                 self.applyPreviewLayer()
+            } else {
+                self.slicePhase = "G-code exported; preview unavailable"
             }
         }
         let stats = await MainActor.run { self.lastSliceStatsText }
@@ -2079,6 +2057,69 @@ final class OrcaEngine: ObservableObject {
         return "Link orca_ios_api + libslic3r to slice"
         #endif
     }
+
+    #if ORCA_LINKED
+    private static func processedPreview(sessionBits: UInt, defaultWidth: Float) ->
+        (geometry: GCodePathGeometry, layers: [Float], reduced: Bool)? {
+        guard let session = OpaquePointer(bitPattern: sessionBits) else { return nil }
+        var segments: UnsafeMutablePointer<orca_preview_segment_t>?
+        var count = 0
+        var totalCount = 0
+        if orca_session_export_preview(session, &segments, &count, &totalCount) == 0,
+           let segments {
+            defer { orca_free(segments) }
+            let defW = defaultWidth
+            let records = UnsafeBufferPointer(start: segments, count: count)
+            var paths: [GCodePathGeometry.Segment] = []
+            for (ordinal, move) in records.enumerated() {
+                let start = SCNVector3(move.start_x, move.start_y, move.start_z)
+                let end = SCNVector3(move.end_x, move.end_y, move.end_z)
+                let kind = GCodePathGeometry.MoveKind(rawValue: Int(move.move_type)) ?? .travel
+                let feature = kind == .extrude ? String(cString: orca_preview_role_name(move.role)) : kind.label
+                let metrics = GCodePathGeometry.Metrics(actualSpeed: move.actual_speed,
+                    flow: move.volumetric_flow, actualFlow: move.actual_volumetric_flow,
+                    fan: move.fan_speed, temperature: move.temperature, pressureAdvance: move.pressure_advance,
+                    acceleration: move.acceleration, jerk: move.jerk, layerTime: move.layer_duration,
+                    tool: Int(move.extruder_id), colorID: Int(move.color_id), rgba: move.color_rgba)
+                if !kind.isMarker, !paths.isEmpty {
+                    let index = paths.count - 1
+                    if let previousEnd = paths[index].points.last,
+                       paths[index].feature == feature, paths[index].width == move.width, paths[index].height == move.height,
+                       paths[index].feedrate == move.feedrate, paths[index].kind == kind,
+                       paths[index].metrics == metrics,
+                       previousEnd.x == start.x, previousEnd.y == start.y, previousEnd.z == start.z {
+                        paths[index].points.append(end)
+                        paths[index].lastMove = ordinal
+                        continue
+                    }
+                }
+                paths.append(GCodePathGeometry.Segment(points: [start, end],
+                    feature: feature, width: move.width, feedrate: move.feedrate, height: move.height,
+                    kind: kind, metrics: metrics, firstMove: ordinal, lastMove: ordinal))
+            }
+            // One stop per processed print layer, including vase mode. A Z
+            // value per endpoint incorrectly created thousands of fake layers.
+            var layerZ: [UInt32: Float] = [:]
+            var minZ = Float.greatestFiniteMagnitude, maxZ = -Float.greatestFiniteMagnitude
+            for move in records where move.travel == 0 {
+                minZ = min(minZ, move.end_z); maxZ = max(maxZ, move.end_z)
+                layerZ[move.layer_id] = max(layerZ[move.layer_id] ?? move.end_z, move.end_z)
+            }
+            let feeds = paths.map { $0.feedrate }.filter { $0 > 0 }
+            let widths = records.filter { $0.travel == 0 && $0.width > 0 }.map { $0.width }
+            let heights = records.filter { $0.travel == 0 && $0.height > 0 }.map { $0.height }
+            var path = GCodePathGeometry(segments: paths,
+                zMin: minZ.isFinite && minZ <= maxZ ? minZ : 0, zMax: maxZ >= minZ ? maxZ : 0.2,
+                feedMin: feeds.min() ?? 0, feedMax: feeds.max() ?? 1,
+                widthRange: (widths.min() ?? defW)...(widths.max() ?? defW),
+                layerHeightRange: (heights.min() ?? 0.2)...(heights.max() ?? 0.2),
+                defaultWidth: defW)
+            path.prepareColorRanges()
+            return (path, Array(Set(layerZ.values)).sorted(), totalCount > count)
+        }
+        return nil
+    }
+    #endif
 
     /// Save plate + config as 3MF via official store_3mf.
     func saveProject3MF() -> URL? {

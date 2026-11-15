@@ -86,6 +86,7 @@ int main(int argc, char **argv)
         float volume = 0;
         if (!require(orca_session_add_primitive(edited.get(), 1, 20, 20, 20) == 0, "simplify fixture") ||
             !require(orca_session_mesh_stats(edited.get(), 0, &facets, &edges, &parts, &volume) == 0, "initial cylinder facets")) return 4;
+        if (!require(facets > 64, "cylinder exposes its actual topology count")) return 4;
         const int before = facets;
         for (int kind = 0; kind < 4; ++kind)
             if (!require(orca_session_paint_fill(edited.get(), 0, kind, 1) > 0, "paint simplify fixture")) return 4;
@@ -202,18 +203,26 @@ int main(int argc, char **argv)
                  "export processed preview"))
         return 8;
     std::unique_ptr<orca_preview_segment_t, decltype(&orca_free)> preview(segments, orca_free);
-    if (!require(count > 0 && count <= 60000 && total >= count, "preview is populated and bounded"))
+    if (!require(count > 0 && total == count, "preview preserves every processed move"))
         return 9;
     float max_z = 0.f;
     bool has_height = false;
+    bool has_metrics = false;
+    unsigned int previous_gcode_id = 0;
     for (size_t i = 0; i < count; ++i) {
         if (!require(std::isfinite(segments[i].end_z), "finite preview coordinates"))
             return 10;
-        if (!segments[i].travel && segments[i].height > 0) has_height = true;
+        if (!require(segments[i].gcode_id >= previous_gcode_id, "preview keeps G-code order")) return 10;
+        previous_gcode_id = segments[i].gcode_id;
+        if (!segments[i].travel && segments[i].height > 0) {
+            has_height = true;
+            if (segments[i].volumetric_flow > 0 && segments[i].actual_speed > 0 &&
+                segments[i].layer_duration > 0 && segments[i].move_type == 10) has_metrics = true;
+        }
         if (!segments[i].travel && segments[i].end_z > max_z)
             max_z = segments[i].end_z;
     }
-    if (!require(has_height, "preview includes processed bead height") || !require(max_z > 19.f, "preview reaches the top of the cube"))
+    if (!require(has_metrics, "preview includes desktop speed, flow and layer time") || !require(has_height, "preview includes processed bead height") || !require(max_z > 19.f, "preview reaches the top of the cube"))
         return 11;
     // A reader failure must leave the existing model/config/preview usable.
     const std::string broken = directory + "/broken.3mf";
@@ -251,6 +260,23 @@ int main(int argc, char **argv)
     if (!require(orca_session_slice_to_gcode(session.get(), (directory + "/recovered.gcode").c_str()) == 0,
                  "slice again after cancellation"))
         return 16;
+    {
+        std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+            dense(orca_session_create(argv[2]), orca_session_destroy);
+        diagnostic_session = dense.get();
+        if (!require(orca_session_add_primitive(dense.get(), 1, 20, 20, 20) == 0, "dense preview cylinder") ||
+            !require(orca_session_set_option(dense.get(), "layer_height", "0.05") == 0, "fine preview layers") ||
+            !require(orca_session_slice_to_gcode(dense.get(), (directory + "/dense-preview.gcode").c_str()) == 0,
+                     "slice complete dense preview")) return 16;
+        orca_preview_segment_t *full = nullptr;
+        size_t full_count = 0, full_total = 0;
+        if (!require(orca_session_export_preview(dense.get(), &full, &full_count, &full_total) == 0,
+                     "export dense preview")) return 16;
+        std::unique_ptr<orca_preview_segment_t, decltype(&orca_free)> full_preview(full, orca_free);
+        if (!require(full_count > 60000 && full_count == full_total, "dense preview keeps every move beyond old sampling limit")) return 16;
+        std::printf("PASS: full dense preview contains %zu moves without sampling\n", full_count);
+    }
+    diagnostic_session = session.get();
     const std::string data_dir = directory + "/preset-catalog";
     if (!require(orca_session_set_data_dir(session.get(), data_dir.c_str()) == 0, "set preset data directory") ||
         !require(orca_session_load_all_presets(session.get()) == 0, "load official preset catalog") ||

@@ -9,6 +9,36 @@ import SwiftUI
 import SceneKit
 import UIKit
 
+/// Pause display work without tearing down GPU resources during background/exit.
+/// The scene is released only when the representable is actually dismantled.
+private final class PlateSCNView: SCNView {
+    private var observers: [NSObjectProtocol] = []
+    override init(frame: CGRect, options: [String: Any]? = nil) {
+        super.init(frame: frame, options: options)
+        observeLifecycle()
+    }
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        observeLifecycle()
+    }
+    private func observeLifecycle() {
+        let center = NotificationCenter.default
+        observers = [
+            center.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                self?.setRenderingActive(false)
+            },
+            center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                self?.setRenderingActive(true)
+            }
+        ]
+    }
+    func setRenderingActive(_ active: Bool) {
+        isPlaying = active
+        scene?.isPaused = !active
+    }
+    deinit { observers.forEach(NotificationCenter.default.removeObserver) }
+}
+
 enum PlateTouchMode: String, CaseIterable, Identifiable {
     case orbit = "Orbit", pan = "Pan", move = "Move", rotate = "Rotate", scale = "Scale", select = "Select"
     var id: String { rawValue }
@@ -67,8 +97,12 @@ struct PlateSceneView: UIViewRepresentable {
 
     /// Run on the simulator main thread against a real SceneKit camera.
     static func cameraSmokeTest() -> Bool {
-        let view = SCNView(frame: CGRect(x: 0, y: 0, width: 390, height: 600))
+        let view = PlateSCNView(frame: CGRect(x: 0, y: 0, width: 390, height: 600))
         view.scene = SCNScene()
+        view.setRenderingActive(false)
+        guard view.scene?.isPaused == true, !view.isPlaying else { return false }
+        view.setRenderingActive(true)
+        guard view.scene?.isPaused == false else { return false }
         let camera = SCNNode()
         camera.camera = SCNCamera()
         camera.position = SCNVector3(50, 60, 80)
@@ -132,7 +166,7 @@ struct PlateSceneView: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> SCNView {
-        let view = SCNView()
+        let view = PlateSCNView(frame: .zero)
         view.scene = makeScene()
         view.backgroundColor = UIColor(red: 0x2D / 255, green: 0x2D / 255, blue: 0x31 / 255, alpha: 1)
         view.allowsCameraControl = false
@@ -151,6 +185,16 @@ struct PlateSceneView: UIViewRepresentable {
         context.coordinator.lastTexture = bedTexturePath ?? ""
         context.coordinator.installGestures(on: view)
         return view
+    }
+
+    static func dismantleUIView(_ view: SCNView, coordinator: Coordinator) {
+        view.isPlaying = false
+        view.scene?.isPaused = true
+        view.delegate = nil
+        view.gestureRecognizers?.forEach { view.removeGestureRecognizer($0) }
+        coordinator.parent = nil
+        coordinator.view = nil
+        view.scene = nil
     }
 
     func updateUIView(_ view: SCNView, context: Context) {
@@ -1029,23 +1073,83 @@ struct MeshGeometry {
 // MARK: - G-code path preview (slic3r Z-up; parent content rotates)
 
 struct GCodePathGeometry {
-    /// Preview color mode (feature type / height gradient / speed gradient).
+    // Names and metrics follow libvgcode::EViewType; Z height is an extra mobile view.
     enum ColorMode: String, CaseIterable, Identifiable {
-        case feature
-        case height
-        case layerHeight
-        case lineWidth
-        case speed
+        case summary, feature, filament, speed, actualSpeed, acceleration, jerk
+        case layerHeight, lineWidth, flow, actualFlow, layerTime, layerTimeLog
+        case fan, temperature, pressureAdvance, tool, height
         var id: String { rawValue }
         var label: String {
             switch self {
-            case .feature: return "Feature"
+            case .summary: return "Summary"
+            case .feature: return "Line type"
+            case .filament: return "Filament"
             case .height: return "Z height"
             case .layerHeight: return "Layer height"
             case .lineWidth: return "Line width"
             case .speed: return "Speed"
+            case .actualSpeed: return "Actual speed"
+            case .acceleration: return "Acceleration"
+            case .jerk: return "Jerk"
+            case .flow: return "Flow"
+            case .actualFlow: return "Actual flow"
+            case .layerTime: return "Layer time"
+            case .layerTimeLog: return "Layer time (log)"
+            case .fan: return "Fan speed"
+            case .temperature: return "Temperature"
+            case .pressureAdvance: return "Pressure advance"
+            case .tool: return "Tool"
             }
         }
+        var unit: String {
+            switch self {
+            case .speed, .actualSpeed, .jerk: return "mm/s"
+            case .acceleration: return "mm/s²"
+            case .flow, .actualFlow: return "mm³/s"
+            case .layerTime, .layerTimeLog, .pressureAdvance: return "s"
+            case .fan: return "%"
+            case .temperature: return "°C"
+            case .height, .layerHeight, .lineWidth: return "mm"
+            default: return ""
+            }
+        }
+        var isNumeric: Bool { ![.summary, .feature, .filament, .tool].contains(self) }
+    }
+
+    // Stable values exported by GCodeProcessor (not inferred from feature names).
+    enum MoveKind: Int, CaseIterable, Identifiable {
+        case retract = 1, unretract, seam, toolChange, colorChange, pause, custom, travel, wipe, extrude
+        var id: Int { rawValue }
+        var label: String {
+            switch self {
+            case .retract: return "Retractions"
+            case .unretract: return "Unretractions"
+            case .seam: return "Seams"
+            case .toolChange: return "Tool changes"
+            case .colorChange: return "Color changes"
+            case .pause: return "Pause prints"
+            case .custom: return "Custom G-code"
+            case .travel: return "Travels"
+            case .wipe: return "Wipes"
+            case .extrude: return "Extrusions"
+            }
+        }
+        var isMarker: Bool { rawValue < Self.travel.rawValue }
+    }
+
+    struct Metrics: Equatable {
+        var actualSpeed: Float = 0
+        var flow: Float = 0
+        var actualFlow: Float = 0
+        var fan: Float = 0
+        var temperature: Float = 0
+        var pressureAdvance: Float = 0
+        var acceleration: Float = 0
+        var jerk: Float = 0
+        var layerTime: Float = 0
+        var tool: Int = 0
+        var colorID: Int = 0
+        var rgba: UInt32 = 0x009688ff
     }
 
     struct Segment {
@@ -1056,6 +1160,10 @@ struct GCodePathGeometry {
         /// Feedrate mm/min from last F word on the segment (0 if unknown)
         var feedrate: Float
         var height: Float = 0.2
+        var kind: MoveKind = .extrude
+        var metrics = Metrics()
+        var firstMove: Int = 0
+        var lastMove: Int = 0
     }
     var segments: [Segment]
     var zMin: Float = 0
@@ -1066,6 +1174,9 @@ struct GCodePathGeometry {
     var layerHeightRange: ClosedRange<Float> = 0...1
     /// Default line width when WIDTH comment missing (from nozzle / line_width)
     var defaultWidth: Float = 0.45
+    var metricRanges: [ColorMode: ClosedRange<Float>] = [:]
+    var features: [String] { Array(Set(segments.filter { $0.kind == .extrude }.map(\.feature))).sorted() }
+    var moveCount: Int { (segments.last?.lastMove ?? -1) + 1 }
 
     /// Feature group used by preview toggles (wall / infill / support / travel / other).
     enum FeatureGroup: String, CaseIterable, Identifiable {
@@ -1108,9 +1219,20 @@ struct GCodePathGeometry {
         return .other
     }
 
-    func filtered(minZ: Float = -.greatestFiniteMagnitude, maxZ: Float, enabledGroups: Set<FeatureGroup>? = nil) -> GCodePathGeometry {
+    func filtered(minZ: Float = -.greatestFiniteMagnitude, maxZ: Float, enabledGroups: Set<FeatureGroup>? = nil, hiddenFeatures: Set<String> = [],
+                  enabledMoves: Set<MoveKind>? = nil, hiddenTools: Set<Int> = [], hiddenFilaments: Set<Int> = [], throughMove: Int = .max, cancelled: () -> Bool = { false }) -> GCodePathGeometry {
         var out: [Segment] = []
-        for seg in segments {
+        for source in segments {
+            if cancelled() { break }
+            if source.firstMove > throughMove { break }
+            if source.kind == .extrude && (hiddenFeatures.contains(source.feature) ||
+                hiddenTools.contains(source.metrics.tool) || hiddenFilaments.contains(source.metrics.colorID)) { continue }
+            if let enabledMoves, !enabledMoves.contains(source.kind) { continue }
+            var seg = source
+            if source.lastMove > throughMove {
+                seg.points = Array(source.points.prefix(max(0, throughMove - source.firstMove + 2)))
+                seg.lastMove = throughMove
+            }
             if let enabled = enabledGroups {
                 let g = Self.group(for: seg.feature)
                 if !enabled.contains(g) { continue }
@@ -1120,8 +1242,9 @@ struct GCodePathGeometry {
             var run: [SCNVector3] = []
             func flush() {
                 if run.count > 1 {
-                    out.append(Segment(points: run, feature: seg.feature, width: seg.width,
-                                       feedrate: seg.feedrate, height: seg.height))
+                    var clipped = seg
+                    clipped.points = run
+                    out.append(clipped)
                 }
                 run.removeAll(keepingCapacity: true)
             }
@@ -1146,7 +1269,7 @@ struct GCodePathGeometry {
         }
         return GCodePathGeometry(
             segments: out, zMin: zMin, zMax: zMax,
-            feedMin: feedMin, feedMax: feedMax, widthRange: widthRange, layerHeightRange: layerHeightRange, defaultWidth: defaultWidth
+            feedMin: feedMin, feedMax: feedMax, widthRange: widthRange, layerHeightRange: layerHeightRange, defaultWidth: defaultWidth, metricRanges: metricRanges
         )
     }
 
@@ -1171,42 +1294,57 @@ struct GCodePathGeometry {
         var thick = bead
         thick.width = 0.8; thick.height = 0.4
         let colors = GCodePathGeometry(segments: [bead, thick], zMin: 0, zMax: 2, widthRange: 0.45...0.8, layerHeightRange: 0.3...0.4)
-        return !colors.color(for: bead, mode: .layerHeight).isEqual(colors.color(for: thick, mode: .layerHeight)) &&
-            !colors.color(for: bead, mode: .lineWidth).isEqual(colors.color(for: thick, mode: .lineWidth)) &&
-            colors.filtered(minZ: 1, maxZ: 1).widthRange == colors.widthRange &&
-            colors.filtered(minZ: 1, maxZ: 1).colorRange(for: .height) == colors.colorRange(for: .height)
+        guard !colors.color(for: bead, mode: .layerHeight).isEqual(colors.color(for: thick, mode: .layerHeight)),
+              !colors.color(for: bead, mode: .lineWidth).isEqual(colors.color(for: thick, mode: .lineWidth)),
+              colors.filtered(minZ: 1, maxZ: 1).widthRange == colors.widthRange,
+              colors.filtered(minZ: 1, maxZ: 1).colorRange(for: .height) == colors.colorRange(for: .height) else { return false }
+        // Reproduces the resource explosion without requiring a private project:
+        // the old renderer creates 20,000 nodes/materials for this fixture.
+        let many = GCodePathGeometry(segments: Array(repeating: bead, count: 20_000)).makeNode(color: .white)
+        let materials = Set(many.childNodes.flatMap { $0.geometry?.materials ?? [] }.map { ObjectIdentifier($0) })
+        guard many.childNodes.count < 20, materials.count == 1 else { return false }
+        let vertices = many.childNodes.reduce(0) { $0 + ($1.geometry?.sources(for: .vertex).first?.vectorCount ?? 0) }
+        guard vertices == 20_000 * 8 else { return false }
+        var detailed = bead
+        detailed.metrics = Metrics(actualSpeed: 12, flow: 5, actualFlow: 3, fan: 50, temperature: 215,
+                                   pressureAdvance: 0.04, acceleration: 1000, jerk: 8, layerTime: 30, tool: 1, colorID: 2)
+        detailed.firstMove = 0; detailed.lastMove = 1
+        detailed.points.append(SCNVector3(10, 10, 1))
+        var data = GCodePathGeometry(segments: [detailed])
+        data.prepareColorRanges()
+        guard data.colorRange(for: .actualSpeed) == 12...12,
+              data.colorRange(for: .layerTime) == 30...30,
+              data.filtered(maxZ: 1, hiddenFeatures: ["Outer wall"]).segments.isEmpty,
+              data.filtered(maxZ: 1, hiddenTools: [1]).segments.isEmpty,
+              data.filtered(maxZ: 1, hiddenFilaments: [2]).segments.isEmpty,
+              data.filtered(maxZ: 1, throughMove: 0).segments.first?.points.count == 2,
+              data.makeNode(color: .white, cancelled: { true }).childNodes.isEmpty else { return false }
+        var marker = bead
+        marker.kind = .seam; marker.points = [SCNVector3(1, 1, 1), SCNVector3(1, 1, 1)]
+        let markers = GCodePathGeometry(segments: [marker])
+        return markers.filtered(maxZ: 1, enabledMoves: [.extrude]).segments.isEmpty &&
+            markers.filtered(maxZ: 1, enabledMoves: [.seam]).makeNode(color: .white).childNodes.count == 1
+
     }
 
+    // Desktop libvgcode default palette, keyed by the processor's role labels.
+    private static let featurePalette: [String: UInt32] = [
+            "undefined": 0xe6b3b3, "inner wall": 0xffe64d, "outer wall": 0xff7d38,
+            "overhang wall": 0x1f1fff, "sparse infill": 0xb03029,
+            "internal solid infill": 0x9654cc, "top surface": 0xf04040,
+            "ironing": 0xff8c69, "bridge": 0x4d80ba, "internal bridge": 0x4d80ba,
+            "gap infill": 0xffffff, "skirt": 0x00876e, "support": 0x00ff00,
+            "support interface": 0x008000, "prime tower": 0xb3e3ab, "custom": 0x5ed194,
+            "bottom surface": 0x665cc7, "brim": 0x003b6e, "support transition": 0x004000,
+            "multiple": 0x808080, "travels": 0x38489b, "travel": 0x38489b, "wipes": 0xffff00,
+            "retractions": 0xcd22d6, "unretractions": 0x49adcf, "seams": 0xe6e6e6,
+            "tool changes": 0xc1be63, "color changes": 0xda948b,
+            "pause prints": 0x52f083, "custom g-code": 0xe2d243
+    ]
     static func color(for feature: String) -> UIColor {
-        let f = feature.lowercased()
-        if f.contains("outer wall") || f.contains("outer_wall") {
-            return UIColor(red: 0.95, green: 0.55, blue: 0.15, alpha: 1)
-        }
-        if f.contains("inner wall") || f.contains("inner_wall") {
-            return UIColor(red: 0.95, green: 0.85, blue: 0.20, alpha: 1)
-        }
-        if f.contains("top") {
-            return UIColor(red: 0.55, green: 0.35, blue: 0.85, alpha: 1)
-        }
-        if f.contains("bottom") {
-            return UIColor(red: 0.30, green: 0.55, blue: 0.95, alpha: 1)
-        }
-        if f.contains("sparse") || f.contains("internal") || f.contains("infill") {
-            return UIColor(red: 0.25, green: 0.75, blue: 0.55, alpha: 1)
-        }
-        if f.contains("support") {
-            return UIColor(red: 0.55, green: 0.55, blue: 0.60, alpha: 1)
-        }
-        if f.contains("skirt") || f.contains("brim") {
-            return UIColor(red: 0.70, green: 0.70, blue: 0.75, alpha: 1)
-        }
-        if f.contains("bridge") {
-            return UIColor(red: 0.20, green: 0.75, blue: 0.85, alpha: 1)
-        }
-        if f.contains("travel") {
-            return UIColor(red: 0.45, green: 0.45, blue: 0.50, alpha: 0.55)
-        }
-        return UIColor(red: 0, green: 150 / 255, blue: 136 / 255, alpha: 1)
+        let rgb = featurePalette[feature.lowercased()] ?? 0x009688
+        return UIColor(red: CGFloat((rgb >> 16) & 255) / 255,
+                       green: CGFloat((rgb >> 8) & 255) / 255, blue: CGFloat(rgb & 255) / 255, alpha: 1)
     }
 
     /// Heatmap blue→cyan→green→yellow→red for t in 0…1.
@@ -1229,150 +1367,189 @@ struct GCodePathGeometry {
         return UIColor(red: r, green: g, blue: b, alpha: alpha)
     }
 
-    func colorRange(for mode: ColorMode) -> ClosedRange<Float> {
+    func value(for seg: Segment, mode: ColorMode) -> Float {
         switch mode {
-        case .feature: return 0...1
+        case .height: return ((seg.points.first?.z ?? zMin) + (seg.points.last?.z ?? zMin)) * 0.5
+        case .layerHeight: return seg.height
+        case .lineWidth: return seg.width
+        case .speed: return seg.feedrate / 60
+        case .actualSpeed: return seg.metrics.actualSpeed
+        case .flow: return seg.metrics.flow
+        case .actualFlow: return seg.metrics.actualFlow
+        case .fan: return seg.metrics.fan
+        case .temperature: return seg.metrics.temperature
+        case .pressureAdvance: return seg.metrics.pressureAdvance
+        case .acceleration: return seg.metrics.acceleration
+        case .jerk: return seg.metrics.jerk
+        case .layerTime, .layerTimeLog: return seg.metrics.layerTime
+        default: return 0
+        }
+    }
+
+    mutating func prepareColorRanges() {
+        for mode in ColorMode.allCases where mode.isNumeric {
+            var lo = Float.greatestFiniteMagnitude, hi = -Float.greatestFiniteMagnitude
+            for seg in segments where seg.kind == .extrude {
+                let v = value(for: seg, mode: mode)
+                if v.isFinite { lo = min(lo, v); hi = max(hi, v) }
+            }
+            metricRanges[mode] = lo <= hi ? lo...hi : 0...0
+        }
+    }
+
+    func colorRange(for mode: ColorMode) -> ClosedRange<Float> {
+        if let range = metricRanges[mode] { return range }
+        switch mode {
         case .height: return min(zMin, zMax)...max(zMin, zMax)
         case .layerHeight: return layerHeightRange
         case .lineWidth: return widthRange
         case .speed: return (min(feedMin, feedMax) / 60)...(max(feedMin, feedMax) / 60)
+        default: return 0...1
         }
     }
 
     func color(for seg: Segment, mode: ColorMode) -> UIColor {
-        let value: Float
+        if seg.kind != .extrude { return Self.color(for: seg.feature) }
         switch mode {
-        case .feature: return Self.color(for: seg.feature)
-        case .height:
-            value = ((seg.points.first?.z ?? zMin) + (seg.points.last?.z ?? zMin)) * 0.5
-        case .layerHeight: value = seg.height
-        case .lineWidth: value = seg.width
-        case .speed: value = seg.feedrate / 60
+        case .feature, .summary: return Self.color(for: seg.feature)
+        case .filament:
+            let rgba = seg.metrics.rgba
+            return UIColor(red: CGFloat((rgba >> 24) & 255) / 255,
+                green: CGFloat((rgba >> 16) & 255) / 255,
+                blue: CGFloat((rgba >> 8) & 255) / 255, alpha: 1)
+        case .tool:
+            return Self.gradientColor(t: Float(seg.metrics.tool % 8) / 7)
+        default: break
         }
         let range = colorRange(for: mode)
-        return Self.gradientColor(t: (value - range.lowerBound) / max(0.001, range.upperBound - range.lowerBound))
+        let v = value(for: seg, mode: mode)
+        if mode == .layerTimeLog {
+            let lo = log1pf(max(0, range.lowerBound)), hi = log1pf(max(0, range.upperBound))
+            return Self.gradientColor(t: (log1pf(max(0, v)) - lo) / max(0.001, hi - lo))
+        }
+        return Self.gradientColor(t: (v - range.lowerBound) / max(0.001, range.upperBound - range.lowerBound))
     }
 
-    func makeNode(color: UIColor, colorMode: ColorMode = .feature) -> SCNNode {
+    /// A bounded number of geometry buffers share TWO materials for the entire job.
+    /// Per-path materials caused quadratic SceneKit resource-manager cleanup on
+    /// device (exit watchdog in SCNMTLResourceManager::_materialWillDie).
+    func makeNode(color: UIColor, colorMode: ColorMode = .feature, cancelled: () -> Bool = { false }) -> SCNNode {
         let root = SCNNode()
         root.name = "gcode"
+        let solid = SCNMaterial()
+        solid.diffuse.contents = UIColor.white
+        solid.lightingModel = .lambert
+        solid.isDoubleSided = true
+        let lines = SCNMaterial()
+        lines.diffuse.contents = UIColor.white
+        lines.lightingModel = .constant
+        var beads = Batch(material: solid, primitive: .triangles)
+        var travels = Batch(material: lines, primitive: .line)
         for seg in segments {
+            if cancelled() { return SCNNode() }
             guard seg.points.count > 1 else { continue }
-            let c = self.color(for: seg, mode: colorMode)
-            let isTravel = Self.group(for: seg.feature) == .travel || seg.width <= 0.01
-            if isTravel {
-                root.addChildNode(makeLineNode(points: seg.points, color: c.withAlphaComponent(0.55)))
-            } else {
-                let w = seg.width > 0.05 ? seg.width : defaultWidth
-                if let ribbon = makeRibbonNode(points: seg.points, width: w, height: seg.height, color: c) {
-                    root.addChildNode(ribbon)
+            let rgba = self.color(for: seg, mode: colorMode)
+            if seg.kind != .extrude || seg.width <= 0.01 {
+                if seg.kind.isMarker, let p = seg.points.last {
+                    // Batched cross markers, never one sphere/material per event.
+                    let r: Float = seg.kind == .seam ? 0.35 : 0.65
+                    let ends = [SCNVector3(p.x-r,p.y,p.z), SCNVector3(p.x+r,p.y,p.z),
+                                SCNVector3(p.x,p.y-r,p.z), SCNVector3(p.x,p.y+r,p.z),
+                                SCNVector3(p.x,p.y,p.z-r), SCNVector3(p.x,p.y,p.z+r)]
+                    travels.appendLines(ends, color: rgba)
                 } else {
-                    root.addChildNode(makeLineNode(points: seg.points, color: c))
+                    for (a, b) in zip(seg.points, seg.points.dropFirst()) {
+                        travels.appendLines([a, b], color: rgba.withAlphaComponent(0.65))
+                        if travels.vertexCount >= 32768 { travels.flush(into: root) }
+                    }
+                }
+                if travels.vertexCount >= 32768 { travels.flush(into: root) }
+            } else {
+                // Split only at a shared endpoint; every original corner survives.
+                var offset = 0
+                while offset < seg.points.count - 1 {
+                    if cancelled() { return SCNNode() }
+                    let end = min(offset + 4095, seg.points.count - 1)
+                    beads.appendBead(Array(seg.points[offset...end]), width: seg.width,
+                                     height: seg.height, color: rgba)
+                    if beads.vertexCount >= 32768 { beads.flush(into: root) }
+                    offset = end
                 }
             }
         }
+        beads.flush(into: root)
+        travels.flush(into: root)
         return root
     }
 
-    private func makeLineNode(points: [SCNVector3], color: UIColor) -> SCNNode {
-        let src = SCNGeometrySource(vertices: points)
-        var indices: [Int32] = []
-        for i in 0..<(points.count - 1) {
-            indices.append(Int32(i))
-            indices.append(Int32(i + 1))
-        }
-        let data = Data(bytes: indices, count: indices.count * MemoryLayout<Int32>.size)
-        let elem = SCNGeometryElement(
-            data: data,
-            primitiveType: .line,
-            primitiveCount: indices.count / 2,
-            bytesPerIndex: MemoryLayout<Int32>.size
-        )
-        let geo = SCNGeometry(sources: [src], elements: [elem])
-        let mat = SCNMaterial()
-        mat.diffuse.contents = color
-        mat.lightingModel = .constant
-        geo.materials = [mat]
-        return SCNNode(geometry: geo)
-    }
-
-    /// Flat ribbon in XY (slic3r bed plane) extruded ±half-width perpendicular to path.
-    private func makeRibbonNode(points: [SCNVector3], width: Float, height: Float, color: UIColor) -> SCNNode? {
-        let n = points.count
-        guard n >= 2 else { return nil }
-        let half = max(width, 0.12) * 0.5
-        // The engine already bounds the exported segment count. Keep every
-        // exported point here so corner geometry is not replaced by chords.
-        let sampled = points
-        let m = sampled.count
-        guard m >= 2 else { return nil }
-
-        var verts: [SCNVector3] = []
-        verts.reserveCapacity(m * 4)
-        for j in 0..<m {
-            let p = sampled[j]
-            // Tangent from neighbors
-            let prev = sampled[max(0, j - 1)]
-            let next = sampled[min(m - 1, j + 1)]
-            var tx = next.x - prev.x
-            var ty = next.y - prev.y
-            let len = max(sqrtf(tx * tx + ty * ty), 1e-4)
-            tx /= len; ty /= len
-            // Perpendicular in XY
-            let px = -ty * half
-            let py = tx * half
-            verts.append(SCNVector3(p.x + px, p.y + py, p.z + 0.02))
-            verts.append(SCNVector3(p.x - px, p.y - py, p.z + 0.02))
-            let bottom = p.z - max(0.01, height)
-            verts.append(SCNVector3(p.x + px, p.y + py, bottom))
-            verts.append(SCNVector3(p.x - px, p.y - py, bottom))
-        }
-
+    private struct Batch {
+        let material: SCNMaterial
+        let primitive: SCNGeometryPrimitiveType
+        var positions: [Float] = []
+        var normals: [Float] = []
+        var colors: [Float] = []
         var indices: [UInt32] = []
-        indices.reserveCapacity((m - 1) * 24 + 12)
-        for j in 0..<(m - 1) {
-            let a = UInt32(j * 4), b = a + 4
-            indices.append(contentsOf: [a, b, a + 1, a + 1, b, b + 1,
-                a, a + 2, b, b, a + 2, b + 2,
-                a + 1, b + 1, a + 3, a + 3, b + 1, b + 3,
-                a + 2, a + 3, b + 2, b + 2, a + 3, b + 3])
-        }
-        let last = UInt32((m - 1) * 4)
-        indices.append(contentsOf: [0, 1, 2, 2, 1, 3,
-            last, last + 2, last + 1, last + 1, last + 2, last + 3])
+        var vertexCount: Int { positions.count / 3 }
 
-        // SCNVector3 may pack as 16 bytes on some platforms — use Float triples explicitly
-        var floats: [Float] = []
-        floats.reserveCapacity(verts.count * 3)
-        for v in verts {
-            floats.append(v.x); floats.append(v.y); floats.append(v.z)
+        mutating func vertex(_ p: SCNVector3, normal: SCNVector3, color: UIColor) {
+            positions.append(contentsOf: [p.x, p.y, p.z])
+            normals.append(contentsOf: [normal.x, normal.y, normal.z])
+            var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 1
+            color.getRed(&r, green: &g, blue: &b, alpha: &a)
+            colors.append(contentsOf: [Float(r), Float(g), Float(b), Float(a)])
         }
-        let fData = Data(bytes: floats, count: floats.count * MemoryLayout<Float>.size)
-        let src = SCNGeometrySource(
-            data: fData,
-            semantic: .vertex,
-            vectorCount: verts.count,
-            usesFloatComponents: true,
-            componentsPerVector: 3,
-            bytesPerComponent: MemoryLayout<Float>.size,
-            dataOffset: 0,
-            dataStride: MemoryLayout<Float>.size * 3
-        )
-        let idxData = Data(bytes: indices, count: indices.count * MemoryLayout<UInt32>.size)
-        let elem = SCNGeometryElement(
-            data: idxData,
-            primitiveType: .triangles,
-            primitiveCount: indices.count / 3,
-            bytesPerIndex: MemoryLayout<UInt32>.size
-        )
-        let geo = SCNGeometry(sources: [src], elements: [elem])
-        let mat = SCNMaterial()
-        mat.diffuse.contents = color
-        mat.lightingModel = .constant
-        mat.isDoubleSided = true
-        mat.writesToDepthBuffer = true
-        mat.readsFromDepthBuffer = true
-        geo.materials = [mat]
-        return SCNNode(geometry: geo)
+
+        mutating func appendLines(_ points: [SCNVector3], color: UIColor) {
+            for p in points {
+                indices.append(UInt32(vertexCount))
+                vertex(p, normal: SCNVector3(0, 0, 1), color: color)
+            }
+        }
+
+        mutating func appendBead(_ points: [SCNVector3], width: Float, height: Float, color: UIColor) {
+            let base = UInt32(vertexCount)
+            let half = max(0.01, width) * 0.5
+            for j in points.indices {
+                let p = points[j], prev = points[max(0,j-1)], next = points[min(points.count-1,j+1)]
+                let dx = next.x-prev.x, dy = next.y-prev.y
+                let length = max(0.0001, sqrtf(dx*dx+dy*dy))
+                let nx = -dy/length, ny = dx/length
+                let bottom = p.z - max(0.01, height)
+                vertex(SCNVector3(p.x+nx*half,p.y+ny*half,p.z), normal: SCNVector3(nx,ny,1), color: color)
+                vertex(SCNVector3(p.x-nx*half,p.y-ny*half,p.z), normal: SCNVector3(-nx,-ny,1), color: color)
+                vertex(SCNVector3(p.x+nx*half,p.y+ny*half,bottom), normal: SCNVector3(nx,ny,-1), color: color)
+                vertex(SCNVector3(p.x-nx*half,p.y-ny*half,bottom), normal: SCNVector3(-nx,-ny,-1), color: color)
+            }
+            for j in 0..<(points.count-1) {
+                let a = base+UInt32(j*4), b = a+4
+                indices.append(contentsOf: [a,b,a+1,a+1,b,b+1,
+                    a,a+2,b,b,a+2,b+2, a+1,b+1,a+3,a+3,b+1,b+3,
+                    a+2,a+3,b+2,b+2,a+3,b+3])
+            }
+            let last = base+UInt32((points.count-1)*4)
+            indices.append(contentsOf: [base,base+1,base+2,base+2,base+1,base+3,
+                last,last+2,last+1,last+1,last+2,last+3])
+        }
+
+        mutating func flush(into root: SCNNode) {
+            guard !indices.isEmpty else { return }
+            func source(_ values: [Float], _ semantic: SCNGeometrySource.Semantic, _ components: Int) -> SCNGeometrySource {
+                let data = values.withUnsafeBytes { Data($0) }
+                return SCNGeometrySource(data: data, semantic: semantic, vectorCount: vertexCount,
+                    usesFloatComponents: true, componentsPerVector: components,
+                    bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0,
+                    dataStride: components * MemoryLayout<Float>.size)
+            }
+            let element = SCNGeometryElement(data: indices.withUnsafeBytes { Data($0) },
+                primitiveType: primitive, primitiveCount: indices.count / (primitive == .line ? 2 : 3),
+                bytesPerIndex: MemoryLayout<UInt32>.size)
+            let geometry = SCNGeometry(sources: [source(positions,.vertex,3), source(normals,.normal,3), source(colors,.color,4)], elements: [element])
+            geometry.materials = [material]
+            root.addChildNode(SCNNode(geometry: geometry))
+            positions.removeAll(keepingCapacity: true)
+            normals.removeAll(keepingCapacity: true)
+            colors.removeAll(keepingCapacity: true)
+            indices.removeAll(keepingCapacity: true)
+        }
     }
 }

@@ -219,12 +219,13 @@ struct OrcaRootView: View {
                 OrcaTheme.bg.ignoresSafeArea()
                 VStack(spacing: 0) {
                     headerBar(inlineInspector: geo.size.width >= 860 && geo.size.height >= 500)
+                        .fixedSize(horizontal: false, vertical: true).layoutPriority(2)
                     if !engine.automaticProfileLoading {
                         Text("Recovery mode: system profiles are not loaded. Reopen the app to retry startup.")
                             .font(.caption)
                             .padding(8)
                     }
-                    tabBar
+                    tabBar.fixedSize(horizontal: false, vertical: true).layoutPriority(2)
                     if mainTab == .device {
                         NavigationStack { devicePlaceholder }.frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
@@ -236,17 +237,22 @@ struct OrcaRootView: View {
                             }
                             VStack(spacing: 0) {
                                 plateStage
-                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                    .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity).clipped()
                                     .allowsHitTesting(!isSlicing && !engine.presetsLoading && !engine.sessionBusy)
                                 if mainTab == .preview && !engine.previewLayerHeights.isEmpty {
                                     previewLayerBar.padding(.horizontal, 12).padding(.vertical, 6)
                                         .background(OrcaTheme.panel)
                                 }
+                                if mainTab == .preview && showPreviewControls {
+                                    previewControlsPanel.frame(height: min(320, geo.size.height * 0.4))
+                                }
                                 compactControls.padding(.vertical, 4).background(OrcaTheme.panel)
+                                    .fixedSize(horizontal: false, vertical: true).layoutPriority(1)
                             }
                         }
                     }
                 }
+                .frame(width: geo.size.width, height: geo.size.height).clipped()
                 .onAppear { recordWorkspaceLayout(geo.size) }
                 .onChange(of: geo.size) { recordWorkspaceLayout($0) }
             }
@@ -323,14 +329,6 @@ struct OrcaRootView: View {
                 .interactiveDismissDisabled(engine.sessionBusy)
         }
         .sheet(isPresented: $showModelLibrary) { modelLibrary }
-        .sheet(isPresented: $showPreviewControls) {
-            NavigationStack {
-                ScrollView { layerScrubber.padding() }
-                    .navigationTitle("Preview")
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showPreviewControls = false } } }
-            }.presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
-        }
         .sheet(isPresented: $showCalibration) {
             calibrationSheet
                 .presentationDetents([.medium, .large])
@@ -533,6 +531,7 @@ struct OrcaRootView: View {
             ForEach(MainTab.allCases, id: \.self) { tab in
                 Button {
                     mainTab = tab
+                    if tab != .preview { showPreviewControls = false }
                     if tab != .prepare { moveMode = false }
                     if tab == .preview && engine.gcodeURL == nil {
                         status = "Slice to preview toolpaths."
@@ -1962,7 +1961,7 @@ struct OrcaRootView: View {
             } label: { Image(systemName: "folder").frame(width: 44, height: 44) }
                 .accessibilityLabel(Text("File and project actions"))
             Button {
-                if mainTab == .preview { showPreviewControls = true } else { showPlateInspector = true }
+                if mainTab == .preview { showPreviewControls.toggle() } else { showPlateInspector = true }
             } label: {
                 Image(systemName: mainTab == .preview ? "line.3.horizontal.decrease" : "square.3.layers.3d")
                     .frame(width: 44, height: 44)
@@ -2942,6 +2941,22 @@ struct OrcaRootView: View {
         }
     }
 
+    // An in-workspace panel keeps all three main tabs reachable even at its
+    // largest size. A modal large detent covered them on compact devices.
+    private var previewControlsPanel: AnyView {
+        AnyView(VStack(spacing: 0) {
+            HStack {
+                Text("Preview controls").font(.subheadline.weight(.semibold))
+                Spacer()
+                Button { showPreviewControls = false } label: { Image(systemName: "chevron.down").frame(width: 44, height: 44) }
+                    .accessibilityLabel("Hide preview controls")
+            }.padding(.horizontal, 16)
+                .contentShape(Rectangle())
+                .gesture(DragGesture().onEnded { if $0.translation.height > 35 { showPreviewControls = false } })
+            ScrollView { layerScrubber }
+        }.background(OrcaTheme.panel))
+    }
+
     private var layerScrubber: some View {
         VStack(alignment: .leading, spacing: 12) {
             if engine.gcodeGeometry == nil { Text("Slice the plate to preview toolpaths.") }
@@ -2965,37 +2980,68 @@ struct OrcaRootView: View {
                 Button("Show all layers") {
                     engine.previewMinZ = engine.gcodeZMin
                     engine.previewMaxZ = engine.gcodeZMax
+                    engine.previewThroughMove = .max
                     engine.requestPreviewLayer()
                 }
             }
-            // Color legend chips — wall / infill / support / travel / other (W5)
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    legendChip(
-                        "Wall",
-                        color: Color(red: 0.95, green: 0.55, blue: 0.15),
-                        isOn: $engine.previewShowWall
-                    )
-                    legendChip(
-                        "Infill",
-                        color: Color(red: 0.25, green: 0.75, blue: 0.55),
-                        isOn: $engine.previewShowInfill
-                    )
-                    legendChip(
-                        "Support",
-                        color: Color(red: 0.55, green: 0.55, blue: 0.60),
-                        isOn: $engine.previewShowSupport
-                    )
-                    legendChip(
-                        "Travel",
-                        color: Color(red: 0.45, green: 0.45, blue: 0.50),
-                        isOn: $engine.previewShowTravel
-                    )
-                    legendChip(
-                        "Other",
-                        color: Color(red: 0.70, green: 0.70, blue: 0.75),
-                        isOn: $engine.previewShowOther
-                    )
+            if engine.previewBuilding {
+                ProgressView("Updating toolpaths…").accessibilityIdentifier("preview-building")
+            }
+            if let geometry = engine.gcodeGeometry {
+                Button("Show current layer only") {
+                    engine.previewMinZ = engine.previewMaxZ
+                    engine.requestPreviewLayer()
+                }
+                DisclosureGroup("Line types") {
+                    HStack {
+                        Button("All") { engine.previewHiddenFeatures = []; engine.requestPreviewLayer() }
+                        Button("None") { engine.previewHiddenFeatures = Set(geometry.features); engine.requestPreviewLayer() }
+                    }.buttonStyle(.bordered)
+                    ForEach(geometry.features, id: \.self) { feature in
+                        Toggle(isOn: Binding(get: { !engine.previewHiddenFeatures.contains(feature) }, set: { visible in
+                            if visible { engine.previewHiddenFeatures.remove(feature) }
+                            else { engine.previewHiddenFeatures.insert(feature) }
+                            engine.requestPreviewLayer()
+                        })) {
+                            Label { Text(feature) } icon: {
+                                Circle().fill(Color(uiColor: GCodePathGeometry.color(for: feature))).frame(width: 10, height: 10)
+                            }
+                        }
+                    }
+                }.accessibilityIdentifier("preview-line-types")
+                DisclosureGroup("Options") {
+                    ForEach(GCodePathGeometry.MoveKind.allCases.filter { $0 != .extrude }) { kind in
+                        Toggle(kind.label, isOn: Binding(get: { engine.previewEnabledMoves.contains(kind) }, set: { visible in
+                            if visible { engine.previewEnabledMoves.insert(kind) }
+                            else { engine.previewEnabledMoves.remove(kind) }
+                            engine.requestPreviewLayer()
+                        }))
+                    }
+                }.accessibilityIdentifier("preview-options")
+                DisclosureGroup("Filaments and tools") {
+                    ForEach(Array(Set(geometry.segments.filter { $0.kind == .extrude }.map { $0.metrics.tool })).sorted(), id: \.self) { tool in
+                        Toggle("Tool \(tool + 1)", isOn: Binding(get: { !engine.previewHiddenTools.contains(tool) }, set: { visible in
+                            if visible { engine.previewHiddenTools.remove(tool) }
+                            else { engine.previewHiddenTools.insert(tool) }
+                            engine.requestPreviewLayer()
+                        }))
+                    }
+                    ForEach(Array(Set(geometry.segments.filter { $0.kind == .extrude }.map { $0.metrics.colorID })).sorted(), id: \.self) { filament in
+                        Toggle("Filament \(filament + 1)", isOn: Binding(get: { !engine.previewHiddenFilaments.contains(filament) }, set: { visible in
+                            if visible { engine.previewHiddenFilaments.remove(filament) }
+                            else { engine.previewHiddenFilaments.insert(filament) }
+                            engine.requestPreviewLayer()
+                        }))
+                    }
+                }
+                DisclosureGroup("Toolpath sequence") {
+                    Text("Move \(min(engine.previewThroughMove, geometry.moveCount)) / \(geometry.moveCount)")
+                        .font(.caption.monospacedDigit())
+                    Slider(value: Binding(get: { Double(min(engine.previewThroughMove, max(0, geometry.moveCount - 1))) }, set: {
+                        engine.previewThroughMove = Int($0.rounded()); engine.requestPreviewLayer()
+                    }), in: 0...Double(max(1, geometry.moveCount - 1)), step: 1)
+                        .accessibilityLabel("Toolpath move")
+                    Button("Show complete toolpath") { engine.previewThroughMove = .max; engine.requestPreviewLayer() }
                 }
             }
 
@@ -3005,9 +3051,9 @@ struct OrcaRootView: View {
             )) {
                 ForEach(GCodePathGeometry.ColorMode.allCases) { mode in Text(mode.label).tag(mode) }
             }.pickerStyle(.menu)
-            if engine.previewColorMode != .feature, let geometry = engine.gcodeGeometry {
+            if engine.previewColorMode.isNumeric, let geometry = engine.gcodeGeometry {
                 let range = geometry.colorRange(for: engine.previewColorMode)
-                let unit = engine.previewColorMode == .speed ? "mm/s" : "mm"
+                let unit = engine.previewColorMode.unit
                 LinearGradient(colors: [Color(uiColor: GCodePathGeometry.gradientColor(t: 0)),
                     Color(uiColor: GCodePathGeometry.gradientColor(t: 0.25)),
                     Color(uiColor: GCodePathGeometry.gradientColor(t: 0.5)),
@@ -3032,7 +3078,7 @@ struct OrcaRootView: View {
                     if !engine.filamentByRole.isEmpty {
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 8) {
-                                ForEach(Array(engine.filamentByRole.prefix(8).enumerated()), id: \.offset) { _, r in
+                                ForEach(Array(engine.filamentByRole.enumerated()), id: \.offset) { _, r in
                                     Text(String(format: "%@: %.1fg", r.name, r.grams))
                                         .font(.system(size: 10, weight: .medium, design: .monospaced))
                                         .padding(.horizontal, 8)

@@ -25,6 +25,14 @@ final class WorkspaceUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [preview], timeout: 180), .completed,
                        "The app must slice the imported model and present its processed preview")
         XCTAssertTrue(app.sliders["Upper preview layer"].exists)
+        XCTAssertTrue(app.buttons["Prepare"].isHittable)
+        XCTAssertTrue(app.buttons["Preview"].isHittable)
+        XCTAssertTrue(app.buttons["Device"].isHittable)
+        app.buttons["Preview controls"].tap()
+        XCTAssertTrue(app.buttons["Hide preview controls"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Prepare"].isHittable, "Preview filters must not cover the main tabs")
+        XCTAssertTrue(app.buttons["Device"].isHittable)
+        app.buttons["Hide preview controls"].tap()
         let toolpaths = XCTAttachment(screenshot: app.screenshot())
         toolpaths.name = "toolpath-preview"
         toolpaths.lifetime = .keepAlways

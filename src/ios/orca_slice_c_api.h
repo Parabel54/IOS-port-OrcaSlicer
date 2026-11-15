@@ -82,12 +82,18 @@ typedef struct orca_preview_segment {
     int role;
     int travel;
     float height; // processed extrusion height in mm (0 for travel)
+    float actual_speed, volumetric_flow, actual_volumetric_flow;
+    float fan_speed, temperature, pressure_advance, acceleration, jerk, layer_duration;
+    int extruder_id, color_id;
+    int move_type; // GCodeProcessor EMoveType: retract=1 ... travel=8, wipe=9, extrude=10
+    unsigned int layer_id, gcode_id;
+    unsigned int color_rgba; // interpreted filament/color-change RGB, alpha in low byte
 } orca_preview_segment_t;
 
 /**
  * Preview from the last successful slice's official GCodeProcessorResult.
- * Large results are sampled across the full job to at most 60000 segments.
- * total_count reports the number before sampling. Free *segments with orca_free().
+ * Includes every physical move and preview event; no layer or path sampling.
+ * count equals total_count. Free *segments with orca_free().
  * Returns an error if no successful slice is available.
  */
 ORCA_API int orca_session_export_preview(
