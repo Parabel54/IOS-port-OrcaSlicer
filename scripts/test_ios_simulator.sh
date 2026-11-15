@@ -30,7 +30,21 @@ xcrun --sdk iphonesimulator clang++ -std=c++17 -arch arm64 \
   -framework Security -framework SystemConfiguration -framework UIKit \
   -framework SceneKit -framework Network -o "$TEST_DIR/engine_smoke"
 codesign --force --sign - "$TEST_DIR/engine_smoke"
-RUNTIME="$(xcrun simctl list runtimes -j | python3 -c 'import json,sys; print(sorted(r["identifier"] for r in json.load(sys.stdin)["runtimes"] if r["isAvailable"] and r["identifier"].startswith("com.apple.CoreSimulator.SimRuntime.iOS-"))[-1])')"
+# Use a runtime from the selected Xcode SDK family. Hosted runners can also
+# contain a newer Xcode's runtime, which leaves launch services unreliable.
+SDK_VERSION="$(xcrun --sdk iphonesimulator --show-sdk-version)"
+RUNTIME="$(xcrun simctl list runtimes -j | python3 -c '
+import json, sys
+sdk = sys.argv[1].split(".")
+rows = [r for r in json.load(sys.stdin)["runtimes"] if r["isAvailable"]
+        and r["identifier"].startswith("com.apple.CoreSimulator.SimRuntime.iOS-")
+        and r["version"].split(".")[0] == sdk[0]]
+if not rows:
+    raise SystemExit("No available simulator runtime matches selected iOS SDK " + sys.argv[1])
+rows.sort(key=lambda r: (r["version"] == sys.argv[1], tuple(map(int, r["version"].split(".")))))
+print(rows[-1]["identifier"])
+' "$SDK_VERSION")"
+echo "Simulator runtime: $RUNTIME; selected SDK: $SDK_VERSION"
 DEVICE="$(ios_test_run 120 xcrun simctl create OrcaEngineSmoke com.apple.CoreSimulator.SimDeviceType.iPhone-16 "$RUNTIME")"
 cleanup() {
   smoke_exit=$?

@@ -304,6 +304,7 @@ struct ProcessSettingsBrowser: View {
                 }
             }
             .preferredColorScheme(.dark)
+            .tint(themeAccent)
             .onAppear { reload() }
             .onChange(of: scope) { _ in categoryFilter = ""; presetSearch = "" }
             .onChange(of: engine.selectedPrinter) { _ in reload() }
@@ -433,7 +434,8 @@ struct ProcessSettingsBrowser: View {
             set: { draftValues[entry.key] = $0 }
         )
         return HStack(spacing: 8) {
-            TextField(entry.key, text: draft)
+            TextField(entry.key, text: draft, axis: .vertical)
+                .lineLimit(1...8)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .font(.system(size: 14, design: .monospaced))

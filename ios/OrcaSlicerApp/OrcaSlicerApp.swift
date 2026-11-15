@@ -76,6 +76,7 @@ struct OrcaRootView: View {
     @State private var didTestImport = false
     @State private var processingDocument = false
     @State private var cloudPresetRevision: UUID?
+    @State private var settingsDetent: PresentationDetent = .large
     @State private var operationError: String?
     @State private var showProcess = false
     @State private var showPlateInspector = false
@@ -275,7 +276,7 @@ struct OrcaRootView: View {
         AnyView(rootLayout
         .sheet(isPresented: $showProcess, onDismiss: presentPendingDocumentPicker) {
             processSheet
-                .presentationDetents([.medium, .large])
+                .presentationDetents([.medium, .large], selection: $settingsDetent)
                 .presentationDragIndicator(.visible)
                 .preferredColorScheme(.dark)
         }
