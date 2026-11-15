@@ -203,17 +203,6 @@ def tgt_settings(name: str) -> str:
             '\t\t\t\t"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphoneos*]" = "ORCA_LINKED";',
         ]
     lines += [
-            f'\t\t\t\t"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = (',
-            f'\t\t\t\t\t"{ios_sim_lib_path}",',
-            '\t\t\t\t\t"$(inherited)",',
-            "\t\t\t\t);",
-            f'\t\t\t\t"OTHER_LDFLAGS[sdk=iphoneos*]" = (',
-            '\t\t\t\t\t"$(inherited)",',
-            f'\t\t\t\t\t"{ios_ld}",',
-            "\t\t\t\t);",
-            '\t\t\t\t"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphoneos*]" = "ORCA_LINKED";',
-        ]
-    lines += [
         "\t\t\t};",
         f"\t\t\tname = {name};",
     ]

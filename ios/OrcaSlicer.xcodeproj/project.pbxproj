@@ -290,15 +290,6 @@
 				SWIFT_OBJC_BRIDGING_HEADER = "OrcaSlicerApp/Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
-				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = (
-					"$(SRCROOT)/../build-ios-iphonesimulator-arm64/engine_bundle/lib",
-					"$(inherited)",
-				);
-				"OTHER_LDFLAGS[sdk=iphoneos*]" = (
-					"$(inherited)",
-					"-lorca_engine -lc++ -lz -liconv -lexpat -framework Foundation -framework ModelIO -framework Security -framework SystemConfiguration -framework SceneKit -framework UIKit -framework Network",
-				);
-				"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphoneos*]" = "ORCA_LINKED";
 			};
 			name = Debug;
 		};
@@ -346,15 +337,6 @@
 				SWIFT_OBJC_BRIDGING_HEADER = "OrcaSlicerApp/Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
-				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = (
-					"$(SRCROOT)/../build-ios-iphonesimulator-arm64/engine_bundle/lib",
-					"$(inherited)",
-				);
-				"OTHER_LDFLAGS[sdk=iphoneos*]" = (
-					"$(inherited)",
-					"-lorca_engine -lc++ -lz -liconv -lexpat -framework Foundation -framework ModelIO -framework Security -framework SystemConfiguration -framework SceneKit -framework UIKit -framework Network",
-				);
-				"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphoneos*]" = "ORCA_LINKED";
 			};
 			name = Release;
 		};
