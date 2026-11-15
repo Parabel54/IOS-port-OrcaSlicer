@@ -120,6 +120,12 @@ struct PlateSceneView: UIViewRepresentable {
     }
 
     func updateUIView(_ view: SCNView, context: Context) {
+        if let previous = context.coordinator.parent,
+           previous.touchMode != touchMode || previous.rotationAxis != rotationAxis ||
+            previous.paintMode != paintMode || previous.measureMode != measureMode {
+            // Cancel through the previous mode before switching ownership.
+            context.coordinator.panGesture?.isEnabled = false
+        }
         context.coordinator.parent = self
         guard let scene = view.scene,
               let content = scene.rootNode.childNode(withName: "content", recursively: false)
@@ -678,6 +684,16 @@ struct PlateSceneView: UIViewRepresentable {
             }
 
             if parent.touchMode == .orbit || parent.touchMode == .pan {
+                if gr.state == .began, parent.touchMode == .orbit {
+                    let index = parent.selectedObjectIndex
+                    let mesh = index >= 0 && index < parent.objectMeshes.count ? parent.objectMeshes[index] : parent.mesh
+                    if let mesh {
+                        let center = (mesh.min + mesh.max) * 0.5
+                        let target = SCNVector3(center.x, center.z, -center.y)
+                        view.defaultCameraController.target = target
+                        view.pointOfView?.look(at: target)
+                    }
+                }
                 cameraPan(gr, view: view, mode: parent.touchMode)
                 return
             }

@@ -24,7 +24,7 @@ Cloud registration of physical printers remains on the hosted service. Orca Clou
 
 ## Touch interaction
 
-The viewport has explicit Orbit, Pan, Move, Rotate and Select modes, plus Fit. One pan recognizer owns one-finger input; SceneKit's competing default recognizers are disabled. Orbit rotates the camera around its target. Pan translates the camera and its target in camera space. A two-finger pinch changes camera distance in every mode and cancels an in-progress object drag.
+The viewport has explicit Orbit, Pan, Move, Rotate and Select modes, plus Fit. One pan recognizer owns one-finger input; SceneKit's competing default recognizers are disabled. Orbit starts around the selected object or whole-model center, including after model moves. Changing modes cancels the prior gesture before transferring ownership. Pan translates the camera and its target in camera space. A two-finger pinch changes camera distance in every mode and cancels an in-progress object drag.
 
 Move projects screen input onto the bed plane and commits through the translation C API. Rotate previews rotation around the object's center and commits through the engine's axis rotation API. Canceled object gestures restore their preview without committing a transform. Selection does not reframe the camera. Geometry revisions refresh the rendered mesh after edits; Fit and successful model imports explicitly request framing.
 
