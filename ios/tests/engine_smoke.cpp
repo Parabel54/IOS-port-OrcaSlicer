@@ -53,6 +53,14 @@ int main(int argc, char **argv)
         !require(std::fabs(std::strtof(loaded_height, nullptr) - 0.16f) < 0.0001f,
                  "Orca project restores layer height"))
         return 4;
+    float before[6]{}, after[6]{};
+    if (!require(orca_session_model_bounds(session.get(), &before[0], &before[1], &before[2], &before[3], &before[4], &before[5]) == 0, "read pre-rotation bounds") ||
+        !require(orca_session_rotate_object_axis(session.get(), 0, 2, 90) == 0, "rotate imported object around Z") ||
+        !require(orca_session_model_bounds(session.get(), &after[0], &after[1], &after[2], &after[3], &after[4], &after[5]) == 0, "read rotated bounds") ||
+        !require(std::fabs(before[0] + before[3] - after[0] - after[3]) < 0.001f &&
+                 std::fabs(before[1] + before[4] - after[1] - after[4]) < 0.001f, "rotation preserves the visible object center") ||
+        !require(orca_session_rotate_object_axis(session.get(), 0, 2, -90) == 0, "restore object rotation"))
+        return 4;
     const char *options[][2] = {
         {"use_relative_e_distances", "1"}, {"layer_change_gcode", "G92 E0"},
         {"layer_height", "0.2"}, {"wall_loops", "2"},

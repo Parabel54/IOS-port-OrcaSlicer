@@ -39,6 +39,7 @@ struct PlateSceneView: UIViewRepresentable {
     /// Prepare tab: pan on bed plane moves selected object(s) in mm (slic3r XY).
     var touchMode: PlateTouchMode = .orbit
     var fitRequest = UUID()
+    var rotationAxis: Int = 2
     /// Tap object to select; drag on object to move (without requiring Move gizmo).
     var selectMode: Bool { [.select, .move, .rotate].contains(touchMode) }
     var moveMode: Bool { touchMode == .move }
@@ -551,7 +552,12 @@ struct PlateSceneView: UIViewRepresentable {
             case .changed:
                 guard isDragging else { return }
                 rotateDegrees = Float(gesture.translation(in: view).x) * 0.5
-                rotationNode?.eulerAngles.z = rotateDegrees * Float.pi / 180
+                let angle = rotateDegrees * Float.pi / 180
+                switch parent.rotationAxis {
+                case 0: rotationNode?.eulerAngles.x = angle
+                case 1: rotationNode?.eulerAngles.y = angle
+                default: rotationNode?.eulerAngles.z = angle
+                }
             case .ended, .cancelled, .failed:
                 let commit = gesture.state == .ended && isDragging && abs(rotateDegrees) > 0.1
                 rotationNode?.transform = SCNMatrix4Identity

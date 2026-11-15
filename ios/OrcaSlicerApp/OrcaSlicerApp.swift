@@ -109,6 +109,7 @@ struct OrcaRootView: View {
         case paintBrimEars = "Brim ears"
     }
 
+    @State private var rotationAxis = 2
     @State private var plateTouchMode: PlateTouchMode = .orbit
     @State private var fitCameraRequest = UUID()
     @State private var gizmoMode: GizmoMode = .select
@@ -2332,6 +2333,10 @@ struct OrcaRootView: View {
         }
     }
 
+    private var activePlateTouchMode: PlateTouchMode {
+        mainTab == .prepare ? plateTouchMode : (plateTouchMode == .pan ? .pan : .orbit)
+    }
+
     private var plateStage: AnyView {
         AnyView(ZStack {
             PlateSceneView(
@@ -2344,10 +2349,11 @@ struct OrcaRootView: View {
                 bedSize: engine.bedSize,
                 bedTexturePath: engine.bedTexturePath,
                 accent: UIColor(red: 0, green: 150 / 255, blue: 136 / 255, alpha: 1),
-                touchMode: plateTouchMode,
+                touchMode: activePlateTouchMode,
                 fitRequest: fitCameraRequest,
+                rotationAxis: rotationAxis,
                 onRotateCommit: { degrees, index in
-                    engine.rotateZ(degrees: degrees, index: index)
+                    engine.rotate(axis: rotationAxis, degrees: degrees, index: index)
                     status = engine.lastMessage
                 },
                 measureMode: gizmoMode == .measure && mainTab == .prepare,
@@ -2378,11 +2384,12 @@ struct OrcaRootView: View {
             )
             .overlay(alignment: .bottom) {
                 if mainTab != .device {
+                    VStack(spacing: 4) {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
                             ForEach(PlateTouchMode.allCases) { mode in
                                 if mainTab == .prepare || mode == .orbit || mode == .pan {
-                                    toolChip(mode.rawValue, mode.icon, selected: plateTouchMode == mode) {
+                                    toolChip(mode.rawValue, mode.icon, selected: activePlateTouchMode == mode) {
                                         plateTouchMode = mode
                                         gizmoMode = mode == .move ? .move : mode == .rotate ? .rotate : .select
                                         moveMode = mode == .move
@@ -2392,6 +2399,14 @@ struct OrcaRootView: View {
                             }
                             toolChip("Fit", "arrow.up.left.and.arrow.down.right") { fitCameraRequest = UUID() }
                         }.padding(8)
+                    }
+                    if activePlateTouchMode == .rotate {
+                        Picker("Rotation axis", selection: $rotationAxis) {
+                            Text("X").tag(0)
+                            Text("Y").tag(1)
+                            Text("Z").tag(2)
+                        }.pickerStyle(.segmented).padding(.horizontal, 8).padding(.bottom, 8)
+                    }
                     }.background(.ultraThinMaterial).clipShape(RoundedRectangle(cornerRadius: 12)).padding(8)
                 }
             }

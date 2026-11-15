@@ -26,7 +26,7 @@ Cloud registration of physical printers remains on the hosted service. Orca Clou
 
 The viewport has explicit Orbit, Pan, Move, Rotate and Select modes, plus Fit. One pan recognizer owns one-finger input; SceneKit's competing default recognizers are disabled. Orbit rotates the camera around its target. Pan translates the camera and its target in camera space. A two-finger pinch changes camera distance in every mode and cancels an in-progress object drag.
 
-Move projects screen input onto the bed plane and commits through the translation C API. Rotate previews rotation around the object's center and commits through the engine's Z-axis rotation API. Canceled object gestures restore their preview without committing a transform. Selection does not reframe the camera. Geometry revisions refresh the rendered mesh after edits; Fit and successful model imports explicitly request framing.
+Move projects screen input onto the bed plane and commits through the translation C API. Rotate previews rotation around the object's center and commits through the engine's axis rotation API. Canceled object gestures restore their preview without committing a transform. Selection does not reframe the camera. Geometry revisions refresh the rendered mesh after edits; Fit and successful model imports explicitly request framing.
 
 The controls drawer remains independent of the gesture-mode strip. Its handle can hide, compact or expand the scrollable controls.
 

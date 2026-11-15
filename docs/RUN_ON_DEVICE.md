@@ -204,4 +204,4 @@ Protocol fixtures verify requests and error handling without contacting a printe
 
 ### Touch controls and installed build
 
-Choose **Orbit**, **Pan**, **Move**, **Rotate** or **Select** in the viewport strip. Each uses one finger. Pinch with two fingers to zoom in any mode. Move translates the object on the bed; Rotate turns it around Z. Use **Fit** to frame the model again. The drawer handle can still hide the lower controls. **About** shows the build revision so an older installed IPA can be distinguished from a new build.
+Choose **Orbit**, **Pan**, **Move**, **Rotate** or **Select** in the viewport strip. Each uses one finger. Pinch with two fingers to zoom in any mode. Move translates the object on the bed; Rotate offers X, Y and Z axes. Use **Fit** to frame the model again. The drawer handle can still hide the lower controls. **About** shows the build revision so an older installed IPA can be distinguished from a new build.

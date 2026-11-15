@@ -1160,7 +1160,13 @@ int orca_session_rotate_object_axis(
         for_each_object(s, index, [&](ModelObject *obj) {
             for (ModelInstance *inst : obj->instances) {
                 if (!inst) continue;
+                // Instance origins need not coincide with the visible mesh
+                // center (notably for 3MF). Keep the object under the finger.
+                const Vec3d center = obj->instance_bounding_box(*inst).center();
                 inst->set_rotation(ax, inst->get_rotation(ax) + rad);
+                obj->invalidate_bounding_box();
+                const Vec3d rotated_center = obj->instance_bounding_box(*inst).center();
+                inst->set_offset(inst->get_offset() + center - rotated_center);
             }
             obj->invalidate_bounding_box();
             obj->ensure_on_bed();
