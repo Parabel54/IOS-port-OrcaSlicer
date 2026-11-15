@@ -205,6 +205,8 @@ PYLAYOUT
       2>&1 | tee "$TEST_DIR/ui-test.log"
     xcrun xcresulttool export attachments --path "$TEST_DIR/tablet-orientation.xcresult" \
       --output-path "$TEST_DIR/ui-attachments"
+    # XCTest may reinstall the app and replace its data container.
+    APP_DATA="$(xcrun simctl get_app_container "$DEVICE" com.orcaslicer.ios data)"
     cp "$APP_DATA/tmp/orca-workspace-landscape.json" "$TEST_DIR/tablet-landscape.json"
   fi
   ios_test_run 20 xcrun simctl shutdown "$DEVICE"
