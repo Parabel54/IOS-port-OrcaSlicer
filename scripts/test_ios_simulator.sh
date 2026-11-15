@@ -31,7 +31,7 @@ xcrun --sdk iphonesimulator clang++ -std=c++17 -arch arm64 \
   -framework SceneKit -framework Network -o "$TEST_DIR/engine_smoke"
 codesign --force --sign - "$TEST_DIR/engine_smoke"
 # Use a runtime from the selected Xcode SDK family. Hosted runners can also
-# contain a newer Xcode's runtime, which leaves launch services unreliable.
+# contain several runtime families; keep the build and test toolchains aligned.
 SDK_VERSION="$(xcrun --sdk iphonesimulator --show-sdk-version)"
 RUNTIME="$(xcrun simctl list runtimes -j | python3 -c '
 import json, sys
@@ -83,6 +83,9 @@ PYDIAG
 trap cleanup EXIT
 ios_test_run 120 xcrun simctl boot "$DEVICE"
 ios_test_run 240 xcrun simctl bootstatus "$DEVICE" -b
+# bootstatus can finish while SpringBoard's launch service is still warming up.
+# A system app proves that service responds before installing the slicer.
+ios_test_run 90 xcrun simctl launch "$DEVICE" com.apple.Preferences
 APP_BUNDLE="$ROOT/build-ios-app/Build/Products/Release-iphonesimulator/OrcaSlicer.app"
 ios_test_run 180 xcrun simctl spawn "$DEVICE" "$TEST_DIR/engine_smoke" "$TEST_DIR" "$APP_BUNDLE" \
   2>&1 | tee "$TEST_DIR/result.log"
@@ -137,6 +140,8 @@ for variant in compact tablet; do
   DEVICE="$(ios_test_run 120 xcrun simctl create "OrcaWorkspace-$variant" "$device_type" "$RUNTIME")"
   ios_test_run 120 xcrun simctl boot "$DEVICE"
   ios_test_run 240 xcrun simctl bootstatus "$DEVICE" -b
+  # Check the system launcher before exercising the slicer on a fresh device.
+  ios_test_run 90 xcrun simctl launch "$DEVICE" com.apple.Preferences
   ios_test_run 120 xcrun simctl install "$DEVICE" "$APP_BUNDLE"
   APP_DATA="$(xcrun simctl get_app_container "$DEVICE" com.orcaslicer.ios data)"
   mkdir -p "$APP_DATA/Documents"
