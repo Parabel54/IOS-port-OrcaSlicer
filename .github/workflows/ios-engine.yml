@@ -38,23 +38,36 @@ jobs:
         run: python3 -m unittest discover -s scripts/tests -p test_ios_project.py -v
       - name: Check Swift and C interface
         run: bash scripts/check_ios_swift.sh "${{ matrix.sdk }}"
+      - name: Identify Apple toolchain
+        id: toolchain
+        run: echo "id=$(xcodebuild -version | shasum -a 256 | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+      - name: Restore compiled engine
+        id: engine-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build-ios-${{ matrix.sdk }}-arm64/engine_bundle
+          key: ios-engine-${{ runner.os }}-${{ runner.arch }}-${{ matrix.sdk }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('src/**', 'deps_src/**', 'deps/**', 'cmake/**', 'version.inc', 'CMakeLists.txt', 'scripts/build_ios_deps.sh', 'scripts/build_ios_engine_after_deps.sh', 'scripts/bundle_engine_libs.sh', '.github/workflows/ios-engine.yml') }}
       - name: Install build tools
+        if: steps.engine-cache.outputs.cache-hit != 'true'
         run: brew install cmake autoconf automake libtool pkg-config ccache
       - name: Restore SDK dependencies
+        if: steps.engine-cache.outputs.cache-hit != 'true'
         id: deps-cache
         uses: actions/cache/restore@v4
         with:
           path: deps/build-ios-${{ matrix.sdk }}-arm64
           key: ios-deps-${{ runner.os }}-${{ runner.arch }}-${{ matrix.sdk }}-${{ hashFiles('deps/**', 'cmake/**', 'scripts/build_ios_deps.sh') }}
       - name: Build dependencies
+        if: steps.engine-cache.outputs.cache-hit != 'true'
         run: bash scripts/build_ios_deps.sh "${{ matrix.sdk }}" arm64
       - name: Save SDK dependencies
-        if: steps.deps-cache.outputs.cache-hit != 'true'
+        if: steps.engine-cache.outputs.cache-hit != 'true' && steps.deps-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: deps/build-ios-${{ matrix.sdk }}-arm64
           key: ${{ steps.deps-cache.outputs.cache-primary-key }}
       - name: Restore compiler cache
+        if: steps.engine-cache.outputs.cache-hit != 'true'
         id: compiler-cache
         uses: actions/cache/restore@v4
         with:
@@ -62,9 +75,19 @@ jobs:
           key: ios-ccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.sdk }}-${{ github.sha }}
           restore-keys: ios-ccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.sdk }}-
       - name: Bound compiler cache
+        if: steps.engine-cache.outputs.cache-hit != 'true'
         run: ccache --max-size 1G
       - name: Build and bundle engine
+        id: build-engine
+        if: steps.engine-cache.outputs.cache-hit != 'true'
         run: bash scripts/build_ios_engine_after_deps.sh "${{ matrix.sdk }}" arm64
+      - name: Save compiled engine
+        if: steps.build-engine.outcome == 'success'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: build-ios-${{ matrix.sdk }}-arm64/engine_bundle
+          key: ${{ steps.engine-cache.outputs.cache-primary-key }}
       - name: Save compiler cache
         if: always() && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true'
         continue-on-error: true
