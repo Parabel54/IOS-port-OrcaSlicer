@@ -36,6 +36,7 @@ if [[ "$SDK" == iphonesimulator ]]; then
   xcrun --sdk "$SDK" swiftc -typecheck -parse-as-library -swift-version 5 \
     -sdk "$SDK_PATH" -target "$SWIFT_TARGET" \
     -F "$PLATFORM_PATH/Developer/Library/Frameworks" \
+    -I "$PLATFORM_PATH/Developer/usr/lib" \
     "$ROOT/ios/tests/WorkspaceUITests.swift"
 fi
 
