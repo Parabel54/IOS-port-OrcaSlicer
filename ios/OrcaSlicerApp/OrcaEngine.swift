@@ -2076,11 +2076,31 @@ final class OrcaEngine: ObservableObject {
             let defW = defaultWidth
             let records = UnsafeBufferPointer(start: segments, count: count)
             var paths: [GCodePathGeometry.Segment] = []
+            var roleLabels: [Int32: String] = [:]
+            var layerZ: [UInt32: Float] = [:]
+            var minZ = Float.greatestFiniteMagnitude, maxZ = -Float.greatestFiniteMagnitude
+            var minFeed = Float.greatestFiniteMagnitude, maxFeed: Float = 0
+            var minWidth = Float.greatestFiniteMagnitude, maxWidth: Float = 0
+            var minHeight = Float.greatestFiniteMagnitude, maxHeight: Float = 0
             for (ordinal, move) in records.enumerated() {
                 let start = SCNVector3(move.start_x, move.start_y, move.start_z)
                 let end = SCNVector3(move.end_x, move.end_y, move.end_z)
                 let kind = GCodePathGeometry.MoveKind(rawValue: Int(move.move_type)) ?? .travel
-                let feature = kind == .extrude ? String(cString: orca_preview_role_name(move.role)) : kind.label
+                if kind == .extrude && roleLabels[move.role] == nil {
+                    roleLabels[move.role] = String(cString: orca_preview_role_name(move.role))
+                }
+                let feature = kind == .extrude ? (roleLabels[move.role] ?? "Undefined") : kind.label
+                if move.feedrate > 0 { minFeed = min(minFeed, move.feedrate); maxFeed = max(maxFeed, move.feedrate) }
+                if kind == .extrude {
+                    if move.width > 0 { minWidth = min(minWidth, move.width); maxWidth = max(maxWidth, move.width) }
+                    if move.height > 0 { minHeight = min(minHeight, move.height); maxHeight = max(maxHeight, move.height) }
+                    // Desktop Layers excludes startup/custom extrusion from layer
+                    // stops: a purge at Z=10 must not replace the first layer's Z.
+                    if feature != "Custom" {
+                        minZ = min(minZ, move.end_z); maxZ = max(maxZ, move.end_z)
+                        layerZ[move.layer_id] = max(layerZ[move.layer_id] ?? move.end_z, move.end_z)
+                    }
+                }
                 let tool = Int(move.extruder_id)
                 let density = densities.indices.contains(tool) ? densities[tool] : (densities.first ?? 1.24)
                 let massPerMM = move.feedrate > 0 ? move.volumetric_flow / (move.feedrate / 60) * density : 0
@@ -2105,22 +2125,13 @@ final class OrcaEngine: ObservableObject {
                     feature: feature, width: move.width, feedrate: move.feedrate, height: move.height,
                     kind: kind, metrics: metrics, firstMove: ordinal, lastMove: ordinal))
             }
-            // One stop per processed print layer, including vase mode. A Z
-            // value per endpoint incorrectly created thousands of fake layers.
-            var layerZ: [UInt32: Float] = [:]
-            var minZ = Float.greatestFiniteMagnitude, maxZ = -Float.greatestFiniteMagnitude
-            for move in records where move.travel == 0 {
-                minZ = min(minZ, move.end_z); maxZ = max(maxZ, move.end_z)
-                layerZ[move.layer_id] = max(layerZ[move.layer_id] ?? move.end_z, move.end_z)
-            }
-            let feeds = paths.map { $0.feedrate }.filter { $0 > 0 }
-            let widths = records.filter { $0.travel == 0 && $0.width > 0 }.map { $0.width }
-            let heights = records.filter { $0.travel == 0 && $0.height > 0 }.map { $0.height }
+            // Accumulate ranges in the conversion pass instead of copying large
+            // arrays of bridge records with filter/map for each numeric field.
             var path = GCodePathGeometry(segments: paths,
                 zMin: minZ.isFinite && minZ <= maxZ ? minZ : 0, zMax: maxZ >= minZ ? maxZ : 0.2,
-                feedMin: feeds.min() ?? 0, feedMax: feeds.max() ?? 1,
-                widthRange: (widths.min() ?? defW)...(widths.max() ?? defW),
-                layerHeightRange: (heights.min() ?? 0.2)...(heights.max() ?? 0.2),
+                feedMin: minFeed <= maxFeed ? minFeed : 0, feedMax: maxFeed,
+                widthRange: (minWidth <= maxWidth ? minWidth : defW)...(maxWidth > 0 ? maxWidth : defW),
+                layerHeightRange: (minHeight <= maxHeight ? minHeight : 0.2)...(maxHeight > 0 ? maxHeight : 0.2),
                 defaultWidth: defW)
             path.prepareColorRanges()
             return (path, Array(Set(layerZ.values)).sorted(), totalCount > count)
