@@ -25,6 +25,7 @@ int main(int argc, char **argv)
         return condition;
     };
     if (!require(orca_session_add_box(session.get(), "Smoke cube", 20, 20, 20) >= 0, "create cube") ||
+        !require(orca_session_repair_mesh(session.get(), 0) == 0, "repair cube through current engine API") ||
         !require(orca_session_save_3mf(session.get(), project.c_str()) == 0, "save project") ||
         !require(orca_session_load_model(session.get(), project.c_str()) == 0, "import project"))
         return 4;
