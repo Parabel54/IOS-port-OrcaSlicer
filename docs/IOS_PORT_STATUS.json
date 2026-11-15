@@ -1,5 +1,5 @@
 {
-  "status": "integration_pending_macos_verification",
+  "status": "simulator_workflow_verified",
   "updated": "2026-11-14",
   "branch": "ios-modernization",
   "upstream": {
@@ -8,12 +8,22 @@
   },
   "completion_percent": null,
   "verification": {
-    "dependency_configuration_linux": "passed",
-    "project_generator_tests": "passed",
-    "iphoneos_build": "not_run",
-    "iphonesimulator_build": "not_run",
+    "project_generator_tests": "passed (4)",
+    "iphoneos_build": "passed",
+    "iphonesimulator_build": "passed",
+    "swift_c_interface_checks": "passed on both SDKs",
+    "simulator_engine_workflow": "passed: repair, 3MF/model/config round trip, slice, processed preview, export, validation, cancellation and recovery",
+    "simulator_app_launch": "passed; screenshot captured",
+    "touch_driven_ui_workflow": "not_run",
     "physical_device": "not_run",
     "desktop_slice_equivalence": "not_run"
   },
-  "remaining_work": "docs/IOS_MODERNIZATION.md"
+  "remaining_work": "docs/IOS_MODERNIZATION.md",
+  "verified_commit": "da025e94cc45d2b01bc54d69b77b0e1c8d11b679",
+  "verified_run": "https://github.com/Parabel54/IOS-port-OrcaSlicer/actions/runs/43668911943",
+  "verified_at_utc": "2026-11-15T03:02:37Z",
+  "artifacts": {
+    "unsigned_iphone_ipa": "https://github.com/Parabel54/IOS-port-OrcaSlicer/actions/runs/43668911943/artifacts/14143159653",
+    "simulator_app": "https://github.com/Parabel54/IOS-port-OrcaSlicer/actions/runs/43668911943/artifacts/14144131914"
+  }
 }
