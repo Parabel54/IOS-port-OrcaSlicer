@@ -500,36 +500,6 @@ struct OrcaRootView: View {
         .background(OrcaTheme.panel))
     }
 
-    private var hintOverlay: some View {
-        // Model / bed facts only — no tutorial tip copy
-        Group {
-            if engine.hasModel || !engine.boundsText.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    if let name = engine.modelName {
-                        Text(name)
-                            .font(.system(size: 11, design: .monospaced))
-                            .lineLimit(1)
-                    }
-                    if !engine.boundsText.isEmpty {
-                        Text(engine.boundsText)
-                            .font(.system(size: 11, design: .monospaced))
-                    }
-                    Text(String(format: "%.0f × %.0f × %.0f mm", engine.bedSize.x, engine.bedSize.y, engine.bedHeight))
-                        .font(.system(size: 11, design: .monospaced))
-                    if !engine.selectedPrinter.isEmpty {
-                        Text(engine.selectedPrinter)
-                            .font(.system(size: 10, design: .monospaced))
-                            .lineLimit(1)
-                    }
-                }
-                .foregroundStyle(OrcaTheme.muted)
-                .padding(10)
-                .background(OrcaTheme.panel.opacity(0.92))
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            }
-        }
-    }
-
     enum PrinterHostType: String, CaseIterable, Identifiable {
         case moonraker = "Moonraker"
         case octoprint = "OctoPrint"
@@ -1961,24 +1931,6 @@ struct OrcaRootView: View {
         }.padding(.horizontal, 8))
     }
 
-    private func actionButton(title: String, systemImage: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            VStack(spacing: 6) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 16, weight: .semibold))
-                Text(title)
-                    .font(.system(size: 12, weight: .semibold))
-                    .lineLimit(1)
-            }
-            .frame(maxWidth: .infinity)
-            .frame(height: 56)
-            .background(OrcaTheme.elevated)
-            .foregroundStyle(OrcaTheme.text)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        }
-        .buttonStyle(.plain)
-    }
-
     private var objectPickerRow: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
@@ -2287,6 +2239,9 @@ struct OrcaRootView: View {
             }
             .overlay(alignment: .topLeading) {
                 Menu {
+                    if let name = engine.modelName { Text(name) }
+                    if !engine.boundsText.isEmpty { Text(engine.boundsText) }
+                    if !engine.selectedPrinter.isEmpty { Text(engine.selectedPrinter) }
                     if !status.isEmpty { Text(status) }
                     Text(engine.lastSliceStatsText)
                     Button("Fit model") { fitCameraRequest = UUID() }
@@ -3195,106 +3150,6 @@ struct OrcaRootView: View {
         })
     }
 
-    /// Searchable list of system presets (printer / process / filament).
-    private func presetPickerSheet(
-        title: String,
-        search: Binding<String>,
-        items: [String],
-        selected: String,
-        vendorChips: [String],
-        vendorFilter: Binding<String>,
-        onPick: @escaping (String) -> Void
-    ) -> some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                if !vendorChips.isEmpty {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
-                            vendorChip("All", selected: vendorFilter.wrappedValue.isEmpty) {
-                                vendorFilter.wrappedValue = ""
-                            }
-                            ForEach(vendorChips, id: \.self) { v in
-                                vendorChip(v, selected: vendorFilter.wrappedValue == v) {
-                                    vendorFilter.wrappedValue = v
-                                }
-                            }
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                    }
-                    .background(OrcaTheme.panel)
-                }
-                List {
-                    if items.isEmpty {
-                        Text(engine.presetsLoaded ? "No matches" : "Profiles not loaded")
-                            .foregroundStyle(OrcaTheme.muted)
-                            .listRowBackground(OrcaTheme.panel)
-                    } else {
-                        ForEach(items.prefix(800), id: \.self) { name in
-                            Button {
-                                onPick(name)
-                            } label: {
-                                HStack {
-                                    Text(name)
-                                        .foregroundStyle(OrcaTheme.text)
-                                        .multilineTextAlignment(.leading)
-                                    Spacer()
-                                    if name == selected {
-                                        Image(systemName: "checkmark.circle.fill")
-                                            .foregroundStyle(OrcaTheme.accent)
-                                    }
-                                }
-                            }
-                            .listRowBackground(OrcaTheme.panel)
-                        }
-                        if items.count > 800 {
-                            Text("Showing 800 of \(items.count) — refine search")
-                                .font(.caption)
-                                .foregroundStyle(OrcaTheme.muted)
-                                .listRowBackground(OrcaTheme.panel)
-                        }
-                    }
-                }
-                .scrollContentBackground(.hidden)
-            }
-            .background(OrcaTheme.bg)
-            .searchable(text: search, prompt: "Search \(title.lowercased())")
-            .navigationTitle(title)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Done") {
-                        showPrinterPicker = false
-                        showProcessPicker = false
-                        showFilamentPicker = false
-                    }
-                    .foregroundStyle(OrcaTheme.accent)
-                }
-            }
-            .preferredColorScheme(.dark)
-        }
-        .presentationDetents([.medium, .large])
-    }
-
-    private func slotFilamentLabel(_ slot: Int) -> String {
-        let n = engine.filamentSlotName(slot)
-        return n.isEmpty ? "—" : n
-    }
-
-    private func vendorChip(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 12, weight: .semibold))
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(selected ? OrcaTheme.accent.opacity(0.25) : OrcaTheme.elevated)
-                .foregroundStyle(selected ? OrcaTheme.accent : OrcaTheme.muted)
-                .clipShape(Capsule())
-        }
-        .buttonStyle(.plain)
-    }
-
-    /// Pull key process options into sheet fields after profile load / open.
     private func syncProcessFieldsFromEngine() {
         if let v = engine.getOptionFirst("layer_height") { layerHeight = v }
         if let v = engine.getOptionFirst("wall_loops") { walls = v }

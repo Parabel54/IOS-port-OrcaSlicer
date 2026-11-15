@@ -12,10 +12,11 @@ def catalog():
     source = re.sub(r'/\*.*?\*/|//[^\n]*', '', source, flags=re.S)
     locations, pages = {}, {}
     functions = [(0, 'TabPrint::build'), (1, 'TabFilament::build'),
-                 (2, 'TabPrinter::build_fff'), (2, 'TabPrinter::build_unregular_pages')]
+                 (2, 'TabPrinter::build_fff'), (2, 'TabPrinter::build_kinematics_page'),
+                 (2, 'TabPrinter::build_unregular_pages')]
     for scope, function in functions:
-        body = source.split('void ' + function + '(', 1)[1]
-        body = re.split(r'\nvoid \w+::', body, maxsplit=1)[0]
+        body = re.split(r'(?:void|PageShp) ' + re.escape(function) + r'\(', source, maxsplit=1)[1]
+        body = re.split(r'\n(?:void|PageShp) \w+::', body, maxsplit=1)[0]
         page, group = 'Other', 'General'
         pages.setdefault(scope, [])
         pattern = (r'add_options_page\(L\("([^"]+)"\)|new_optgroup\(L\("([^"]+)"\)|'

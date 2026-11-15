@@ -112,7 +112,10 @@ enum NativePostProcessing {
         guard highest <= 65535 else { throw Failure.invalidOptions }
         if colors.count <= highest { colors += Array(repeating: "", count: highest + 1 - colors.count) }
         if types.count <= highest { types += Array(repeating: "", count: highest + 1 - types.count) }
-        let metadata = Data(("; zmod_color_data = " + tools.map(String.init).joined(separator: ",") + "|" + colors.joined(separator: ",") + "|" + types.joined(separator: ",") + "\n").utf8)
+        let toolString = tools.map { String($0) }.joined(separator: ",")
+        let colorString = colors.joined(separator: ",")
+        let typeString = types.joined(separator: ",")
+        let metadata = Data("; zmod_color_data = \(toolString)|\(colorString)|\(typeString)\n".utf8)
         let temporary = file.deletingLastPathComponent().appendingPathComponent(UUID().uuidString + ".gcode")
         FileManager.default.createFile(atPath: temporary.path, contents: nil)
         defer { try? FileManager.default.removeItem(at: temporary) }
@@ -159,10 +162,13 @@ enum NativePostProcessing {
         guard depth == 0, let raw = try? JSONSerialization.jsonObject(with: Data(line[start..<end].utf8)) as? [[NSNumber]], raw.count >= 5,
               raw.allSatisfy({ $0.count == 2 && $0.allSatisfy { CFGetTypeID($0) != CFBooleanGetTypeID() && $0.doubleValue.isFinite } }) else { return bytes }
         let points = raw.map { Point(x: $0[0].doubleValue, y: $0[1].doubleValue) }
-        let minX = points.indices.min(by: { points[$0].x < points[$1].x })!
-        let maxX = points.indices.max(by: { points[$0].x < points[$1].x })!
-        let minY = points.indices.min(by: { points[$0].y < points[$1].y })!
-        let maxY = points.indices.max(by: { points[$0].y < points[$1].y })!
+        var minX = 0, maxX = 0, minY = 0, maxY = 0
+        for i in points.indices {
+            if points[i].x < points[minX].x { minX = i }
+            if points[i].x > points[maxX].x { maxX = i }
+            if points[i].y < points[minY].y { minY = i }
+            if points[i].y > points[maxY].y { maxY = i }
+        }
         var result: [Point] = []
         if tolerance == 0 {
             result = [Point(x: points[minX].x, y: points[minY].y), Point(x: points[maxX].x, y: points[minY].y), Point(x: points[maxX].x, y: points[maxY].y), Point(x: points[minX].x, y: points[maxY].y)]
@@ -196,7 +202,8 @@ enum NativePostProcessing {
             if body.contains(".") { while body.hasSuffix("0") { body.removeLast() }; if body.hasSuffix(".") { body.removeLast() } }
             return body
         }
-        let polygon = "[" + result.map { "[" + number($0.x) + "," + number($0.y) + "]" }.joined(separator: ",") + "]"
+        let coordinates: [String] = result.map { point in "[\(number(point.x)),\(number(point.y))]" }
+        let polygon = "[" + coordinates.joined(separator: ",") + "]"
         return Data((String(line[..<start]) + polygon + String(line[end...])).utf8)
     }
 

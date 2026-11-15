@@ -93,8 +93,32 @@ struct PlateSceneView: UIViewRepresentable {
         coordinator.cameraDrag(delta: CGPoint(x: 60, y: 20), view: view, mode: .orbit)
         let afterOrbit = camera.position
         let offset = SIMD3<Float>(afterOrbit.x - target.x, afterOrbit.y - target.y, afterOrbit.z - target.z)
-        return abs(simd_length(offset) - distance / 2) < 0.1 &&
-            abs(afterOrbit.x - beforeOrbit.x) + abs(afterOrbit.z - beforeOrbit.z) > 0.01
+        guard abs(simd_length(offset) - distance / 2) < 0.1,
+              abs(afterOrbit.x - beforeOrbit.x) + abs(afterOrbit.z - beforeOrbit.z) > 0.01 else { return false }
+        // A zero-distance touch must preserve both framing and orientation.
+        let orientation = camera.simdOrientation
+        coordinator.cameraDrag(delta: .zero, view: view, mode: .orbit)
+        guard simd_length(camera.simdPosition - SIMD3<Float>(afterOrbit.x, afterOrbit.y, afterOrbit.z)) < 0.001,
+              abs(simd_dot(orientation.vector, camera.simdOrientation.vector)) > 0.9999 else { return false }
+        let originalSize = view.bounds.size
+        let startPosition = camera.simdPosition
+        let startOrientation = camera.simdOrientation
+        coordinator.cameraDrag(delta: CGPoint(x: originalSize.width * 0.1, y: 0), view: view, mode: .orbit)
+        let phonePosition = camera.simdPosition
+        camera.simdPosition = startPosition
+        camera.simdOrientation = startOrientation
+        view.frame.size = CGSize(width: 1024, height: 1366)
+        coordinator.cameraDrag(delta: CGPoint(x: 102.4, y: 0), view: view, mode: .orbit)
+        guard simd_length(camera.simdPosition - phonePosition) < 0.01 else { return false }
+        coordinator.cameraDrag(delta: CGPoint(x: -102.4, y: 0), view: view, mode: .orbit)
+        guard simd_length(camera.simdPosition - startPosition) < 0.01 else { return false }
+        let anchor = CGPoint(x: 400, y: 500)
+        let depth = view.projectPoint(view.defaultCameraController.target).z
+        let focus = view.unprojectPoint(SCNVector3(Float(anchor.x), Float(anchor.y), depth))
+        coordinator.zoom(scale: 1.5, view: view, anchor: anchor)
+        let projected = view.projectPoint(focus)
+        return abs(projected.x - Float(anchor.x)) < 0.5 && abs(projected.y - Float(anchor.y)) < 0.5
+
     }
 
     func makeUIView(context: Context) -> SCNView {

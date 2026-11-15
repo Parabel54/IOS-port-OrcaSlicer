@@ -22,6 +22,7 @@ class DocumentAssociationTests(unittest.TestCase):
         self.assertIn('public.geometry-definition-format', handlers)
         self.assertIn('public.zip-archive', handlers)
         self.assertNotIn('public.object-code', handlers)
+        self.assertFalse(info['UIRequiresFullScreen'])
         for item in info['CFBundleDocumentTypes']:
             self.assertEqual(item['LSHandlerRank'], 'Alternate')
         self.assertNotIn('NSAllowsArbitraryLoadsInLocalNetwork', info['NSAppTransportSecurity'])
@@ -68,7 +69,7 @@ class ProjectGenerationTests(unittest.TestCase):
         first = project.read_bytes()
         self.assertIn(b'ORCA_LINKED', first)
         self.assertIn(b'iphoneos*', first)
-        for source in (b'PrinterConnections.swift', b'ConnectionsPanel.swift', b'StartupRecovery.swift', b'StartupRecoveryView.swift', b'DocumentImport.swift', b'NativeDocumentPicker.swift', b'OrcaCloudAPI.swift', b'NativeCloudSignIn.swift', b'OrcaCloudAccount.swift', b'CloudAccountPanel.swift', b'FlashforgeClient.swift', b'ControlsDrawer.swift'):
+        for source in (b'PrinterConnections.swift', b'ConnectionsPanel.swift', b'StartupRecovery.swift', b'StartupRecoveryView.swift', b'DocumentImport.swift', b'NativeDocumentPicker.swift', b'OrcaCloudAPI.swift', b'NativeCloudSignIn.swift', b'OrcaCloudAccount.swift', b'CloudAccountPanel.swift', b'FlashforgeClient.swift', b'ControlsDrawer.swift', b'NativePostProcessing.swift'):
             self.assertIn(source + b' in Sources', first)
         stale = self.root / 'ios/OrcaSlicerApp/Resources/profiles/stale.json'
         stale.write_text('{}')
