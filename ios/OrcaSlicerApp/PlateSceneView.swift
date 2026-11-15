@@ -1294,6 +1294,21 @@ struct GCodePathGeometry {
         guard let geometry = node.childNodes.first else { return false }
         let bounds = geometry.boundingBox
         guard bounds.max.z - bounds.min.z >= 0.29 && bounds.max.y - bounds.min.y >= 0.44 else { return false }
+        guard let mesh = geometry.geometry, let source = mesh.sources(for: .vertex).first,
+              let element = mesh.elements.first else { return false }
+        let topIndices = element.data.withUnsafeBytes { bytes in
+            (0..<3).map { Int(bytes.loadUnaligned(fromByteOffset: $0 * 4, as: UInt32.self)) }
+        }
+        func point(_ index: Int) -> SIMD3<Float> {
+            source.data.withUnsafeBytes { bytes in
+                let offset = source.dataOffset + index * source.dataStride
+                return SIMD3<Float>(bytes.loadUnaligned(fromByteOffset: offset, as: Float.self),
+                    bytes.loadUnaligned(fromByteOffset: offset + 4, as: Float.self),
+                    bytes.loadUnaligned(fromByteOffset: offset + 8, as: Float.self))
+            }
+        }
+        let topNormal = simd_cross(point(topIndices[1]) - point(topIndices[0]), point(topIndices[2]) - point(topIndices[0]))
+        guard topNormal.z > 0 else { return false }
         // A corner between sampled vertices must survive a long toolpath.
         let corner = Segment(points: (0..<8002).map {
             SCNVector3(Float($0) * 0.01, $0 == 1 ? 100 : 0, 1)
@@ -1566,13 +1581,14 @@ struct GCodePathGeometry {
             }
             for j in 0..<(points.count-1) {
                 let a = base+UInt32(j*4), b = a+4
-                indices.append(contentsOf: [a,b,a+1,a+1,b,b+1,
-                    a,a+2,b,b,a+2,b+2, a+1,b+1,a+3,a+3,b+1,b+3,
-                    a+2,a+3,b+2,b+2,a+3,b+3])
+                // Outward winding matters now that beads use lit materials.
+                indices.append(contentsOf: [a,a+1,b,a+1,b+1,b,
+                    a,b,a+2,b,b+2,a+2, a+1,a+3,b+1,a+3,b+3,b+1,
+                    a+2,b+2,a+3,b+2,b+3,a+3])
             }
             let last = base+UInt32((points.count-1)*4)
-            indices.append(contentsOf: [base,base+1,base+2,base+2,base+1,base+3,
-                last,last+2,last+1,last+1,last+2,last+3])
+            indices.append(contentsOf: [base,base+2,base+1,base+2,base+3,base+1,
+                last,last+1,last+2,last+1,last+3,last+2])
         }
 
         mutating func flush(into root: SCNNode) {
