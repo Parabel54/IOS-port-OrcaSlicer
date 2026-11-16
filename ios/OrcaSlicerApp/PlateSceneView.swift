@@ -455,7 +455,14 @@ struct PlateSceneView: UIViewRepresentable {
                             for z in [Float(990), 1010] {
                                 let point = view.projectPoint(SCNVector3(x, z, -y))
                                 guard point.x >= 0, point.x <= Float(size.width),
-                                      point.y >= 0, point.y <= Float(size.height), point.z >= 0, point.z <= 1 else { return fail("bounds \(size) \(projection) \(preset), point \(point), source (\(x),\(y),\(z))") }
+                                      point.y >= 0, point.y <= Float(size.height), point.z >= 0, point.z <= 1 else {
+                                    let pose = camera.simdTransform
+                                    let presented = camera.presentation.simdTransform
+                                    let center = view.projectPoint(SCNVector3(5, 1000, -5))
+                                    SCNTransaction.flush()
+                                    let settled = view.projectPoint(SCNVector3(x, z, -y))
+                                    return fail("bounds \(size) \(projection) \(preset), point \(point), settled \(settled), source (\(x),\(y),\(z)), center \(center), pose \(pose), presented \(presented), near/far \(camera.camera?.zNear ?? 0)/\(camera.camera?.zFar ?? 0)")
+                                }
                             }
                         }
                     }
@@ -1522,15 +1529,18 @@ struct PlateSceneView: UIViewRepresentable {
             cam.camera?.zFar = max(Double(dist + radius * 3), 100)
             cam.camera?.orthographicScale = Double(radius * 1.15 / min(aspect, 1))
 
+            // Establish controller ownership before assigning the final pose.
+            // Reusing the current viewpoint also avoids resetting its controller
+            // while switching between face presets or fitting a raised model.
+            if view.pointOfView !== cam { view.pointOfView = cam }
+            if view.defaultCameraController.pointOfView !== cam { view.defaultCameraController.pointOfView = cam }
+            view.defaultCameraController.automaticTarget = false
+            view.defaultCameraController.target = target
             let direction = preset.direction
             cam.simdPosition = SIMD3(target.x, target.y, target.z) + direction * dist
             let up = preset == .top ? SCNVector3(0, 0, -1) : preset == .bottom ? SCNVector3(0, 0, 1) : SCNVector3(0, 1, 0)
             cam.look(at: target, up: up, localFront: SCNVector3(0, 0, -1))
             updateNavigationCube()
-            view.pointOfView = cam
-            view.defaultCameraController.pointOfView = cam
-            view.defaultCameraController.automaticTarget = false
-            view.defaultCameraController.target = target
         }
     }
 }
