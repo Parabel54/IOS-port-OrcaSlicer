@@ -1118,11 +1118,12 @@ final class OrcaEngine: ObservableObject {
         guard let first, let last else { return }
         let start = Double(first - 1), end = Double(last)
         let cursor = previewToolheadMove ?? start
+        let needsFullPath = previewThroughMove != .max || previewBuilding
         updateToolhead(to: cursor < start || cursor >= end ? start : cursor)
         // Show the selected range during motion; rebuild the clipped beads
         // once paused, rather than rebuilding a large mesh on every tick.
         previewThroughMove = .max
-        applyPreviewLayer()
+        if needsFullPath { applyPreviewLayer() }
         previewPlaybackRunning = true
         previewPlaybackTask = Task { @MainActor [weak self] in
             var timestamp = ProcessInfo.processInfo.systemUptime
@@ -1183,7 +1184,7 @@ final class OrcaEngine: ObservableObject {
         let lo = min(previewMinZ, previewMaxZ), hi = max(previewMinZ, previewMaxZ)
         let hidden = previewHiddenFeatures, moves = previewEnabledMoves
         let tools = previewHiddenTools, filaments = previewHiddenFilaments
-        let through = previewThroughMove, mode = previewColorMode
+        let through = previewPlaybackRunning ? Int.max : previewThroughMove, mode = previewColorMode
         let toolMarker = previewShowToolMarker, cog = previewShowCenterOfGravity
         let lightweight = previewLightweight || geo.moveCount > 250_000
         previewBuilding = true
