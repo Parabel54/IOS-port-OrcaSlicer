@@ -663,6 +663,61 @@ int main(int argc, char **argv)
         !require(orca_session_get_option(reopened.get(), "filament_mixed_gradient_range", restored_value, sizeof(restored_value)) == 0 &&
                  std::string(restored_value).find("0.9000,0.1000") != std::string::npos, "preset changes retain mixing metadata")) return 17;
     std::printf("PASS: per-slot personal materials, process/color isolation, dependent mixes and nozzle-variant alignment\n");
+    {
+        // The first component owns the virtual slot's material/nozzle variants.
+        // Keep unsaved physical temperatures while changing that inheritance.
+        diagnostic_session = reopened.get();
+        const int reordered[] = {2, 1};
+        if (!require(orca_session_set_filament_slot(reopened.get(), 1, "Variant Slot") == 0 &&
+                     orca_session_set_option(reopened.get(), "nozzle_temperature", "246,221,231,247") == 0 &&
+                     orca_session_replace_mixed_components(reopened.get(), 2, reordered, 2, nullptr, 0, -1, 0) == 0,
+                     "replace first mixed component without reassigning physical slots") ||
+            !require(orca_session_get_option(reopened.get(), "nozzle_temperature", restored_value, sizeof(restored_value)) == 0 &&
+                     std::string(restored_value) == "246,221,231,220,230", "new virtual variants preserve physical edits") ||
+            !require(std::string(orca_session_filament_slot_name(reopened.get(), 2)) == "Variant Slot" &&
+                     std::string(orca_session_selected_filament(reopened.get())) == "Slot Target", "virtual inheritance keeps first selection") ||
+            !require(orca_session_get_option(reopened.get(), "filament_mixed_sublayer_ratios", restored_value, sizeof(restored_value)) == 0 &&
+                     std::string(restored_value).find("0.4000,0.6000") != std::string::npos, "component reordering preserves exact proportions") ||
+            !require(orca_session_get_option(reopened.get(), "layer_height", restored_value, sizeof(restored_value)) == 0 &&
+                     std::string(restored_value) == "0.13", "component reordering preserves process edits")) return 17;
+    }
+    {
+        // Reuse the already loaded catalog, rather than allocate a third one.
+        diagnostic_session = session.get();
+        if (!require(orca_session_set_option(session.get(), "filament_colour", "#FF0000;#00FF00;#0000FF;#FFFFFF") == 0 &&
+                     orca_session_add_project_filament(session.get()) == 0 &&
+                     orca_session_add_mixed_filament(session.get(), mix_ids, mix_ratios, 2, 0, 0, 0) == 0,
+                     "component transition fixture with five physical slots") ||
+            !require(orca_session_clear_model(session.get()) == 0 &&
+                     orca_session_add_primitive(session.get(), 0, 10, 10, 10) == 0 &&
+                     orca_session_set_object_option(session.get(), 0, "extruder", "6") == 0 &&
+                     orca_session_paint_fill(session.get(), 0, 2, 6) >= 0, "assign object and facets to stable mixed slot")) return 17;
+        int mixed_paint_before = 0, mixed_paint_after = 0;
+        if (!require(orca_session_paint_stats(session.get(), 0, 2, 6, &mixed_paint_before) == 0 && mixed_paint_before > 0,
+                     "mixed slot has painted facets")) return 17;
+        const char *info = orca_session_mixed_filament_json(session.get(), 5);
+        if (!require(info != nullptr, "read component transition fixture")) return 17;
+        const std::string original_mix = info;
+        const int duplicates[] = {1, 1}, virtual_component[] = {1, 6}, unknown[] = {1, 7};
+        const int three_components[] = {3, 1, 2}, three_weights[] = {20, 30, 50};
+        if (!require(orca_session_replace_mixed_components(session.get(), 5, duplicates, 2, mix_ratios, 2, -1, 0) != 0 &&
+                     orca_session_replace_mixed_components(session.get(), 5, virtual_component, 2, mix_ratios, 2, -1, 0) != 0 &&
+                     orca_session_replace_mixed_components(session.get(), 5, unknown, 2, mix_ratios, 2, -1, 0) != 0 &&
+                     orca_session_replace_mixed_components(session.get(), 5, three_components, 3, three_weights, 3, 1, 0) != 0,
+                     "reject duplicate/virtual/missing components and three-way gradients")) return 17;
+        info = orca_session_mixed_filament_json(session.get(), 5);
+        if (!require(info && std::string(info) == original_mix, "failed replacements preserve mix metadata") ||
+            !require(orca_session_replace_mixed_components(session.get(), 5, three_components, 3, three_weights, 3, 0, 0) == 0 &&
+                     orca_session_replace_mixed_components(session.get(), 5, mix_ids, 2, mix_ratios, 2, 1, 1) == 0,
+                     "replace two-to-three and three-to-two components without adding slots") ||
+            !require(orca_session_get_option(session.get(), "filament_is_mixed", restored_value, sizeof(restored_value)) == 0 &&
+                     std::string(restored_value) == "0,0,0,0,0,1", "mixed slot index remains stable") ||
+            !require(orca_session_get_object_option(session.get(), 0, "extruder", restored_value, sizeof(restored_value)) == 0 &&
+                     std::string(restored_value) == "6", "component replacement keeps object assignment") ||
+            !require(orca_session_paint_stats(session.get(), 0, 2, 6, &mixed_paint_after) == 0 && mixed_paint_after == mixed_paint_before,
+                     "component replacement keeps painted facet IDs")) return 17;
+    }
+    std::printf("PASS: component replacement, virtual variants, rejected references, count transitions and painting identity\n");
     std::printf("PASS: independent process/filament persistence, canonical names and native filament addition\n");
     std::printf("PASS: primitives, centered axis scaling, flush matrix repair and processed preview height\n");
     std::printf("PASS: native preset bundle, cloud printer/filament catalog, selection and profile export\n");

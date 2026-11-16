@@ -1719,12 +1719,20 @@ final class OrcaEngine: ObservableObject {
         #endif
     }
 
-    func updateMixedFilament(_ slot: Int, ratios: [Int], gradientMode: Int, perPart: Bool) -> Bool {
+    func updateMixedFilament(_ slot: Int, components: [Int]? = nil, ratios: [Int], gradientMode: Int, perPart: Bool) -> Bool {
         #if ORCA_LINKED
         guard let session, !sessionBusy, !sliceRunning, !presetsLoading else { return false }
         let weights = ratios.map(Int32.init)
-        let result = weights.withUnsafeBufferPointer {
-            orca_session_update_mixed_filament(session, Int32(slot), $0.baseAddress, $0.count, Int32(gradientMode), perPart ? 1 : 0)
+        let result = weights.withUnsafeBufferPointer { weights in
+            if let components {
+                let ids = components.map { Int32($0 + 1) }
+                return ids.withUnsafeBufferPointer {
+                    orca_session_replace_mixed_components(session, Int32(slot), $0.baseAddress, $0.count,
+                        weights.baseAddress, weights.count, Int32(gradientMode), perPart ? 1 : 0)
+                }
+            }
+            return orca_session_update_mixed_filament(session, Int32(slot), weights.baseAddress, weights.count,
+                Int32(gradientMode), perPart ? 1 : 0)
         }
         if result == 0 {
             refreshObjectFilamentColors(); invalidateSlice()

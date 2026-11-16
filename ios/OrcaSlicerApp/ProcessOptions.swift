@@ -712,15 +712,14 @@ private struct MixedFilamentEditor: View {
                 Text("Mix two or three filaments using Orca's sublayer color mixing. Components must use the same material type.")
                 Picker("Components", selection: $count) {
                     Text("Two colors").tag(2)
-                    if engine.physicalFilamentIndices.count >= 3 { Text("Three colors").tag(3) }
+                    if engine.physicalFilamentIndices.count >= 3 && original?.customGradient != true { Text("Three colors").tag(3) }
                 }
-                .disabled(slot != nil)
                 Group {
                     component("First filament", selection: $first)
                     component("Second filament", selection: $second)
                     if count == 3 { component("Third filament", selection: $third) }
-                }.disabled(slot != nil)
-                if slot != nil { Text("This mix keeps its original component filaments.").font(.caption).foregroundStyle(.secondary) }
+                }
+                if slot != nil { Text("Painting assignments stay attached to this mix.").font(.caption).foregroundStyle(.secondary) }
             }
             Section("Mix proportions") {
                 if slot != nil { Text("Unchanged imported proportions keep their original precision.").font(.caption).foregroundStyle(.secondary) }
@@ -755,14 +754,17 @@ private struct MixedFilamentEditor: View {
                     [Int(firstRatio), Int(secondRatio), 100-Int(firstRatio)-Int(secondRatio)]
                 let ok: Bool
                 if let slot, let original {
-                    let gradientChanged = !original.customGradient && (gradient != original.gradient ||
-                        gradient && (reverse != original.reversed || perPart != original.perPart))
-                    if ratios == initialRatios && !gradientChanged { dismiss(); return }
+                    let componentsChanged = components.map { $0 + 1 } != original.components
+                    let effectiveGradient = count == 2 && gradient
+                    let gradientChanged = !original.customGradient && (effectiveGradient != original.gradient ||
+                        effectiveGradient && (reverse != original.reversed || perPart != original.perPart))
+                    if !componentsChanged && ratios == initialRatios && !gradientChanged { dismiss(); return }
                     let mode: Int
                     if original.customGradient || !gradientChanged { mode = -1 }
-                    else if !gradient { mode = 0 }
+                    else if !effectiveGradient { mode = 0 }
                     else { mode = reverse ? 2 : 1 }
-                    ok = engine.updateMixedFilament(slot, ratios: ratios == initialRatios ? [] : ratios,
+                    ok = engine.updateMixedFilament(slot, components: componentsChanged ? components : nil,
+                        ratios: ratios == initialRatios ? [] : ratios,
                         gradientMode: mode, perPart: perPart)
                 } else {
                     ok = engine.addMixedFilament(components: components, ratios: ratios,
@@ -800,7 +802,11 @@ private struct MixedFilamentEditor: View {
             if count == 3 { secondRatio = max(1, min(secondRatio, 99-firstRatio)) }
         }
         .onChange(of: count) { value in
-            if value == 3 && slot == nil {
+            if value == 3 {
+                if let original, slot != nil, original.components.count == 3,
+                   [first, second, third].map({ $0 + 1 }) == original.components,
+                   initialRatios.count == 3, Int(firstRatio) == initialRatios[0],
+                   Int(secondRatio) == initialRatios[1] { return }
                 firstRatio = min(firstRatio, 98)
                 secondRatio = max(1, min(secondRatio, 99-firstRatio))
                 third = engine.physicalFilamentIndices.first(where: { $0 != first && $0 != second }) ?? third
@@ -813,7 +819,7 @@ private struct MixedFilamentEditor: View {
             ForEach(engine.physicalFilamentIndices.filter { index in
                 index == selection.wrappedValue || !(count == 2 ? [first, second] : [first, second, third]).contains(index)
             }, id: \.self) { index in
-                Text("Filament \(index + 1)").tag(index)
+                Text("Filament \(index + 1) · \(engine.filamentSlotName(index))").tag(index)
             }
         }
     }

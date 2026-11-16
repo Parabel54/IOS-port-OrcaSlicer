@@ -265,6 +265,12 @@ ORCA_API const char *orca_session_mixed_filament_json(orca_session_t *s, int slo
  * reverse native linear gradients. per_part applies only with a new linear mode. */
 ORCA_API int orca_session_update_mixed_filament(orca_session_t *s, int slot,
     const int *ratios, size_t count, int gradient_mode, int per_part);
+/** Replace 2/3 physical components of an existing mix, preserving its slot ID.
+ * Components are 1-based. A count change requires matching ratio_count;
+ * ratio_count=0 otherwise preserves exact original ratios. Gradient modes as above. */
+ORCA_API int orca_session_replace_mixed_components(orca_session_t *s, int slot,
+    const int *components, size_t component_count, const int *ratios, size_t ratio_count,
+    int gradient_mode, int per_part);
 
 ORCA_API int orca_session_extruder_count(orca_session_t *s);
 
@@ -627,7 +633,7 @@ ORCA_API int orca_session_restore_snapshot(orca_session_t *s, const char *path);
  * paint_kind:
  *   0 = support (supported_facets)  state: 0=none 1=enforcer 2=blocker
  *   1 = seam (seam_facets)          state: 0=none 1=enforcer 2=blocker
- *   2 = mmu / multi-material        state: 0=none, 1..16 = extruder (EnforcerBlockerType)
+ *   2 = mmu / multi-material        state: 0=none, 1..orca_max_paint_filaments() = extruder (EnforcerBlockerType)
  *   3 = fuzzy skin                  state: 0=none 1=fuzzy (ENFORCER)
  *
  * object_index: specific object, or -1 for auto (nearest object under hit).

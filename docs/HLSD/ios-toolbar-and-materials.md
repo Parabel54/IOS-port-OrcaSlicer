@@ -23,7 +23,7 @@ session was unavailable. A matching label is not evidence of interaction parity.
 | Global / Objects | Explicit target tabs; initial object layer height, walls, infill and filament overrides with reset to Global |
 | Filament colors | Native color pickers, project slots, object display colors and Filament preview default; persistent painted facet colors remain attached during live transforms; each physical slot has a grouped material preset picker; full per-slot parameter editing remains incomplete |
 | Mixed Filament | Native FilamentMixer color blending, 2/3 physical components, positive percentages totaling 100, linear height gradient/direction/per-part option |
-| Mixed editing / custom curves | Existing slots expose proportion and linear-gradient editing with stable slot IDs. Imported custom curves and untouched ratio precision are preserved. Component replacement, curve editing and deletion remain incomplete |
+| Mixed editing / custom curves | Existing slots expose component, proportion and linear-gradient editing with stable slot IDs. Imported custom curves and untouched ratio precision are preserved. Custom-curve editing and deletion remain incomplete |
 | Plugin manager | General desktop plugin runtime remains missing. Native Zmod processing is not compatibility with the 18 reported plugins |
 
 The mobile painting selector no longer cycles over only four filaments. Project
@@ -158,3 +158,15 @@ are not replaced by the linear controls. Changing components, custom-curve
 editing and deletion remain separate work. Native cases cover invalid edit
 isolation, ratio/reverse-gradient updates, identity/process preservation and
 byte-identical retained custom curves; native execution is pending.
+
+Existing mixes can now replace their physical components and switch between two
+and three components without changing the virtual slot index. When the first
+component changes, the same native preset/variant composition used for slot
+assignment updates only the virtual material, retaining unsaved physical values
+and the global selection. Ratios remain byte-identical unless edited; derived
+swatches refresh. Invalid/duplicate/virtual references, mismatched materials and
+three-way gradients are rejected before commit. Imported custom gradients keep
+two components so changing the count cannot silently discard their curve.
+Regression cases cover virtual nozzle-variant inheritance, physical/process
+isolation, rejected replacements, two/three transitions and retained object/facet
+assignments. Native execution remains pending.

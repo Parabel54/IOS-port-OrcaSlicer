@@ -1641,8 +1641,11 @@ const char *orca_session_mixed_filament_json(orca_session_t *s, int slot)
     }
 }
 
-int orca_session_update_mixed_filament(orca_session_t *s, int slot, const int *ratios,
-                                      size_t count, int gradient_mode, int per_part)
+static int assign_project_filament_material(orca_session_t *s, int slot, const char *name,
+                                           const DynamicPrintConfig *project_override, bool allow_mixed);
+
+static int edit_mixed_filament(orca_session_t *s, int slot, const int *components, size_t component_count,
+                              const int *ratios, size_t count, int gradient_mode, int per_part)
 {
     if (!s || !s->preset_bundle || (count != 0 && !ratios)) return -1;
     s->clear_error();
@@ -1654,27 +1657,44 @@ int orca_session_update_mixed_filament(orca_session_t *s, int slot, const int *r
         if (!flags || slot < 0 || size_t(slot) >= flags->size() || !flags->values[size_t(slot)])
             throw std::runtime_error("Choose an existing mixed filament");
         const size_t index = size_t(slot);
-        const auto ids = parse_mixed_components(old.option<ConfigOptionStrings>("filament_mixed_components")->values.at(index));
+        const auto previous_ids = parse_mixed_components(old.option<ConfigOptionStrings>("filament_mixed_components")->values.at(index));
+        auto ids = previous_ids;
+        if (components) {
+            if (component_count != 2 && component_count != 3)
+                throw std::runtime_error("Choose two or three physical components");
+            ids.clear();
+            for (size_t i = 0; i < component_count; ++i) {
+                if (components[i] < 1) throw std::runtime_error("Choose physical component filaments");
+                ids.push_back(unsigned(components[i]));
+            }
+        }
+        if (ids.size() != previous_ids.size() && count == 0)
+            throw std::runtime_error("Choose proportions for every component");
         if ((ids.size() != 2 && ids.size() != 3) || (count != 0 && count != ids.size()) ||
             gradient_mode < -1 || gradient_mode > 2 || (gradient_mode > 0 && ids.size() != 2))
             throw std::runtime_error("Unsupported mixed filament components or gradient mode");
         DynamicPrintConfig updated = old;
+        std::vector<std::string> colors;
+        std::set<unsigned> seen;
+        for (unsigned id : ids) {
+            if (id < 1 || id > flags->size() || flags->values[id - 1] || !seen.insert(id).second)
+                throw std::runtime_error("Mixed filaments need distinct physical components");
+            const auto *types = old.option<ConfigOptionStrings>("filament_type");
+            if (types && !types->empty() && types->get_at(id - 1) != types->get_at(ids.front() - 1))
+                throw std::runtime_error("Mixed filaments must use the same material type");
+            colors.push_back(old.option<ConfigOptionStrings>("filament_colour")->values.at(id - 1));
+        }
+        updated.option<ConfigOptionStrings>("filament_mixed_components")->values.at(index) = format_mixed_components(ids);
         if (count != 0) {
             std::vector<int> weights;
-            std::vector<std::string> colors;
             int sum = 0;
             for (size_t i = 0; i < count; ++i) {
-                if (ratios[i] < 1 || ratios[i] > 99 || ids[i] < 1 || ids[i] > flags->size() || flags->values[ids[i] - 1])
-                    throw std::runtime_error("Choose positive percentages and physical component filaments");
-                const auto *types = old.option<ConfigOptionStrings>("filament_type");
-                if (types && !types->empty() && types->get_at(ids[i] - 1) != types->get_at(ids.front() - 1))
-                    throw std::runtime_error("Mixed filaments must use the same material type");
+                if (ratios[i] < 1 || ratios[i] > 99)
+                    throw std::runtime_error("Choose positive percentages for all components");
                 weights.push_back(ratios[i]); sum += ratios[i];
-                colors.push_back(old.option<ConfigOptionStrings>("filament_colour")->values.at(ids[i] - 1));
             }
             if (sum != 100) throw std::runtime_error("Mixed filament ratios must total 100 percent");
             updated.option<ConfigOptionStrings>("filament_mixed_sublayer_ratios")->values.at(index) = format_mixed_ratios(weights);
-            updated.option<ConfigOptionStrings>("filament_colour")->values.at(index) = blend_color_multi(colors, weights);
         }
         if (gradient_mode >= 0) {
             updated.option<ConfigOptionBools>("filament_mixed_gradient")->values.at(index) = gradient_mode != 0;
@@ -1684,6 +1704,19 @@ int orca_session_update_mixed_filament(orca_session_t *s, int slot, const int *r
             updated.option<ConfigOptionBools>("filament_mixed_gradient_per_part")->values.at(index) = gradient_mode > 0 && per_part;
         }
         validate_mobile_mixes(updated);
+        if (count != 0 || ids != previous_ids) {
+            std::vector<int> weights;
+            for (double ratio : parse_mixed_ratios(updated.option<ConfigOptionStrings>("filament_mixed_sublayer_ratios")->values.at(index), ids.size()))
+                weights.push_back(int(std::lround(ratio * 1000000)));
+            updated.option<ConfigOptionStrings>("filament_colour")->values.at(index) = blend_color_multi(colors, weights);
+        }
+        if (ids.front() != previous_ids.front()) {
+            // Reuse native variant composition, changing only the virtual slot.
+            // Never reassign the physical source and discard its unsaved edits.
+            const std::string name = orca_session_filament_slot_name(s, int(ids.front() - 1));
+            if (name.empty()) throw std::runtime_error("The component has no material profile");
+            return assign_project_filament_material(s, slot, name.c_str(), &updated, true);
+        }
         // Commit only after validation; slot IDs, facet painting and other
         // material/printer/process settings stay in the original configuration.
         DynamicPrintConfig project = s->preset_bundle->project_config;
@@ -1698,6 +1731,20 @@ int orca_session_update_mixed_filament(orca_session_t *s, int slot, const int *r
         s->set_error(std::string("mixed filament: ") + ex.what());
         return -3;
     }
+}
+
+int orca_session_update_mixed_filament(orca_session_t *s, int slot, const int *ratios,
+                                      size_t count, int gradient_mode, int per_part)
+{
+    return edit_mixed_filament(s, slot, nullptr, 0, ratios, count, gradient_mode, per_part);
+}
+
+int orca_session_replace_mixed_components(orca_session_t *s, int slot, const int *components,
+                                        size_t component_count, const int *ratios, size_t ratio_count,
+                                        int gradient_mode, int per_part)
+{
+    if (!components) return -1;
+    return edit_mixed_filament(s, slot, components, component_count, ratios, ratio_count, gradient_mode, per_part);
 }
 
 static void normalize_first_filament(DynamicPrintConfig &config, const DynamicPrintConfig &source)
@@ -1762,17 +1809,18 @@ static Preset slot_filament_preset(orca_session_t *s, const std::string &name)
     return preset;
 }
 
-int orca_session_set_filament_slot(orca_session_t *s, int slot, const char *filament_name)
+static int assign_project_filament_material(orca_session_t *s, int slot, const char *filament_name,
+                                           const DynamicPrintConfig *project_override, bool allow_mixed)
 {
     if (!s || !s->preset_bundle || !filament_name) return -1;
     s->clear_error();
     try {
         ensure_default_config(s);
-        const DynamicPrintConfig old = s->config;
+        const DynamicPrintConfig old = project_override ? *project_override : s->config;
         const auto *colors = old.option<ConfigOptionStrings>("filament_colour");
         const auto *mixed = old.option<ConfigOptionBools>("filament_is_mixed");
         if (!colors || slot < 0 || size_t(slot) >= colors->values.size() ||
-            (mixed && size_t(slot) < mixed->size() && mixed->values[size_t(slot)]))
+            (!allow_mixed && mixed && size_t(slot) < mixed->size() && mixed->values[size_t(slot)]))
             throw std::runtime_error("Choose an existing physical filament slot");
         auto &bundle = *s->preset_bundle;
         const size_t count = colors->size();
@@ -1892,6 +1940,11 @@ int orca_session_set_filament_slot(orca_session_t *s, int slot, const char *fila
         s->set_error(std::string("set_filament_slot: ") + ex.what());
         return -3;
     }
+}
+
+int orca_session_set_filament_slot(orca_session_t *s, int slot, const char *filament_name)
+{
+    return assign_project_filament_material(s, slot, filament_name, nullptr, false);
 }
 
 int orca_session_arrange(orca_session_t *s)
