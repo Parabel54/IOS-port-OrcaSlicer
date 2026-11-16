@@ -19,6 +19,12 @@ Generated page/group ordering follows desktop `Tab.cpp`, with drift tests for
 the generated catalog. Printer, Filament and Process share typed boolean, enum
 and serialized-value editors. Vector/nullable values retain their native shape.
 
+Global and object option reads grow their UTF-8 buffer only when the native ABI
+reports insufficient capacity. Long machine G-code and serialized values remain
+editable instead of appearing absent at a fixed buffer size. Missing keys and
+other native failures return without retry. These reads retain the same session
+ownership and idle-cache rules as other option queries.
+
 Objects settings use the union of `PrintObjectConfig` and `PrintRegionConfig`.
 The toolbar and settings tab open the same browser. Inherited and overridden
 values remain distinct, with per-key reset. The bridge rejects global/printer

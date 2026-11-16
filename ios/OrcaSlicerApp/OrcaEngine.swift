@@ -243,6 +243,21 @@ final class OrcaEngine: ObservableObject {
         }
         let message = lastMessage
         defer { sessionBusy = false; sliceRunning = false; presetsLoading = false; lastMessage = message }
+        func longOptionRoundTrip() -> Bool {
+            let key = "machine_start_gcode"
+            guard let original = readOption(key) else { return false }
+            defer {
+                _ = original.withCString { orca_session_set_option(session, key, $0) }
+                _ = readOption(key)
+            }
+            let large = String(repeating: "; native option Ω ", count: 512)
+            guard large.withCString({ orca_session_set_option(session, key, $0) }) == 0 else { return false }
+            var expected = [CChar](repeating: 0, count: 65_536)
+            guard orca_session_get_option(session, key, &expected, expected.count) == 0 else { return false }
+            let serialized = String(cString: expected)
+            return serialized.utf8.count > 4096 && getOption(key) == serialized
+        }
+        guard longOptionRoundTrip() else { return "FAIL: native long setting was truncated or could not be read" }
         func fingerprint() -> String {
             var bounds = [Float](repeating: 0, count: 6)
             let code = bounds.withUnsafeMutableBufferPointer { values in
@@ -2078,12 +2093,10 @@ final class OrcaEngine: ObservableObject {
     private func readOption(_ key: String) -> String? {
         #if ORCA_LINKED
         guard let s = session else { return nil }
-        var buf = [CChar](repeating: 0, count: 4096)
-        let rc = key.withCString { k in
-            orca_session_get_option(s, k, &buf, buf.count)
+        let value = key.withCString { k in
+            NativeOptionReader.read { buffer, count in orca_session_get_option(s, k, buffer, count) }
         }
-        guard rc == 0 else { return nil }
-        let value = String(cString: buf)
+        guard let value else { return nil }
         optionReadCache[key] = value
         return value
         #else
@@ -3057,12 +3070,9 @@ final class OrcaEngine: ObservableObject {
     private func readObjectOption(index: Int, key: String) -> String? {
         #if ORCA_LINKED
         guard let s = session, index >= 0 else { return nil }
-        var buf = [CChar](repeating: 0, count: 4096)
-        let rc = key.withCString { k in
-            orca_session_get_object_option(s, Int32(index), k, &buf, buf.count)
+        return key.withCString { k in
+            NativeOptionReader.read { buffer, count in orca_session_get_object_option(s, Int32(index), k, buffer, count) }
         }
-        guard rc == 0 else { return nil }
-        return String(cString: buf)
         #else
         return nil
         #endif
