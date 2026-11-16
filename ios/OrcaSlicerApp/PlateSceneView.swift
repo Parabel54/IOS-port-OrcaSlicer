@@ -88,6 +88,10 @@ enum CameraPreset: String, CaseIterable {
     }
 }
 
+enum CameraProjection {
+    case perspective, orthographic
+}
+
 /// Interactive build plate with official-engine mesh geometry + optional G-code paths.
 struct PlateSceneView: UIViewRepresentable {
     var mesh: MeshGeometry?
@@ -113,6 +117,8 @@ struct PlateSceneView: UIViewRepresentable {
     /// Prepare tab: pan on bed plane moves selected object(s) in mm (slic3r XY).
     var touchMode: PlateTouchMode = .orbit
     var fitRequest = UUID()
+    var cameraView: CameraPreset = .home
+    var projection: CameraProjection = .perspective
     var rotationAxis: Int = 2
     /// Tap object to select; drag on object to move (without requiring Move gizmo).
     var selectMode: Bool { [.select, .move, .rotate, .scale].contains(touchMode) }
@@ -198,6 +204,39 @@ struct PlateSceneView: UIViewRepresentable {
         let projected = view.projectPoint(focus)
         guard abs(projected.x - Float(anchor.x)) < 0.5,
               abs(projected.y - Float(anchor.y)) < 0.5 else { return false }
+        let probe = view.defaultCameraController.target
+        let probeOffset = camera.simdWorldRight * 5
+        let projectionProbe = SCNVector3(probe.x + probeOffset.x, probe.y + probeOffset.y, probe.z + probeOffset.z)
+        let perspectivePoint = view.projectPoint(projectionProbe)
+        let beforeProjection = camera.simdPosition
+        coordinator.setProjection(.orthographic, view: view)
+        let orthographicPoint = view.projectPoint(projectionProbe)
+        guard camera.camera?.usesOrthographicProjection == true,
+              simd_length(camera.simdPosition - beforeProjection) < 0.001,
+              abs(perspectivePoint.x - orthographicPoint.x) < 0.5,
+              abs(perspectivePoint.y - orthographicPoint.y) < 0.5 else { return false }
+        let orthoScale = camera.camera?.orthographicScale ?? 0
+        let orthoDepth = view.projectPoint(probe).z
+        let orthoFocus = view.unprojectPoint(SCNVector3(Float(anchor.x), Float(anchor.y), orthoDepth))
+        coordinator.zoom(scale: 1.5, view: view, anchor: anchor)
+        let zoomedFocus = view.projectPoint(orthoFocus)
+        guard abs((camera.camera?.orthographicScale ?? 0) - orthoScale / 1.5) < 0.001,
+              abs(zoomedFocus.x - Float(anchor.x)) < 0.5,
+              abs(zoomedFocus.y - Float(anchor.y)) < 0.5 else { return false }
+        let beforePan = camera.simdPosition
+        let oldTarget = view.defaultCameraController.target
+        coordinator.cameraDrag(delta: CGPoint(x: 30, y: -15), view: view, mode: .pan)
+        let pannedTarget = view.defaultCameraController.target
+        let shift = SIMD3<Float>(pannedTarget.x - oldTarget.x, pannedTarget.y - oldTarget.y, pannedTarget.z - oldTarget.z)
+        guard simd_length(camera.simdPosition - beforePan - shift) < 0.001, simd_length(shift) > 0.001 else { return false }
+        let center = SIMD3<Float>(pannedTarget.x, pannedTarget.y, pannedTarget.z)
+        let side = center + camera.simdWorldRight * 5
+        let beforeSwitch = view.projectPoint(SCNVector3(side.x, side.y, side.z))
+        coordinator.setProjection(.perspective, view: view)
+        let afterSwitch = view.projectPoint(SCNVector3(side.x, side.y, side.z))
+        guard camera.camera?.usesOrthographicProjection == false,
+              abs(beforeSwitch.x - afterSwitch.x) < 0.5,
+              abs(beforeSwitch.y - afterSwitch.y) < 0.5 else { return false }
         let finalTarget = view.defaultCameraController.target
         camera.position = SCNVector3(finalTarget.x, finalTarget.y + 100, finalTarget.z + 0.01)
         camera.look(at: finalTarget)
@@ -215,6 +254,24 @@ struct PlateSceneView: UIViewRepresentable {
             let direction = simd_normalize(camera.simdPosition - center)
             guard simd_dot(direction, preset.direction) > 0.999,
                   camera.simdOrientation.vector.x.isFinite else { return false }
+        }
+        for size in [CGSize(width: 390, height: 600), CGSize(width: 1024, height: 768)] {
+            view.frame.size = size
+            for projection in [CameraProjection.perspective, .orthographic] {
+                coordinator.setProjection(projection, view: view)
+                for preset in CameraPreset.allCases {
+                    coordinator.frameCamera(view: view, minimum: SIMD3(0, 0, 990), maximum: SIMD3(10, 10, 1010), preset: preset)
+                    for x in [Float(0), 10] {
+                        for y in [Float(0), 10] {
+                            for z in [Float(990), 1010] {
+                                let point = view.projectPoint(SCNVector3(x, z, -y))
+                                guard point.x >= 0, point.x <= Float(size.width),
+                                      point.y >= 0, point.y <= Float(size.height), point.z >= 0, point.z <= 1 else { return false }
+                            }
+                        }
+                    }
+                }
+            }
         }
         return filamentPaintSmokeTest() && GCodePathGeometry.previewSmokeTest()
 
@@ -264,6 +321,7 @@ struct PlateSceneView: UIViewRepresentable {
         guard let scene = view.scene,
               let content = scene.rootNode.childNode(withName: "content", recursively: false)
         else { return }
+        context.coordinator.setProjection(projection, view: view)
 
         // One recognizer owns one-finger gestures. SceneKit's built-in
         // recognizers otherwise compete with object dragging and pinch zoom.
@@ -363,9 +421,9 @@ struct PlateSceneView: UIViewRepresentable {
 
         if context.coordinator.lastFitRequest != fitRequest {
             if let bounds = framingBounds {
-                context.coordinator.frameCamera(view: view, minimum: bounds.min, maximum: bounds.max)
-            } else if let mesh { context.coordinator.frameCamera(view: view, minimum: mesh.min, maximum: mesh.max) }
-            else { context.coordinator.frameCameraOnBed(view: view, bedSize: bedSize) }
+                context.coordinator.frameCamera(view: view, minimum: bounds.min, maximum: bounds.max, preset: cameraView)
+            } else if let mesh { context.coordinator.frameCamera(view: view, minimum: mesh.min, maximum: mesh.max, preset: cameraView) }
+            else { context.coordinator.frameCamera(view: view, minimum: .zero, maximum: SIMD3(bedSize.x, bedSize.y, 0), preset: cameraView) }
             context.coordinator.lastFitRequest = fitRequest
         }
 
@@ -545,6 +603,7 @@ struct PlateSceneView: UIViewRepresentable {
         cam.camera?.zNear = 0.5
         cam.camera?.zFar = 8000
         cam.camera?.fieldOfView = 42
+        cam.camera?.projectionDirection = .vertical
         // Default 3/4 view of a 220mm plate (slic3r center 110,110 → world 110, 0, -110)
         let cx = bedSize.x * 0.5
         let cy = bedSize.y * 0.5
@@ -747,12 +806,19 @@ struct PlateSceneView: UIViewRepresentable {
         }
 
         func zoom(scale: Float, view: SCNView, anchor: CGPoint? = nil) {
-            guard let camera = view.pointOfView else { return }
+            guard let camera = view.pointOfView, let lens = camera.camera else { return }
             let controller = view.defaultCameraController
             let target = SIMD3<Float>(controller.target.x, controller.target.y, controller.target.z)
             let distance = simd_length(camera.simdPosition - target)
             guard distance > 0, scale.isFinite, scale > 0 else { return }
-            let ratio = min(max(distance / scale, 0.5), 20000) / distance
+            let ratio: Float
+            if lens.usesOrthographicProjection {
+                let previous = Float(lens.orthographicScale)
+                guard previous > 0 else { return }
+                let next = min(max(previous / scale, 0.05), 20000)
+                ratio = next / previous
+                // Update after unprojecting the original anchor below.
+            } else { ratio = min(max(distance / scale, 0.5), 20000) / distance }
             // Keep the point under the pinch centroid stationary on screen.
             var focus = target
             if let anchor {
@@ -760,9 +826,40 @@ struct PlateSceneView: UIViewRepresentable {
                 let world = view.unprojectPoint(SCNVector3(Float(anchor.x), Float(anchor.y), depth))
                 focus = SIMD3<Float>(world.x, world.y, world.z)
             }
-            camera.simdPosition = focus + (camera.simdPosition - focus) * ratio
             let nextTarget = focus + (target - focus) * ratio
+            if lens.usesOrthographicProjection {
+                lens.orthographicScale *= Double(ratio)
+                camera.simdPosition += nextTarget - target
+            } else {
+                camera.simdPosition = focus + (camera.simdPosition - focus) * ratio
+                lens.zNear = min(lens.zNear, Double(distance * ratio) / 100)
+                lens.zFar = max(lens.zFar, Double(distance * ratio) * 3)
+            }
             controller.target = SCNVector3(nextTarget.x, nextTarget.y, nextTarget.z)
+        }
+
+        /// Match the visible span at the current target; changing projection
+        /// must preserve the user's pan, zoom and orientation.
+        func setProjection(_ projection: CameraProjection, view: SCNView) {
+            guard let camera = view.pointOfView, let lens = camera.camera else { return }
+            let orthographic = projection == .orthographic
+            guard lens.usesOrthographicProjection != orthographic else { return }
+            let target = view.defaultCameraController.target
+            let center = SIMD3<Float>(target.x, target.y, target.z)
+            let offset = camera.simdPosition - center
+            let distance = simd_length(offset)
+            guard distance > 0 else { return }
+            let tangent = tan(Double(lens.fieldOfView) * .pi / 360)
+            guard tangent > 0 else { return }
+            if orthographic {
+                lens.orthographicScale = Double(distance) * tangent
+            } else {
+                let nextDistance = Float(lens.orthographicScale / tangent)
+                camera.simdPosition = center + offset * (nextDistance / distance)
+                lens.zNear = min(lens.zNear, Double(nextDistance) / 100)
+                lens.zFar = max(lens.zFar, Double(nextDistance) * 3)
+            }
+            lens.usesOrthographicProjection = orthographic
         }
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
@@ -1154,26 +1251,8 @@ struct PlateSceneView: UIViewRepresentable {
             }
         }
 
-        /// World-space target of bed center after content R_x(-90): (cx, 0, -cy)
-        private func bedCenterWorld(bedSize: SIMD2<Float>) -> SCNVector3 {
-            SCNVector3(bedSize.x * 0.5, 0, -bedSize.y * 0.5)
-        }
-
         func frameCameraOnBed(view: SCNView, bedSize: SIMD2<Float>) {
-            guard let cam = view.scene?.rootNode.childNode(withName: "camera", recursively: false) else { return }
-            let target = bedCenterWorld(bedSize: bedSize)
-            let plate = max(bedSize.x, bedSize.y, 100)
-            let dist = plate * 1.05
-            cam.position = SCNVector3(
-                target.x + dist * 0.55,
-                dist * 0.72,
-                target.z + dist * 0.75
-            )
-            cam.look(at: target)
-            view.pointOfView = cam
-            view.defaultCameraController.pointOfView = cam
-            view.defaultCameraController.automaticTarget = false
-            view.defaultCameraController.target = target
+            frameCamera(view: view, minimum: .zero, maximum: SIMD3(bedSize.x, bedSize.y, 0))
         }
 
         func frameCamera(view: SCNView, minimum: SIMD3<Float>, maximum: SIMD3<Float>, preset: CameraPreset = .home) {
@@ -1191,10 +1270,12 @@ struct PlateSceneView: UIViewRepresentable {
             let dz = maximum.z - minimum.z
             let radius = max(sqrtf(dx * dx + dy * dy + dz * dz) * 0.5, 0.5)
             let aspect = max(Float(view.bounds.width / max(view.bounds.height, 1)), 0.2)
-            let verticalHalfAngle = Float(42.0 * Double.pi / 360.0)
+            let verticalHalfAngle = Float((cam.camera?.fieldOfView ?? 42) * Double.pi / 360.0)
             let limitingAngle = min(verticalHalfAngle, atanf(tanf(verticalHalfAngle) * aspect))
             let dist = max(radius / sinf(limitingAngle) * 1.15, 3)
             cam.camera?.zNear = max(Double(dist) / 1000, 0.01)
+            cam.camera?.zFar = max(Double(dist + radius * 3), 100)
+            cam.camera?.orthographicScale = Double(radius * 1.15 / min(aspect, 1))
 
             let direction = preset.direction
             cam.simdPosition = SIMD3(target.x, target.y, target.z) + direction * dist

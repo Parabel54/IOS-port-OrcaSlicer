@@ -130,6 +130,8 @@ struct OrcaRootView: View {
     @State private var rotationAxis = 2
     @State private var plateTouchMode: PlateTouchMode = .orbit
     @State private var fitCameraRequest = UUID()
+    @State private var cameraView: CameraPreset = .home
+    @AppStorage("orca.usePerspectiveCamera") private var usePerspectiveCamera = true
     @State private var gizmoMode: GizmoMode = .select
     @State private var showPreferences = false
     @State private var showAbout = false
@@ -500,6 +502,7 @@ struct OrcaRootView: View {
             }
             .disabled(!engine.canRedo)
             Menu {
+                cameraViewMenu
                 Button("Object settings…") {
                     loadObjectSettingsFields()
                     showObjectSettings = true
@@ -2396,6 +2399,8 @@ struct OrcaRootView: View {
                 accent: UIColor(red: 0, green: 150 / 255, blue: 136 / 255, alpha: 1),
                 touchMode: activePlateTouchMode,
                 fitRequest: fitCameraRequest,
+                cameraView: cameraView,
+                projection: usePerspectiveCamera ? .perspective : .orthographic,
                 rotationAxis: rotationAxis,
                 onScaleCommit: { factor, index in
                     engine.scale(factor: factor, index: index)
@@ -2454,7 +2459,7 @@ struct OrcaRootView: View {
                         }.padding(8)
                     }
                     modelInformationMenu
-                    toolChip("Home", "house") { fitCameraRequest = UUID() }
+                    toolChip("Home", "house") { selectCameraView(.home) }
                         .accessibilityIdentifier("camera-home").padding(.trailing, 8)
                     }
                     if activePlateTouchMode == .rotate {
@@ -2504,6 +2509,25 @@ struct OrcaRootView: View {
         } label: {
             Image(systemName: "info.circle").frame(width: 44, height: 44)
         }.accessibilityLabel(Text("Model and slice information"))
+    }
+
+    private func selectCameraView(_ view: CameraPreset) {
+        cameraView = view
+        fitCameraRequest = UUID()
+    }
+
+    private var cameraViewMenu: some View {
+        Menu("View") {
+            Button { selectCameraView(.home) } label: { Label("Home view", systemImage: "house") }
+            ForEach(CameraPreset.allCases.filter { $0 != .home }, id: \.rawValue) { view in
+                Button("\(view.rawValue) view") { selectCameraView(view) }
+            }
+            Divider()
+            Picker("Projection", selection: $usePerspectiveCamera) {
+                Text("Perspective").tag(true)
+                Text("Orthographic").tag(false)
+            }
+        }.accessibilityIdentifier("camera-view-menu")
     }
 
     @ViewBuilder
@@ -2790,6 +2814,12 @@ struct OrcaRootView: View {
                     Toggle("Dark mode (forced)", isOn: .constant(true))
                         .listRowBackground(OrcaTheme.panel)
                     labeled("Theme", "Orca desktop dark")
+                }
+                Section("3D view") {
+                    Picker("Projection", selection: $usePerspectiveCamera) {
+                        Text("Perspective").tag(true)
+                        Text("Orthographic").tag(false)
+                    }
                 }
                 Section("Setup") {
                     Button("Show setup wizard again") {

@@ -19,7 +19,7 @@ session was unavailable. A matching label is not evidence of interaction parity.
 | Emboss, SVG, texture displacement | Full desktop workflows missing; a text plate is not general emboss |
 | Variable layer height | Interactive desktop profile editor missing |
 | Assembly view/tools | Explode/assembly-related operations are partial; full desktop assembly workflow missing |
-| Views / Home | Six-face camera cube, Home, orbit/pan/zoom; orthographic/perspective and additional desktop view preferences remain incomplete |
+| Views / Home | Six-face camera cube, Home, direct View menu, orbit/pan/zoom, persistent perspective/orthographic choice; Auto Perspective and additional desktop preferences remain incomplete |
 | Global / Objects | Explicit target tabs; initial object layer height, walls, infill and filament overrides with reset to Global |
 | Filament colors | Native color pickers, project slots, object display colors and Filament preview default; persistent painted facet colors remain attached during live transforms; full per-slot preset editor remains incomplete |
 | Mixed Filament | Native FilamentMixer color blending, 2/3 physical components, positive percentages totaling 100, linear height gradient/direction/per-object option |
@@ -61,3 +61,13 @@ height-gradient swatch in the Prepare surface is still separate from sliced
 filament preview. Native tests isolate the first and highest paint states; a GPU
 test checks distinct red/green regions and object attachment. Runtime validation
 is tracked in CI, not implied by the source change.
+
+View menu follow-up: desktop MainFrame View/Camera selection was compared to the
+mobile camera. The header menu now exposes six face views and Home, plus a saved
+perspective/orthographic choice shared with Preferences. Switching projection
+keeps the target/orientation and matches the target-plane visible span. Pinch
+changes orthographic scale while preserving the point under the fingers; it does
+not merely move a parallel camera. Fit uses projection/aspect-aware bounds for
+models, G-code and an empty bed. Camera regression cases cover both projections,
+anchor preservation, pan and all face views in phone/tablet bounds. The desktop
+Auto Perspective policy is not ported in this change.
