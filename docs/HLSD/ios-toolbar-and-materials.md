@@ -220,3 +220,12 @@ the nozzle moves. Added runtime cases cover prefix ranges, partial beads/travel,
 reverse scrubbing, layer clipping, buffer identity and actual GPU pixels before,
 during and after a move. Native/GPU/touch and dense-project memory verification
 remain pending; playback still does not simulate acceleration or dwell.
+
+A standalone simulator harness now compiles the production SceneKit source and
+runs camera, geometry, primitive-range and GPU pixel checks without waiting for
+the C++ slicing dependencies. It uses a separate test-only UIKit bundle and the
+same SDK-matched runtime/timeout helpers as full engine validation. Its result
+cannot establish native slicing, full-app UI or physical-device compatibility.
+The first renderer SDK attempts exposed two metadata attachment errors (SCNNode
+has no userData; an instance method must qualify the static association key).
+Both are corrected in source; new SDK/runtime results remain separate evidence.

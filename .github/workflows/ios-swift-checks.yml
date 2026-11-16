@@ -5,6 +5,8 @@ on:
       - 'ios/**'
       - 'src/ios/orca_slice_c_api.h'
       - 'scripts/check_ios_swift.sh'
+      - 'scripts/test_ios_preview.sh'
+      - 'scripts/ios_simulator_helpers.sh'
       - 'scripts/tests/test_ios*.py'
       - '.github/workflows/ios-swift-checks.yml'
 concurrency:
@@ -27,3 +29,18 @@ jobs:
         run: python3 -m unittest discover -s scripts/tests -p 'test_ios*.py' -v
       - name: Check Swift, C interface and host fixtures
         run: bash scripts/check_ios_swift.sh "${{ matrix.sdk }}"
+  renderer:
+    needs: check
+    runs-on: macos-15-intel
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Exercise camera and progressive toolpath rendering
+        run: bash scripts/test_ios_preview.sh
+      - name: Preserve renderer evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-renderer
+          path: build_logs/preview-renderer/
+          if-no-files-found: warn

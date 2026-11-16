@@ -1958,7 +1958,7 @@ struct GCodePathGeometry {
         }
     }
 
-    private static func progressiveCursorSmokeTest() -> Bool {
+    static func progressiveCursorSmokeTest() -> Bool {
         let wall = Segment(points: [SCNVector3Zero, SCNVector3(10,0,0), SCNVector3(10,10,0)],
             feature: "Outer wall", width: 0.4, feedrate: 600, firstMove: 0, lastMove: 1)
         let travel = Segment(points: [SCNVector3(20,10,0), SCNVector3(40,10,0)],
@@ -1999,7 +1999,7 @@ struct GCodePathGeometry {
         return clipped.childNode(withName: "partial-toolpath", recursively: false)?.geometry == nil
     }
 
-    private static func progressiveGPUSmokeTest() -> Bool {
+    static func progressiveGPUSmokeTest() -> Bool {
         guard let device = MTLCreateSystemDefaultDevice() else { return false }
         let scene = SCNScene(); scene.background.contents = UIColor.black
         let path = Segment(points: [SCNVector3(-1,0,0), SCNVector3(1,0,0)],
@@ -2032,7 +2032,7 @@ struct GCodePathGeometry {
         return intensity(24) > 150
     }
 
-    static func previewSmokeTest() -> Bool {
+    static func previewSmokeTest(includeProgressive: Bool = true) -> Bool {
         let motion = Segment(points: [SCNVector3(0,0,0), SCNVector3(10,0,0), SCNVector3(20,0,0)],
                              feature: "Outer wall", width: 0.4, feedrate: 600, firstMove: 0, lastMove: 1)
         guard let halfway = GCodePathGeometry(segments: [motion]).position(atMove: 0.5),
@@ -2101,7 +2101,8 @@ struct GCodePathGeometry {
               compactMesh.sources(for: .normal).isEmpty,
               compactMesh.sources(for: .color).count == 1,
               compactMesh.sources(for: .vertex).first?.vectorCount == 8,
-              compactColorSmokeTest(), progressiveCursorSmokeTest(), progressiveGPUSmokeTest() else { return false }
+              compactColorSmokeTest(),
+              !includeProgressive || (progressiveCursorSmokeTest() && progressiveGPUSmokeTest()) else { return false }
         let node = GCodePathGeometry(segments: [bead]).makeNode(color: .white)
         guard let geometry = node.childNodes.first else { return false }
         let bounds = geometry.boundingBox
@@ -2366,7 +2367,7 @@ struct GCodePathGeometry {
             travels.flush(into: root) // Job annotation, independent of move cursor.
         }
         if let cursorRenderer {
-            objc_setAssociatedObject(root, &cursorRendererKey, cursorRenderer, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+            objc_setAssociatedObject(root, &Self.cursorRendererKey, cursorRenderer, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
             let partial = SCNNode(); partial.name = "partial-toolpath"
             root.addChildNode(partial)
         }
