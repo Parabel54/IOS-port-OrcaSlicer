@@ -356,9 +356,16 @@ struct PlateSceneView: UIViewRepresentable {
         guard coordinator.panGesture?.maximumNumberOfTouches == 1, coordinator.pinchGesture != nil else { return fail("one-finger pan and pinch recognizers") }
         let distance = simd_length(SIMD3<Float>(50, 60, 80))
         coordinator.zoom(scale: 2, view: view)
+        SCNTransaction.flush()
         guard abs(simd_length(SIMD3<Float>(camera.position.x, camera.position.y, camera.position.z)) - distance / 2) < 0.01 else { return fail("pinch distance \(simd_length(camera.simdPosition)) expected \(distance / 2)") }
+        let panPoint = view.unprojectPoint(SCNVector3(150, 200, view.projectPoint(SCNVector3Zero).z))
         let before = camera.position
         coordinator.cameraDrag(delta: CGPoint(x: 35, y: 25), view: view, mode: .pan)
+        SCNTransaction.flush()
+        let panProjected = view.projectPoint(panPoint)
+        guard abs(panProjected.x - 185) < 0.5, abs(panProjected.y - 225) < 0.5 else {
+            return fail("perspective pan followed \(panProjected), expected (185,225)")
+        }
         let target = view.defaultCameraController.target
         guard abs(camera.position.x - before.x - target.x) < 0.01,
               abs(camera.position.y - before.y - target.y) < 0.01,
@@ -386,10 +393,14 @@ struct PlateSceneView: UIViewRepresentable {
         guard simd_length(camera.simdPosition - phonePosition) < 0.01 else { return fail("normalized phone/tablet orbit delta \(simd_length(camera.simdPosition - phonePosition))") }
         coordinator.cameraDrag(delta: CGPoint(x: -102.4, y: 0), view: view, mode: .orbit)
         guard simd_length(camera.simdPosition - startPosition) < 0.01 else { return fail("reverse orbit delta \(simd_length(camera.simdPosition - startPosition))") }
+        // Projection queries read the presentation tree. Commit synthetic
+        // changes just as the real view does between rendered input frames.
+        SCNTransaction.flush()
         let anchor = CGPoint(x: 400, y: 500)
         let depth = view.projectPoint(view.defaultCameraController.target).z
         let focus = view.unprojectPoint(SCNVector3(Float(anchor.x), Float(anchor.y), depth))
         coordinator.zoom(scale: 1.5, view: view, anchor: anchor)
+        SCNTransaction.flush()
         let projected = view.projectPoint(focus)
         guard abs(projected.x - Float(anchor.x)) < 0.5,
               abs(projected.y - Float(anchor.y)) < 0.5 else { return fail("perspective pinch anchor \(projected) expected \(anchor)") }
@@ -399,6 +410,7 @@ struct PlateSceneView: UIViewRepresentable {
         let perspectivePoint = view.projectPoint(projectionProbe)
         let beforeProjection = camera.simdPosition
         coordinator.setProjection(.orthographic, view: view)
+        SCNTransaction.flush()
         let orthographicPoint = view.projectPoint(projectionProbe)
         guard camera.camera?.usesOrthographicProjection == true,
               simd_length(camera.simdPosition - beforeProjection) < 0.001,
@@ -408,6 +420,7 @@ struct PlateSceneView: UIViewRepresentable {
         let orthoDepth = view.projectPoint(probe).z
         let orthoFocus = view.unprojectPoint(SCNVector3(Float(anchor.x), Float(anchor.y), orthoDepth))
         coordinator.zoom(scale: 1.5, view: view, anchor: anchor)
+        SCNTransaction.flush()
         let zoomedFocus = view.projectPoint(orthoFocus)
         guard abs((camera.camera?.orthographicScale ?? 0) - orthoScale / 1.5) < 0.001,
               abs(zoomedFocus.x - Float(anchor.x)) < 0.5,
@@ -420,8 +433,10 @@ struct PlateSceneView: UIViewRepresentable {
         guard simd_length(camera.simdPosition - beforePan - shift) < 0.001, simd_length(shift) > 0.001 else { return fail("orthographic pan shift \(shift)") }
         let center = SIMD3<Float>(pannedTarget.x, pannedTarget.y, pannedTarget.z)
         let side = center + camera.simdWorldRight * 5
+        SCNTransaction.flush()
         let beforeSwitch = view.projectPoint(SCNVector3(side.x, side.y, side.z))
         coordinator.setProjection(.perspective, view: view)
+        SCNTransaction.flush()
         let afterSwitch = view.projectPoint(SCNVector3(side.x, side.y, side.z))
         guard camera.camera?.usesOrthographicProjection == false,
               abs(beforeSwitch.x - afterSwitch.x) < 0.5,
@@ -435,10 +450,12 @@ struct PlateSceneView: UIViewRepresentable {
         guard abs(camera.simdPosition.y - top.y) < 0.001 else { return fail("pole orbit changed Y from \(top.y) to \(camera.simdPosition.y)") }
         camera.name = "camera"
         coordinator.frameCamera(view: view, minimum: SIMD3(0, 0, 990), maximum: SIMD3(10, 10, 1010))
+        SCNTransaction.flush()
         let raisedTarget = view.defaultCameraController.target
         guard abs(raisedTarget.y - 1000) < 0.001, camera.position.y > raisedTarget.y else { return fail("raised framing target \(raisedTarget) camera \(camera.position)") }
         for preset in CameraPreset.allCases {
             coordinator.frameCamera(view: view, minimum: SIMD3(0, 0, 990), maximum: SIMD3(10, 10, 1010), preset: preset)
+            SCNTransaction.flush()
             let center = SIMD3<Float>(5, 1000, -5)
             let direction = simd_normalize(camera.simdPosition - center)
             guard simd_dot(direction, preset.direction) > 0.999,
@@ -448,8 +465,10 @@ struct PlateSceneView: UIViewRepresentable {
             view.frame.size = size
             for projection in [CameraProjection.perspective, .orthographic] {
                 coordinator.setProjection(projection, view: view)
+                SCNTransaction.flush()
                 for preset in CameraPreset.allCases {
                     coordinator.frameCamera(view: view, minimum: SIMD3(0, 0, 990), maximum: SIMD3(10, 10, 1010), preset: preset)
+                    SCNTransaction.flush()
                     for x in [Float(0), 10] {
                         for y in [Float(0), 10] {
                             for z in [Float(990), 1010] {
@@ -1529,18 +1548,15 @@ struct PlateSceneView: UIViewRepresentable {
             cam.camera?.zFar = max(Double(dist + radius * 3), 100)
             cam.camera?.orthographicScale = Double(radius * 1.15 / min(aspect, 1))
 
-            // Establish controller ownership before assigning the final pose.
-            // Reusing the current viewpoint also avoids resetting its controller
-            // while switching between face presets or fitting a raised model.
-            if view.pointOfView !== cam { view.pointOfView = cam }
-            if view.defaultCameraController.pointOfView !== cam { view.defaultCameraController.pointOfView = cam }
-            view.defaultCameraController.automaticTarget = false
-            view.defaultCameraController.target = target
             let direction = preset.direction
             cam.simdPosition = SIMD3(target.x, target.y, target.z) + direction * dist
             let up = preset == .top ? SCNVector3(0, 0, -1) : preset == .bottom ? SCNVector3(0, 0, 1) : SCNVector3(0, 1, 0)
             cam.look(at: target, up: up, localFront: SCNVector3(0, 0, -1))
             updateNavigationCube()
+            view.pointOfView = cam
+            view.defaultCameraController.pointOfView = cam
+            view.defaultCameraController.automaticTarget = false
+            view.defaultCameraController.target = target
         }
     }
 }
