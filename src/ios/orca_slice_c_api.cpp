@@ -1566,6 +1566,55 @@ void orca_mixed_gradient_limits(double *minimum, double *maximum)
     if (maximum) *maximum = kGradientMaxRatio;
 }
 
+const char *orca_gradient_curve_json(const char *encoded)
+{
+    static thread_local std::string result;
+    if (!encoded) return nullptr;
+    try {
+        const auto curve = parse_gradient_curve(encoded);
+        if (curve.empty()) return nullptr;
+        nlohmann::json points = nlohmann::json::array(), samples = nlohmann::json::array();
+        for (const auto &point : curve.points)
+            points.push_back({{"x", point.x}, {"y", point.y},
+                {"incoming", std::isfinite(point.m_in) ? nlohmann::json(point.m_in) : nlohmann::json(nullptr)},
+                {"outgoing", std::isfinite(point.m_out) ? nlohmann::json(point.m_out) : nlohmann::json(nullptr)}});
+        for (int i = 0; i <= 128; ++i) samples.push_back(sample_gradient_curve(curve, double(i) / 128));
+        result = nlohmann::json({{"points", points}, {"samples", samples}}).dump();
+        return result.c_str();
+    } catch (const std::exception &) { return nullptr; }
+}
+
+const char *orca_gradient_curve_encode(const orca_gradient_anchor_t *anchors, size_t count)
+{
+    static thread_local std::string result;
+    if (!anchors || count < 2) return nullptr;
+    try {
+        GradientCurve curve;
+        for (size_t i = 0; i < count; ++i) {
+            const auto &point = anchors[i];
+            if (!std::isfinite(point.x) || !std::isfinite(point.y) || point.x < 0 || point.x > 1 ||
+                point.y < kGradientMinRatio || point.y > kGradientMaxRatio ||
+                std::isinf(point.m_in) || std::isinf(point.m_out) || (i > 0 && point.x <= anchors[i - 1].x))
+                return nullptr;
+            // Native serialization rounds to four decimal places. Reject points
+            // that would collapse onto a neighbour on the next project load.
+            if (i > 0 && std::round(point.x * 10000) <= std::round(anchors[i - 1].x * 10000)) return nullptr;
+            curve.points.push_back({point.x, point.y, point.m_in, point.m_out});
+        }
+        result = serialize_gradient_curve(curve);
+        return result.c_str();
+    } catch (const std::exception &) { return nullptr; }
+}
+
+double orca_gradient_curve_sample(const char *encoded, double position)
+{
+    if (!encoded || !std::isfinite(position)) return std::numeric_limits<double>::quiet_NaN();
+    try {
+        const auto curve = parse_gradient_curve(encoded);
+        return curve.empty() ? std::numeric_limits<double>::quiet_NaN() : sample_gradient_curve(curve, position);
+    } catch (const std::exception &) { return std::numeric_limits<double>::quiet_NaN(); }
+}
+
 static int add_mixed_filament(orca_session_t *s, const int *components, const int *ratios,
                              size_t count, int gradient, int reverse, int per_part,
                              const MixedGradientEdit *gradient_edit)

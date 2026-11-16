@@ -23,7 +23,7 @@ session was unavailable. A matching label is not evidence of interaction parity.
 | Global / Objects | Explicit target tabs; initial object layer height, walls, infill and filament overrides with reset to Global |
 | Filament colors | Native color pickers, project slots, object display colors and Filament preview default; persistent painted facet colors remain attached during live transforms; each physical slot has a grouped material preset picker; full per-slot parameter editing remains incomplete |
 | Mixed Filament | Native FilamentMixer color blending, 2/3 physical components, positive percentages totaling 100, linear height gradient/direction/per-part option |
-| Mixed editing / custom curves | Existing slots expose component, proportion and linear-gradient editing with stable slot IDs. Imported custom curves and untouched ratio precision are preserved. Custom-curve editing and deletion remain incomplete |
+| Mixed editing / custom curves | Stable-ID component/proportion/gradient editing, native-sampled curve graph, anchor drag/add/remove, two component views, automatic or explicit tangents, reverse/reset. Untouched imported data stays exact. Desktop line-body gestures, gradient swatches and deletion remain incomplete |
 | Plugin manager | General desktop plugin runtime remains missing. Native Zmod processing is not compatibility with the 18 reported plugins |
 
 The mobile painting selector no longer cycles over only four filaments. Project
@@ -180,4 +180,18 @@ curve/range. Gradient and component/proportion edits share a staged transaction.
 New mix gradient metadata is validated before appending a slot. Native regression
 cases cover nondefault ranges, curve retention, explicit linear selection,
 invalid endpoint isolation and unchanged slot count on failed creation. Custom
-anchor/tangent editing remains unfinished; native execution is pending.
+anchor/tangent controls are added below; native execution is pending.
+
+Custom gradient editing now uses the native curve parser, serializer and
+Hermite/PCHIP sampler through pure C helpers. The mobile graph shows both
+component shares, with 44-point anchor targets, translation-based dragging,
+numeric height/share controls, insert/remove, reverse and reset. Incoming/outgoing
+tangents can stay automatic or be set explicitly. Reversal negates tangent slopes;
+moving an anchor restores its automatic tangents as desktop does. Imported text
+is kept when the editor is opened without changes or returned to its original
+serialized shape. Leaving the child editor without Use curve cancels the draft.
+The native helper rejects non-finite values, crossing/overlapping points and
+points that collapse under native four-decimal serialization. This does not add
+a project schema or change desktop defaults. Native curve/math cases are added;
+Apple/native/touch execution must be recorded separately. Desktop line-body
+interaction and pigment-mixed ramp swatches remain separate work.

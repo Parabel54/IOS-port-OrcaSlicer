@@ -688,6 +688,217 @@ struct ProcessSettingsBrowser: View {
 
 // Uses the same component/percentage and linear-gradient fields as desktop's
 // MixedFilamentDialog; color blending and sublayer scheduling remain native C++.
+private struct MixedGradientCurveEditor: View {
+    let engine: OrcaEngine
+    @Binding var curve: String
+    let first: Int
+    let second: Int
+    let start: Double
+    let end: Double
+    @Environment(\.dismiss) private var dismiss
+    @State private var points: [OrcaEngine.GradientAnchor] = []
+    @State private var originalPoints: [OrcaEngine.GradientAnchor] = []
+    @State private var samples: [Double] = []
+    @State private var selected = 0
+    @State private var component = 0
+    @State private var dragOrigin: OrcaEngine.GradientAnchor?
+    @State private var loaded = false
+    @State private var error: String?
+
+    var body: some View {
+        Form {
+            Section("Blend along height") {
+                Picker("Edit color", selection: $component) {
+                    Text("Filament \(first + 1)").tag(0)
+                    Text("Filament \(second + 1)").tag(1)
+                }.pickerStyle(.segmented)
+                chart.frame(height: 220)
+                HStack { Text("Bottom"); Spacer(); Text("Top") }.font(.caption)
+                Text("Drag a point to change the blend. The other filament fills the remaining share.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("Add point") { addPoint() }.disabled(points.count < 2)
+            }
+            if points.indices.contains(selected) { pointControls }
+            Section {
+                Button("Reverse blend") {
+                    for index in points.indices {
+                        let bounds = engine.mixedGradientBounds
+                        points[index].y = min(bounds.upperBound, max(bounds.lowerBound, 1 - points[index].y))
+                        points[index].incoming = points[index].incoming.map { -$0 }
+                        points[index].outgoing = points[index].outgoing.map { -$0 }
+                    }
+                    refreshSamples()
+                }
+                Button("Reset to linear") {
+                    let bounds = engine.mixedGradientBounds
+                    points = [.init(x: 0, y: min(bounds.upperBound, max(bounds.lowerBound, start))),
+                              .init(x: 1, y: min(bounds.upperBound, max(bounds.lowerBound, end)))]
+                    selected = 0; refreshSamples()
+                }
+            }
+            if let error { Text(error).foregroundStyle(.red) }
+        }
+        .navigationTitle("Blend curve")
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Use curve") {
+                    // Merely opening an imported curve must not reserialize it.
+                    if points != originalPoints || curve.isEmpty {
+                        guard let encoded = engine.gradientCurveString(points) else {
+                            error = "Choose distinct points and finite slopes."; return
+                        }
+                        if curve.isEmpty || encoded != engine.gradientCurveString(originalPoints) { curve = encoded }
+                    }
+                    dismiss()
+                }.disabled(points.count < 2)
+            }
+        }
+        .onAppear {
+            guard !loaded else { return }; loaded = true
+            guard let value = engine.gradientCurve(curve) else {
+                error = "Cannot read this blend curve."; return
+            }
+            points = value.points; originalPoints = points; samples = value.samples
+        }
+    }
+
+    private var selectedShare: Double { component == 0 ? points[selected].y : 1 - points[selected].y }
+
+    private var pointControls: some View {
+        Section("Point \(selected + 1) of \(points.count)") {
+            Stepper("Select point", value: $selected, in: 0...(points.count - 1))
+            Text("Height: \(points[selected].x.formatted(.percent.precision(.fractionLength(0...2))))")
+            if selected > 0 && selected < points.count - 1 {
+                let lower = points[selected - 1].x + 0.0001
+                let upper = points[selected + 1].x - 0.0001
+                if lower < upper {
+                    Slider(value: Binding(get: { points[selected].x }, set: {
+                        movePoint(selected, x: $0, share: selectedShare)
+                    }), in: lower...upper)
+                }
+            }
+            Text("Filament \(component == 0 ? first + 1 : second + 1): \(selectedShare.formatted(.percent.precision(.fractionLength(0...2))))")
+            Slider(value: Binding(get: { selectedShare }, set: {
+                movePoint(selected, x: points[selected].x, share: $0)
+            }), in: engine.mixedGradientBounds)
+            DisclosureGroup("Curve tangents") {
+                Toggle("Automatic smoothing", isOn: Binding(
+                    get: { points[selected].incoming == nil && points[selected].outgoing == nil },
+                    set: { automatic in
+                        points[selected].incoming = automatic ? nil : 0
+                        points[selected].outgoing = automatic ? nil : 0
+                        refreshSamples()
+                    }))
+                if points[selected].incoming != nil || points[selected].outgoing != nil {
+                    LabeledContent("Incoming slope") {
+                        TextField("Slope", value: tangent(incoming: true), format: .number)
+                            .keyboardType(.numbersAndPunctuation).multilineTextAlignment(.trailing)
+                    }
+                    LabeledContent("Outgoing slope") {
+                        TextField("Slope", value: tangent(incoming: false), format: .number)
+                            .keyboardType(.numbersAndPunctuation).multilineTextAlignment(.trailing)
+                    }
+                }
+                Text("Automatic smoothing uses Orca's native curve. Moving a point restores its automatic tangents.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if selected > 0 && selected < points.count - 1 {
+                Button("Remove point", role: .destructive) {
+                    points.remove(at: selected); selected = min(selected, points.count - 1); refreshSamples()
+                }
+            }
+        }
+    }
+
+    private var chart: some View {
+        GeometryReader { geometry in
+            let width = max(1, geometry.size.width - 44)
+            let height = max(1, geometry.size.height - 44)
+            ZStack(alignment: .topLeading) {
+                RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08))
+                ForEach(0..<2, id: \.self) { index in
+                    Path { path in
+                        for (offset, share) in samples.enumerated() {
+                            let y = index == 0 ? share : 1 - share
+                            let point = CGPoint(x: 22 + Double(offset) / Double(max(1, samples.count - 1)) * width,
+                                                y: 22 + (1 - y) * height)
+                            if offset == 0 { path.move(to: point) } else { path.addLine(to: point) }
+                        }
+                    }.stroke(color(index), style: StrokeStyle(lineWidth: index == component ? 3 : 1,
+                                                             dash: index == component ? [] : [4, 3]))
+                }
+                ForEach(points.indices, id: \.self) { index in
+                    let share = component == 0 ? points[index].y : 1 - points[index].y
+                    Circle().fill(color(component))
+                        .frame(width: index == selected ? 14 : 10, height: index == selected ? 14 : 10)
+                        .frame(width: 44, height: 44).contentShape(Rectangle())
+                        .position(x: 22 + points[index].x * width, y: 22 + (1 - share) * height)
+                        .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .named("blend-curve"))
+                            .onChanged { value in
+                                selected = index
+                                if dragOrigin == nil { dragOrigin = points[index] }
+                                guard let origin = dragOrigin,
+                                      abs(value.translation.width) + abs(value.translation.height) > 1 else { return }
+                                let originalShare = component == 0 ? origin.y : 1 - origin.y
+                                movePoint(index, x: origin.x + value.translation.width / width,
+                                          share: originalShare - value.translation.height / height)
+                            }.onEnded { _ in dragOrigin = nil })
+                        .accessibilityLabel("Blend point \(index + 1)")
+                        .accessibilityAddTraits(index == selected ? .isSelected : [])
+                        .accessibilityAction { selected = index }
+                }
+            }.coordinateSpace(name: "blend-curve")
+        }
+    }
+
+    private func color(_ component: Int) -> Color {
+        let slot = component == 0 ? first : second
+        guard engine.projectFilamentColors.indices.contains(slot) else { return .accentColor }
+        return Color(uiColor: FilamentColor.uiColor(engine.projectFilamentColors[slot]))
+    }
+
+    private func tangent(incoming: Bool) -> Binding<Double> {
+        Binding(get: {
+            let value = incoming ? points[selected].incoming : points[selected].outgoing
+            return (component == 0 ? 1 : -1) * (value ?? 0)
+        }, set: { value in
+            let stored = (component == 0 ? 1 : -1) * value
+            if incoming { points[selected].incoming = stored } else { points[selected].outgoing = stored }
+            refreshSamples()
+        })
+    }
+
+    private func movePoint(_ index: Int, x: Double, share: Double) {
+        var point = points[index]
+        if index > 0 && index < points.count - 1 {
+            let lower = points[index - 1].x + 0.0001, upper = points[index + 1].x - 0.0001
+            if lower <= upper { point.x = min(upper, max(lower, x)) }
+        }
+        let stored = component == 0 ? share : 1 - share
+        point.y = min(engine.mixedGradientBounds.upperBound, max(engine.mixedGradientBounds.lowerBound, stored))
+        guard point.x != points[index].x || point.y != points[index].y else { return }
+        point.incoming = nil; point.outgoing = nil
+        points[index] = point; refreshSamples()
+    }
+
+    private func addPoint() {
+        guard let left = points.indices.dropLast().max(by: {
+            points[$0 + 1].x - points[$0].x < points[$1 + 1].x - points[$1].x
+        }), points[left + 1].x - points[left].x >= 0.0002,
+        let encoded = engine.gradientCurveString(points) else { return }
+        let x = (points[left].x + points[left + 1].x) / 2
+        guard let y = engine.gradientCurveSample(encoded, at: x) else { return }
+        points.insert(.init(x: x, y: y), at: left + 1); selected = left + 1; refreshSamples()
+    }
+
+    private func refreshSamples() {
+        guard let encoded = engine.gradientCurveString(points), let value = engine.gradientCurve(encoded) else {
+            error = "Choose distinct points and finite slopes."; return
+        }
+        error = nil; samples = value.samples
+    }
+}
+
 private struct MixedFilamentEditor: View {
     @ObservedObject var engine: OrcaEngine
     var slot: Int? = nil
@@ -704,7 +915,8 @@ private struct MixedFilamentEditor: View {
     @State private var gradient = false
     @State private var gradientStart = 0.9
     @State private var gradientEnd = 0.1
-    @State private var preserveCurve = true
+    @State private var useCurve = false
+    @State private var curve = ""
     @State private var perPart = false
     @State private var error: String?
 
@@ -714,7 +926,7 @@ private struct MixedFilamentEditor: View {
                 Text("Mix two or three filaments using Orca's sublayer color mixing. Components must use the same material type.")
                 Picker("Components", selection: $count) {
                     Text("Two colors").tag(2)
-                    if engine.physicalFilamentIndices.count >= 3 && (original?.curve.isEmpty != false || !preserveCurve) { Text("Three colors").tag(3) }
+                    if engine.physicalFilamentIndices.count >= 3 { Text("Three colors").tag(3) }
                 }
                 Group {
                     component("First filament", selection: $first)
@@ -733,33 +945,8 @@ private struct MixedFilamentEditor: View {
                     Text("Third: \(100-Int(firstRatio)-Int(secondRatio))%")
                 } else { Text("Second: \(100-Int(firstRatio))%") }
             }
-            if count == 2 {
-                Section("Gradient") {
-                    Toggle("Blend along height", isOn: $gradient)
-                    if original?.curve.isEmpty == false {
-                        Toggle("Keep imported curve", isOn: $preserveCurve)
-                    }
-                    if gradient {
-                        if preserveCurve && original?.curve.isEmpty == false {
-                            Text("The imported curve controls the blend. Turn off Keep imported curve to use a linear gradient.")
-                                .font(.caption).foregroundStyle(.secondary)
-                        } else {
-                            Text("Filament \(first + 1) at bottom: \(gradientStart.formatted(.percent.precision(.fractionLength(0...2))))")
-                            Slider(value: $gradientStart, in: engine.mixedGradientBounds, step: 0.01)
-                            Text("Filament \(first + 1) at top: \(gradientEnd.formatted(.percent.precision(.fractionLength(0...2))))")
-                            Slider(value: $gradientEnd, in: engine.mixedGradientBounds, step: 0.01)
-                            Button("Reverse direction") {
-                                let previous = gradientStart; gradientStart = gradientEnd; gradientEnd = previous
-                            }
-                            if !engine.mixedGradientBounds.contains(gradientStart) || !engine.mixedGradientBounds.contains(gradientEnd) {
-                                Text("Imported endpoints outside the slider range stay exact until edited.")
-                                    .font(.caption).foregroundStyle(.secondary)
-                            }
-                        }
-                        Toggle("Restart for each part", isOn: $perPart)
-                    }
-                }
-            }
+            if count == 2 { gradientControls }
+            else { Text("Height gradients are available for two-color mixes.").font(.caption).foregroundStyle(.secondary) }
             if let error { Text(error).foregroundStyle(.red) }
             Button(slot == nil ? "Add mixed filament" : "Save changes") {
                 let components = count == 2 ? [first, second] : [first, second, third]
@@ -772,7 +959,7 @@ private struct MixedFilamentEditor: View {
                     let ends = original.range.split(separator: ",").compactMap { Double($0) }
                     let rangeChanged = gradientStart != (ends.count == 2 ? ends[0] : engine.mixedGradientBounds.upperBound) ||
                         gradientEnd != (ends.count == 2 ? ends[1] : engine.mixedGradientBounds.lowerBound)
-                    let curve = preserveCurve ? original.curve : ""
+                    let curve = useCurve ? self.curve : ""
                     let gradientChanged = effectiveGradient != original.gradient || rangeChanged || curve != original.curve ||
                         effectiveGradient && perPart != original.perPart
                     let range = !rangeChanged ? original.range :
@@ -785,7 +972,7 @@ private struct MixedFilamentEditor: View {
                 } else {
                     let edit = OrcaEngine.MixedGradientEdit(enabled: count == 2 && gradient,
                         range: String(format: "%.12g,%.12g", locale: Locale(identifier: "en_US_POSIX"), gradientStart, gradientEnd),
-                        curve: "", perPart: perPart)
+                        curve: count == 2 && useCurve ? curve : "", perPart: perPart)
                     ok = engine.addMixedFilament(components: components, ratios: ratios,
                         gradient: count == 2 && gradient, reverse: false, perPart: perPart, gradientEdit: edit)
                 }
@@ -813,6 +1000,7 @@ private struct MixedFilamentEditor: View {
                 gradientStart = ends.count == 2 ? ends[0] : engine.mixedGradientBounds.upperBound
                 gradientEnd = ends.count == 2 ? ends[1] : engine.mixedGradientBounds.lowerBound
                 gradient = info.gradient; perPart = info.perPart
+                curve = info.curve; useCurve = !info.curve.isEmpty
                 return
             }
             gradientStart = engine.mixedGradientBounds.upperBound
@@ -835,6 +1023,43 @@ private struct MixedFilamentEditor: View {
                 secondRatio = max(1, min(secondRatio, 99-firstRatio))
                 third = engine.physicalFilamentIndices.first(where: { $0 != first && $0 != second }) ?? third
             }
+        }
+    }
+
+    private var gradientControls: some View {
+        Section("Gradient") {
+            Toggle("Blend along height", isOn: $gradient)
+            Toggle("Custom curve", isOn: $useCurve)
+                .onChange(of: useCurve) { enabled in
+                    if enabled && curve.isEmpty {
+                        let bounds = engine.mixedGradientBounds
+                        curve = engine.gradientCurveString([
+                            .init(x: 0, y: min(bounds.upperBound, max(bounds.lowerBound, gradientStart))),
+                            .init(x: 1, y: min(bounds.upperBound, max(bounds.lowerBound, gradientEnd)))]) ?? ""
+                        if curve.isEmpty { useCurve = false; error = "Cannot create the blend curve." }
+                    }
+                }
+            if useCurve {
+                NavigationLink {
+                    MixedGradientCurveEditor(engine: engine, curve: $curve, first: first, second: second,
+                        start: gradientStart, end: gradientEnd)
+                } label: { Label("Edit blend curve", systemImage: "point.topleft.down.to.point.bottomright.curvepath") }
+                Text("The curve controls the blend. Turning blending off keeps this curve for later.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else if gradient {
+                Text("Filament \(first + 1) at bottom: \(gradientStart.formatted(.percent.precision(.fractionLength(0...2))))")
+                Slider(value: $gradientStart, in: engine.mixedGradientBounds, step: 0.01)
+                Text("Filament \(first + 1) at top: \(gradientEnd.formatted(.percent.precision(.fractionLength(0...2))))")
+                Slider(value: $gradientEnd, in: engine.mixedGradientBounds, step: 0.01)
+                Button("Reverse direction") {
+                    let previous = gradientStart; gradientStart = gradientEnd; gradientEnd = previous
+                }
+                if !engine.mixedGradientBounds.contains(gradientStart) || !engine.mixedGradientBounds.contains(gradientEnd) {
+                    Text("Imported endpoints outside the slider range stay exact until edited.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if gradient { Toggle("Restart for each part", isOn: $perPart) }
         }
     }
 

@@ -1676,6 +1676,47 @@ final class OrcaEngine: ObservableObject {
         let perPart: Bool
     }
 
+    struct GradientAnchor: Decodable, Equatable {
+        var x: Double
+        var y: Double
+        var incoming: Double?
+        var outgoing: Double?
+    }
+
+    struct GradientCurve: Decodable {
+        let points: [GradientAnchor]
+        let samples: [Double]
+    }
+
+    func gradientCurve(_ encoded: String) -> GradientCurve? {
+        #if ORCA_LINKED
+        guard let raw = encoded.withCString({ orca_gradient_curve_json($0) }) else { return nil }
+        return try? JSONDecoder().decode(GradientCurve.self, from: Data(String(cString: raw).utf8))
+        #else
+        return nil
+        #endif
+    }
+
+    func gradientCurveString(_ points: [GradientAnchor]) -> String? {
+        #if ORCA_LINKED
+        let anchors = points.map { orca_gradient_anchor_t(x: $0.x, y: $0.y,
+            m_in: $0.incoming ?? .nan, m_out: $0.outgoing ?? .nan) }
+        guard let raw = anchors.withUnsafeBufferPointer({ orca_gradient_curve_encode($0.baseAddress, $0.count) }) else { return nil }
+        return String(cString: raw)
+        #else
+        return nil
+        #endif
+    }
+
+    func gradientCurveSample(_ encoded: String, at position: Double) -> Double? {
+        #if ORCA_LINKED
+        let value = encoded.withCString { orca_gradient_curve_sample($0, position) }
+        return value.isFinite ? value : nil
+        #else
+        return nil
+        #endif
+    }
+
     var mixedGradientBounds: ClosedRange<Double> {
         #if ORCA_LINKED
         var lower = 0.1, upper = 0.9

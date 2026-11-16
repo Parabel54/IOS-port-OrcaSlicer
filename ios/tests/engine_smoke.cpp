@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <string>
 
@@ -27,6 +28,39 @@ int main(int argc, char **argv)
             std::fprintf(stderr, "%s: %s\n", message, orca_session_last_error(diagnostic_session));
         return condition;
     };
+    {
+        const double automatic = std::numeric_limits<double>::quiet_NaN();
+        orca_gradient_anchor_t points[]{{0, 0.1, automatic, 0}, {1, 0.9, 0, automatic}};
+        const char *encoded = orca_gradient_curve_encode(points, 2);
+        if (!require(encoded != nullptr, "encode native custom curve with one-sided tangents")) return 4;
+        const std::string custom_curve = encoded;
+        const char *info = orca_gradient_curve_json(custom_curve.c_str());
+        if (!require(info && std::string(info).find("\"incoming\":null") != std::string::npos &&
+                     std::string(info).find("\"samples\":[") != std::string::npos,
+                     "native curve inspector exposes automatic tangents and preview samples") ||
+            !require(std::fabs(orca_gradient_curve_sample(custom_curve.c_str(), 0.25) - 0.225) < 1e-9,
+                     "custom Hermite tangents bend the native sampled curve") ||
+            !require(std::fabs(orca_gradient_curve_sample(custom_curve.c_str(), -1) - 0.1) < 1e-9 &&
+                     std::fabs(orca_gradient_curve_sample(custom_curve.c_str(), 2) - 0.9) < 1e-9,
+                     "native curve clamps samples outside its height interval")) return 4;
+        points[0].m_out = automatic; points[1].m_in = automatic;
+        encoded = orca_gradient_curve_encode(points, 2);
+        if (!require(encoded && std::fabs(orca_gradient_curve_sample(encoded, 0.25) - 0.3) < 1e-9,
+                     "automatic two-point curve uses native linear PCHIP defaults")) return 4;
+        points[1].x = 0;
+        if (!require(!orca_gradient_curve_encode(points, 2), "reject overlapping curve anchors")) return 4;
+        points[1].x = 0.00001;
+        if (!require(!orca_gradient_curve_encode(points, 2), "reject anchors collapsing in native four-decimal encoding")) return 4;
+        points[1].x = 1; points[0].y = 0;
+        if (!require(!orca_gradient_curve_encode(points, 2), "reject pure-color anchors outside native blend band")) return 4;
+        points[0].y = 0.1; points[0].m_out = std::numeric_limits<double>::infinity();
+        if (!require(!orca_gradient_curve_encode(points, 2), "reject infinite curve tangent") ||
+            !require(!orca_gradient_curve_json("0,0.5") && !orca_gradient_curve_encode(nullptr, 2) &&
+                     std::isnan(orca_gradient_curve_sample("", 0.5)) &&
+                     std::isnan(orca_gradient_curve_sample(custom_curve.c_str(), automatic)),
+                     "invalid curve helper inputs have explicit failure results")) return 4;
+        std::printf("PASS: native gradient curve encoding, inspection, Hermite/PCHIP samples and invalid-input rejection\n");
+    }
     // All desktop primitives must be real, bed-placed engine objects.
     for (int kind = 0; kind < 6; ++kind) {
         std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>

@@ -274,6 +274,17 @@ ORCA_API int orca_session_replace_mixed_components(orca_session_t *s, int slot,
 
 /** Native editor limits for gradient shares (both components keep flowing). */
 ORCA_API void orca_mixed_gradient_limits(double *minimum, double *maximum);
+typedef struct orca_gradient_anchor {
+    double x, y;
+    double m_in, m_out; /* NaN selects the native automatic tangent. */
+} orca_gradient_anchor_t;
+/** Pure native curve helpers; no project/session mutation. Returned strings are
+ * borrowed until the next call to the same function on this thread. Invalid
+ * inputs return null (NaN for sample). Inspect JSON includes anchors and 129
+ * equally spaced samples from the desktop Hermite/PCHIP evaluator. */
+ORCA_API const char *orca_gradient_curve_json(const char *encoded);
+ORCA_API const char *orca_gradient_curve_encode(const orca_gradient_anchor_t *anchors, size_t count);
+ORCA_API double orca_gradient_curve_sample(const char *encoded, double position);
 /** Add/edit gradient fields using the existing native range/curve encodings.
  * Empty curve selects a linear gradient. Edit can atomically include component
  * and ratio changes; null components/count=0 and ratio_count=0 preserve them.
