@@ -1021,6 +1021,45 @@ int main(int argc, char **argv)
                      std::string(restored_value) == "6", "component replacement keeps object assignment") ||
             !require(orca_session_paint_stats(session.get(), 0, 2, 6, &mixed_paint_after) == 0 && mixed_paint_after == mixed_paint_before,
                      "component replacement keeps painted facet IDs")) return 17;
+        orca_session_get_option(session.get(), "filament_colour", restored_value, sizeof(restored_value));
+        const std::string original_colors = restored_value;
+        info = orca_session_mixed_filament_json(session.get(), 5);
+        if (!require(info != nullptr, "read mix before physical recolor")) return 17;
+        const std::string metadata_before_recolor = info;
+        const char *new_colors = "#C0392B;#2980B9;#0000FF;#FFFFFF;#AAAAAA;#FFFFFF";
+        if (!require(orca_session_set_option(session.get(), "filament_multi_colour", original_colors.c_str()) == 0 &&
+                     orca_session_set_option(session.get(), "filament_colour", new_colors) == 0 &&
+                     orca_session_get_option(session.get(), "filament_colour", restored_value, sizeof(restored_value)) == 0 &&
+                     std::string(restored_value) != new_colors, "physical recolor refreshes the stale virtual swatch")) return 17;
+        const std::string recolored = restored_value;
+        if (!require(orca_session_get_option(session.get(), "filament_multi_colour", restored_value, sizeof(restored_value)) == 0 &&
+                     std::string(restored_value) == recolored, "single and multi-color project fields stay aligned") ||
+            !require(orca_session_update_mixed_filament(session.get(), 5, mix_ratios, 2, -1, 1) == 0 &&
+                     orca_session_get_option(session.get(), "filament_colour", restored_value, sizeof(restored_value)) == 0 &&
+                     std::string(restored_value) == recolored, "physical recolor agrees with native ratio-edit blending")) return 17;
+        info = orca_session_mixed_filament_json(session.get(), 5);
+        if (!require(info && std::string(info) == metadata_before_recolor,
+                     "recolor preserves mixed proportions, endpoints, curves and mode") ||
+            !require(orca_session_paint_stats(session.get(), 0, 2, 6, &mixed_paint_after) == 0 && mixed_paint_after == mixed_paint_before,
+                     "physical recolor preserves painted assignments")) return 17;
+        const std::string color_snapshot = directory + "/mixed-recolor.3mf";
+        const char *broken_components = "\"\";\"\";\"\";\"\";\"\";\"1,99\"";
+        const char *broken_colors = "#00FF00;#00FF00;#0000FF;#FFFFFF;#AAAAAA;#ABCDEF";
+        if (!require(orca_session_snapshot(session.get(), color_snapshot.c_str()) == 0 &&
+                     orca_session_set_option(session.get(), "filament_mixed_components", broken_components) == 0 &&
+                     orca_session_set_option(session.get(), "filament_colour", broken_colors) == 0 &&
+                     orca_session_get_option(session.get(), "filament_colour", restored_value, sizeof(restored_value)) == 0 &&
+                     std::string(restored_value) == broken_colors, "broken imported mix does not block physical color edits") ||
+            !require(orca_session_get_option(session.get(), "filament_mixed_components", restored_value, sizeof(restored_value)) == 0 &&
+                     std::string(restored_value).find("1,99") != std::string::npos, "recolor does not rewrite broken component metadata") ||
+            !require(orca_session_restore_snapshot(session.get(), color_snapshot.c_str()) == 0 &&
+                     orca_session_get_option(session.get(), "filament_colour", restored_value, sizeof(restored_value)) == 0 &&
+                     std::string(restored_value) == recolored, "3MF restores recomputed project colors") ||
+            !require(orca_session_get_option(session.get(), "filament_multi_colour", restored_value, sizeof(restored_value)) == 0 &&
+                     std::string(restored_value) == recolored, "3MF restores matching multi-color metadata") ||
+            !require(orca_session_set_option(session.get(), "filament_colour", original_colors.c_str()) == 0,
+                     "restore original physical swatches")) return 17;
+        std::printf("PASS: physical recolor updates native blends and multi-color fields, retains paint/mix metadata and round-trips through 3MF\n");
     }
     {
         const int gradient_components[] = {1, 2}, gradient_weights[] = {40, 60};

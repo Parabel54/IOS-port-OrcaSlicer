@@ -43,6 +43,8 @@ algorithms. Heavy model/profile operations prepare a 3MF undo snapshot and run
 outside the UI thread. Staged failures preserve the original model/preview.
 Successful edits invalidate derived slicing. Undo, Redo and public project saving
 honor the same gate, including keyboard-triggered actions.
+Single-object imports reuse the same immutable Swift mesh arrays for framing and
+selection rather than exporting that geometry twice.
 
 ## Variable layer height
 
@@ -72,6 +74,11 @@ system presets. File persistence and credential storage are independent.
 Mixed slots use native component, ratio and gradient metadata. Two/three physical
 components share a material type, with native positive proportions and pigment
 color blending. Existing-slot edits preserve slot IDs and painted assignments.
+Physical color changes recompute valid dependent swatches with the same native
+pigment mixer. Single/multi-color fields are staged together in the session and
+project configuration. Broken imported component references retain their stored
+swatch and metadata while other physical colors remain editable. Ratio and
+component edits update both swatch fields without rewriting retained curve text.
 A changed first component supplies its material/nozzle variants without replacing
 that physical source. Imported ratios and untouched curve text retain precision.
 Physical/project and painted/mixed slot limits come from the native ABI; available
@@ -95,7 +102,8 @@ from the session into an opaque handle, valid until explicit destruction even
 across later session mutation/destruction. Swift frees it after conversion; native
 statistics/metadata remain available. Another export/take of a consumed cache
 fails explicitly until reload/slice repopulates it. Copying export remains an
-option for other ABI clients.
+option for other ABI clients. Swift conversion reserves its known record count
+before appending, avoiding array-growth reallocations for large jobs.
 
 SceneKit batches paths below the 16-bit vertex limit, uses normalized byte colors
 and shares job materials. Layer/filter/color changes rebuild selected geometry.

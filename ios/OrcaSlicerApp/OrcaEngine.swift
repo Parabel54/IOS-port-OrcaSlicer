@@ -1230,13 +1230,15 @@ final class OrcaEngine: ObservableObject {
             if let p = posPtr { orca_free(p) }
             if let i = idxPtr { orca_free(i) }
         }
-        guard rc == 0, let posPtr, let idxPtr, vcount > 0, icount > 0 else {
+        guard rc == 0, let positionData = posPtr, let indexData = idxPtr, vcount > 0, icount > 0 else {
             mesh = nil
             objectMeshes = []
             return
         }
-        let positions = Array(UnsafeBufferPointer(start: posPtr, count: vcount * 3))
-        let indices = Array(UnsafeBufferPointer(start: idxPtr, count: icount))
+        let positions = Array(UnsafeBufferPointer(start: positionData, count: vcount * 3))
+        let indices = Array(UnsafeBufferPointer(start: indexData, count: icount))
+        orca_free(posPtr); posPtr = nil
+        orca_free(idxPtr); idxPtr = nil
         var bmin = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
         var bmax = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
         for i in 0..<vcount {
@@ -1248,6 +1250,13 @@ final class OrcaEngine: ObservableObject {
 
         // Per-object meshes so the user can tap/select on the plate
         let n = Int(orca_session_object_count(s))
+        if n == 1, let mesh {
+            // Model::mesh() is this same object's world-space mesh. Swift's
+            // immutable array storage can serve framing and selection together.
+            objectMeshes = [mesh]
+            refreshObjectFilamentColors()
+            return
+        }
         var per: [MeshGeometry] = []
         per.reserveCapacity(max(n, 0))
         for oi in 0..<n {
@@ -2454,6 +2463,7 @@ final class OrcaEngine: ObservableObject {
             let defW = defaultWidth
             let records = UnsafeBufferPointer(start: segments, count: count)
             var paths: [GCodePathGeometry.Segment] = []
+            paths.reserveCapacity(count)
             var roleLabels: [Int32: String] = [:]
             var layerZ: [UInt32: Float] = [:]
             var minZ = Float.greatestFiniteMagnitude, maxZ = -Float.greatestFiniteMagnitude

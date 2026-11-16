@@ -584,6 +584,43 @@ int orca_session_load_config(orca_session_t *s, const char *config_path)
     }
 }
 
+// Desktop refreshes virtual swatches when a physical color changes. Keep the
+// original component/ratio/curve text, and leave broken imported mixes alone so
+// a color edit cannot silently repair or discard their metadata.
+static void refresh_mixed_filament_colors(DynamicPrintConfig &config)
+{
+    auto *colors = config.option<ConfigOptionStrings>("filament_colour");
+    auto *multi = config.option<ConfigOptionStrings>("filament_multi_colour");
+    const auto *flags = config.option<ConfigOptionBools>("filament_is_mixed");
+    const auto *components = config.option<ConfigOptionStrings>("filament_mixed_components");
+    const auto *ratios = config.option<ConfigOptionStrings>("filament_mixed_sublayer_ratios");
+    const auto *types = config.option<ConfigOptionStrings>("filament_type");
+    if (!colors || !flags || !components || !ratios) return;
+    for (size_t slot = 0; slot < flags->size() && slot < colors->size(); ++slot) {
+        if (!flags->values[slot] || slot >= components->size() || slot >= ratios->size()) continue;
+        const auto ids = parse_mixed_components(components->values[slot]);
+        if (ids.size() < 2 || ids.size() > 3) continue;
+        std::set<unsigned> seen;
+        std::vector<std::string> hex;
+        for (unsigned id : ids) {
+            if (id == 0 || id > colors->size() || id > flags->size() || flags->values[id - 1] || !seen.insert(id).second ||
+                (types && !types->empty() && types->get_at(id - 1) != types->get_at(ids.front() - 1))) break;
+            hex.push_back(colors->values[id - 1]);
+        }
+        if (hex.size() != ids.size()) continue;
+        std::vector<int> weights;
+        for (double ratio : parse_mixed_ratios(ratios->values[slot], ids.size())) {
+            if (!std::isfinite(ratio) || ratio <= 0 || ratio > 1) break;
+            weights.push_back(int(std::lround(ratio * 1000000)));
+        }
+        if (weights.size() != ids.size()) continue;
+        colors->values[slot] = blend_color_multi(hex, weights);
+        if (multi && slot < multi->size()) multi->values[slot] = colors->values[slot];
+    }
+}
+
+static void invalidate_object_slice(orca_session_t *s);
+
 int orca_session_set_option(orca_session_t *s, const char *key, const char *value)
 {
     if (!s || !key || !value)
@@ -591,8 +628,28 @@ int orca_session_set_option(orca_session_t *s, const char *key, const char *valu
     s->clear_error();
     try {
         ensure_default_config(s);
-        // DynamicPrintConfig option set by string (official ConfigBase API)
-        s->config.set_deserialize_strict(key, value);
+        if (std::strcmp(key, "filament_colour") == 0) {
+            DynamicPrintConfig updated = s->config;
+            updated.set_deserialize_strict(key, value);
+            const auto &old = s->config.option<ConfigOptionStrings>(key)->values;
+            const auto &colors = updated.option<ConfigOptionStrings>(key)->values;
+            auto *multi = updated.option<ConfigOptionStrings>("filament_multi_colour");
+            if (multi) {
+                for (size_t i = 0; i < colors.size() && i < multi->size(); ++i)
+                    if (i >= old.size() || colors[i] != old[i]) multi->values[i] = colors[i];
+            }
+            refresh_mixed_filament_colors(updated);
+            if (s->preset_bundle) {
+                DynamicPrintConfig project = s->preset_bundle->project_config;
+                project.apply_only(updated, {"filament_colour", "filament_multi_colour"}, true);
+                s->preset_bundle->project_config = std::move(project);
+            }
+            s->config = std::move(updated);
+            invalidate_object_slice(s);
+        } else {
+            // DynamicPrintConfig option set by string (official ConfigBase API)
+            s->config.set_deserialize_strict(key, value);
+        }
         return 0;
     } catch (const std::exception &ex) {
         s->set_error(std::string("set_option: ") + ex.what());
@@ -1882,6 +1939,8 @@ static int edit_mixed_filament(orca_session_t *s, int slot, const int *component
             for (double ratio : parse_mixed_ratios(updated.option<ConfigOptionStrings>("filament_mixed_sublayer_ratios")->values.at(index), ids.size()))
                 weights.push_back(int(std::lround(ratio * 1000000)));
             updated.option<ConfigOptionStrings>("filament_colour")->values.at(index) = blend_color_multi(colors, weights);
+            if (auto *multi = updated.option<ConfigOptionStrings>("filament_multi_colour"); multi && index < multi->size())
+                multi->values[index] = updated.option<ConfigOptionStrings>("filament_colour")->values[index];
         }
         if (ids.front() != previous_ids.front()) {
             // Reuse native variant composition, changing only the virtual slot.

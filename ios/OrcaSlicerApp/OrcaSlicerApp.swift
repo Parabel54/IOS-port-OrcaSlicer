@@ -342,7 +342,9 @@ struct OrcaRootView: View {
                 .interactiveDismissDisabled(engine.sessionBusy)
         }
         .sheet(isPresented: $showModelLibrary) { modelLibrary }
-        .sheet(isPresented: $showMeshTools) {
+        .sheet(isPresented: $showMeshTools, onDismiss: {
+            presentPendingDocumentPicker(); importPendingDocuments(); importCloudPresetsIfReady()
+        }) {
             NavigationStack {
                 MeshToolsPanel(engine: engine) { status = engine.lastMessage; showMeshTools = false }
                     .toolbar { ToolbarItem(placement: .confirmationAction) {
@@ -2504,9 +2506,10 @@ struct OrcaRootView: View {
                                 toolChip("Add", "plus") { showModelLibrary = true }.accessibilityIdentifier("model-library-shortcut")
                                 toolChip("Transform", "slider.horizontal.3") { showPlateInspector = true }
                                 toolChip("Mesh tools", "cube.transparent") { showMeshTools = true }
+                                    .disabled(!engine.hasModel).accessibilityIdentifier("mesh-tools-shortcut")
                                 toolChip("Layer height", "slider.vertical.3") { showLayerHeights = true }
                                     .disabled(!engine.objectNames.indices.contains(engine.selectedObjectIndex))
-                                    .disabled(!engine.hasModel).accessibilityIdentifier("mesh-tools-shortcut")
+                                    .accessibilityIdentifier("layer-height-shortcut")
                             }
                         }.padding(8)
                     }
@@ -3702,7 +3705,7 @@ struct OrcaRootView: View {
     }
 
     private var editingModalPresented: Bool {
-        showModelLibrary || showPlateInspector || showProcess || showWizard || showCalibration || showObjectSettings || showLayerHeights || showPreferences || showAbout || showShortcuts
+        showModelLibrary || showPlateInspector || showMeshTools || showProcess || showWizard || showCalibration || showObjectSettings || showLayerHeights || showPreferences || showAbout || showShortcuts
     }
 
     private func importCloudPresetsIfReady() {
