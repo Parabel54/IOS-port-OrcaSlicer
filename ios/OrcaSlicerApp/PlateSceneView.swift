@@ -687,8 +687,9 @@ struct PlateSceneView: UIViewRepresentable {
             }
             view.addSubview(cube)
             NSLayoutConstraint.activate([
-                cube.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -8),
-                cube.topAnchor.constraint(equalTo: view.topAnchor, constant: 8),
+                // Match desktop's lower-left navigator and leave iOS/Metal HUDs clear.
+                cube.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 8),
+                cube.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -112),
                 cube.widthAnchor.constraint(equalToConstant: 84), cube.heightAnchor.constraint(equalToConstant: 84)
             ])
             navigationCube = cube
