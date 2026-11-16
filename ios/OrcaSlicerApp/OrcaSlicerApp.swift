@@ -3061,6 +3061,7 @@ struct OrcaRootView: View {
                     engine.previewMinZ = engine.gcodeZMin
                     engine.previewMaxZ = engine.gcodeZMax
                     engine.previewThroughMove = .max
+                    engine.previewToolheadPosition = nil
                     engine.requestPreviewLayer()
                 }
             }
@@ -3073,6 +3074,8 @@ struct OrcaRootView: View {
             if let geometry = engine.gcodeGeometry {
                 Button("Show current layer only") {
                     engine.previewMinZ = engine.previewMaxZ
+                    engine.previewThroughMove = .max
+                    engine.previewToolheadPosition = nil
                     engine.requestPreviewLayer()
                 }
                 DisclosureGroup("Line types") {
