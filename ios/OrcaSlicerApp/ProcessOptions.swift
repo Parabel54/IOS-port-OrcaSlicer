@@ -436,10 +436,10 @@ struct ProcessSettingsBrowser: View {
                 }
             }
             Button("Add filament") { engine.addProjectFilament(); applyError = engine.lastMessage }
-                .disabled(engine.projectFilamentColors.count >= 16)
+                .disabled(engine.projectFilamentColors.count >= engine.maximumProjectFilaments)
             NavigationLink("Add mixed filament…") { MixedFilamentEditor(engine: engine) }
-                .disabled(engine.physicalFilamentIndices.count < 2 || engine.projectFilamentColors.count >= 16)
-            Text("Project colors are separate from the number of physical nozzles. Desktop painting supports up to 16 filament slots.")
+                .disabled(engine.physicalFilamentIndices.count < 2 || engine.projectFilamentColors.count >= engine.maximumPaintFilaments)
+            Text("Project limit: \(engine.maximumProjectFilaments) filaments. Painting and mixed-filament limit: \(engine.maximumPaintFilaments). Available printing colors depend on your printer or manual changes.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
@@ -723,7 +723,7 @@ private struct MixedFilamentEditor: View {
                 if engine.addMixedFilament(components: components, ratios: ratios,
                     gradient: count == 2 && gradient, reverse: reverse, perPart: perPart) { dismiss() }
                 else { error = engine.lastMessage }
-            }.disabled(engine.projectFilamentColors.count >= 16)
+            }.disabled(engine.projectFilamentColors.count >= engine.maximumPaintFilaments)
         }
         .navigationTitle("Mixed filament")
         .onAppear {

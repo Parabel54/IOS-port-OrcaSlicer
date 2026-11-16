@@ -200,7 +200,7 @@ struct OrcaRootView: View {
     private var currentPaintState: Int {
         switch gizmoMode {
         case .paintMMU:
-            return paintToolState == 0 ? 0 : max(1, min(16, paintMMUExtruder))
+            return paintToolState == 0 ? 0 : max(1, min(engine.maximumPaintFilaments, paintMMUExtruder))
         case .paintFuzzy:
             return paintToolState == 0 ? 0 : 1
         case .paintSupport, .paintSeam:
@@ -2516,7 +2516,7 @@ struct OrcaRootView: View {
             } else if gizmoMode == .paintMMU {
                 toolChip("Filament \(paintMMUExtruder)", "paintpalette", selected: paintToolState != 0) {
                     paintToolState = 1
-                    paintMMUExtruder = paintMMUExtruder >= engine.projectFilamentColors.count ? 1 : paintMMUExtruder + 1
+                    paintMMUExtruder = paintMMUExtruder >= min(engine.maximumPaintFilaments, engine.projectFilamentColors.count) ? 1 : paintMMUExtruder + 1
                     status = "MMU extruder \(paintMMUExtruder)"
                 }
             } else if gizmoMode == .paintFuzzy {

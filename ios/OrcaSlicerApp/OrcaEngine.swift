@@ -1507,6 +1507,22 @@ final class OrcaEngine: ObservableObject {
         set { UserDefaults.standard.set(newValue, forKey: prefsRegionKey) }
     }
 
+    var maximumProjectFilaments: Int {
+        #if ORCA_LINKED
+        return Int(orca_max_project_filaments())
+        #else
+        return 64
+        #endif
+    }
+
+    var maximumPaintFilaments: Int {
+        #if ORCA_LINKED
+        return Int(orca_max_paint_filaments())
+        #else
+        return 32
+        #endif
+    }
+
     var projectFilamentColors: [String] {
         let colors = (getOption("filament_colour") ?? "#009688").split(separator: ";").map(String.init)
         return colors.isEmpty ? ["#009688"] : colors

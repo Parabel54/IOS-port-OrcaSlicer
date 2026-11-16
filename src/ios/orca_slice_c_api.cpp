@@ -1493,8 +1493,8 @@ static int append_project_filament(orca_session_t *s, const std::string &color, 
         ensure_default_config(s);
         const auto old = s->config;
         const size_t count = old.option<ConfigOptionStrings>("filament_colour")->values.size();
-        if (count >= size_t(EnforcerBlockerType::ExtruderMax)) {
-            s->set_error("The desktop filament painting limit has been reached");
+        if (count >= (mixed ? size_t(EnforcerBlockerType::ExtruderMax) : MAXIMUM_EXTRUDER_NUMBER)) {
+            s->set_error("The native desktop filament slot limit has been reached");
             return -2;
         }
         auto &bundle = *s->preset_bundle;
@@ -1531,6 +1531,9 @@ static int append_project_filament(orca_session_t *s, const std::string &color, 
         return -3;
     }
 }
+
+int orca_max_project_filaments(void) { return int(MAXIMUM_EXTRUDER_NUMBER); }
+int orca_max_paint_filaments(void) { return int(EnforcerBlockerType::ExtruderMax); }
 
 int orca_session_add_project_filament(orca_session_t *s)
 {

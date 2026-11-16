@@ -28,7 +28,7 @@ session was unavailable. A matching label is not evidence of interaction parity.
 
 The mobile painting selector no longer cycles over only four filaments. Project
 slots use desktop PresetBundle sizing; the native painting representation has a
-16-slot limit. Mixed slots are virtual sublayer combinations, not a mixing-nozzle
+32-state painting limit and 64 project slots in this source. Mixed slots are virtual sublayer combinations, not a mixing-nozzle
 ratio command. Components must be distinct physical slots with matching material
 types. New physical slots currently must be added before mixed slots.
 

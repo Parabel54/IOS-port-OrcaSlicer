@@ -427,12 +427,15 @@ int main(int argc, char **argv)
         !require(orca_session_set_option(session.get(), "layer_height", "0.28") == 0 &&
                  orca_session_set_option(session.get(), "nozzle_temperature", "235") == 0 &&
                  orca_session_save_user_filament(session.get(), "Mobile+ PLA") == 0, "save filament independently")) return 17;
+    if (!require(orca_session_export_config(session.get(),
+                 (data_dir + "/user_presets/filament/Legacy Full Filament.json").c_str()) == 0,
+                 "write legacy full-snapshot filament fixture")) return 17;
     std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
         reopened(orca_session_create(argv[2]), orca_session_destroy);
     if (!require(orca_session_set_data_dir(reopened.get(), data_dir.c_str()) == 0 &&
                  orca_session_load_all_presets(reopened.get()) == 0 &&
                  orca_session_select_process(reopened.get(), "Mobile_ Fine") == 0 &&
-                 orca_session_select_filament(reopened.get(), "Mobile_ PLA") == 0 &&
+                 orca_session_select_filament(reopened.get(), "Legacy Full Filament") == 0 &&
                  orca_session_apply_presets(reopened.get()) == 0, "restore saved process and filament in fresh session")) return 17;
     char restored_value[4096] = {};
     if (!require(orca_session_get_option(reopened.get(), "layer_height", restored_value, sizeof(restored_value)) == 0 &&
