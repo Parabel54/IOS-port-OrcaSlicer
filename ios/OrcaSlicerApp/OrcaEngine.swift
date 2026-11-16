@@ -2175,6 +2175,7 @@ final class OrcaEngine: ObservableObject {
             self.previewHiddenFilaments = []
             self.previewEnabledMoves = [.extrude]
             self.previewThroughMove = .max
+            self.previewToolheadPosition = nil
             self.previewIsReduced = preview.reduced
             self.previewLayerHeights = preview.layers
             self.gcodeGeometry = preview.geometry

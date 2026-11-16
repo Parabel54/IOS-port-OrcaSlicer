@@ -1520,6 +1520,9 @@ static int append_project_filament(orca_session_t *s, const std::string &color, 
                     to->set_at(from, slot, std::min(slot, from->size() - 1));
             } else if (!from) updated.set_key_value(key, source->clone());
         }
+        // Project slot colors, mixing metadata and resized purge data take
+        // precedence over older process/material snapshots.
+        updated.apply_only(bundle.project_config, bundle.project_config.keys(), true);
         s->config = std::move(updated);
         s->has_config = true;
         return 0;

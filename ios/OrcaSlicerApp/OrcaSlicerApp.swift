@@ -2969,6 +2969,8 @@ struct OrcaRootView: View {
             guard z != engine.previewMaxZ else { return }
             engine.previewMaxZ = z
             engine.previewMinZ = min(engine.previewMinZ, z)
+            engine.previewThroughMove = .max
+            engine.previewToolheadPosition = nil
             engine.requestPreviewLayer()
         })
     }
@@ -3050,6 +3052,8 @@ struct OrcaRootView: View {
                     guard z != engine.previewMinZ else { return }
                     engine.previewMinZ = z
                     engine.previewMaxZ = max(engine.previewMaxZ, z)
+                    engine.previewThroughMove = .max
+                    engine.previewToolheadPosition = nil
                     engine.requestPreviewLayer()
                 }), in: 0...Double(max(1, engine.previewLayerHeights.count - 1)), step: 1)
                     .disabled(engine.previewLayerHeights.count < 2)
