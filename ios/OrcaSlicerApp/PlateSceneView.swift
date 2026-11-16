@@ -88,6 +88,16 @@ enum CameraPreset: String, CaseIterable {
         case .home: return simd_normalize(SIMD3(0.55, 0.65, 0.8))
         }
     }
+
+    var orientation: simd_quatf {
+        let backward = direction
+        let up: SIMD3<Float> = self == .top ? SIMD3(0, 0, -1) : self == .bottom ? SIMD3(0, 0, 1) : SIMD3(0, 1, 0)
+        let right = simd_normalize(simd_cross(up, backward))
+        let upward = simd_cross(backward, right)
+        // An orthonormal camera basis also handles the exact 180-degree Back
+        // view, where a look-at rotation can retain the previous orientation.
+        return simd_quatf(simd_float3x3(columns: (right, upward, backward)))
+    }
 }
 
 enum CameraProjection {
@@ -459,7 +469,9 @@ struct PlateSceneView: UIViewRepresentable {
             let center = SIMD3<Float>(5, 1000, -5)
             let direction = simd_normalize(camera.simdPosition - center)
             guard simd_dot(direction, preset.direction) > 0.999,
-                  camera.simdOrientation.vector.x.isFinite else { return fail("preset \(preset) direction \(direction) expected \(preset.direction)") }
+                  simd_dot(camera.simdOrientation.act(SIMD3<Float>(0, 0, -1)), -preset.direction) > 0.999 else {
+                return fail("preset \(preset) direction \(direction), orientation \(camera.simdOrientation), expected \(preset.direction)")
+            }
         }
         for size in [CGSize(width: 390, height: 600), CGSize(width: 1024, height: 768)] {
             view.frame.size = size
@@ -1548,15 +1560,13 @@ struct PlateSceneView: UIViewRepresentable {
             cam.camera?.zFar = max(Double(dist + radius * 3), 100)
             cam.camera?.orthographicScale = Double(radius * 1.15 / min(aspect, 1))
 
-            let direction = preset.direction
-            cam.simdPosition = SIMD3(target.x, target.y, target.z) + direction * dist
-            let up = preset == .top ? SCNVector3(0, 0, -1) : preset == .bottom ? SCNVector3(0, 0, 1) : SCNVector3(0, 1, 0)
-            cam.look(at: target, up: up, localFront: SCNVector3(0, 0, -1))
-            updateNavigationCube()
             view.pointOfView = cam
             view.defaultCameraController.pointOfView = cam
             view.defaultCameraController.automaticTarget = false
             view.defaultCameraController.target = target
+            cam.simdPosition = SIMD3(target.x, target.y, target.z) + preset.direction * dist
+            cam.simdOrientation = preset.orientation
+            updateNavigationCube()
         }
     }
 }

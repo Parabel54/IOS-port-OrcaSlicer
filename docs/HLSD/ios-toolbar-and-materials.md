@@ -135,6 +135,10 @@ G-code text editing and binary G-code opening are separate viewer capabilities.
 
 ## Camera and plugin boundaries
 
+Face presets construct an explicit orthonormal camera basis, including Back's
+exact 180-degree rotation and the chosen top/bottom screen-up directions.
+Framing preserves the coordinate conversion from slicer Z-up to SceneKit Y-up.
+
 Camera state includes the target, projection and orientation. Orbit/pan and
 centroid pinch zoom preserve that target/framing; explicit projection policy
 separates manual orthographic choices from automatic face alignment. Six face
