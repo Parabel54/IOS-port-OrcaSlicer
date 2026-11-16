@@ -7,6 +7,7 @@
 
 import SwiftUI
 import SceneKit
+import Metal
 import UIKit
 
 /// Pause display work without tearing down GPU resources during background/exit.
@@ -1391,6 +1392,39 @@ struct GCodePathGeometry {
         )
     }
 
+    /// Check actual GPU color conversion: raw byte attributes previously rendered
+    /// a white model despite passing all topology and buffer-layout assertions.
+    private static func compactColorSmokeTest() -> Bool {
+        guard let device = MTLCreateSystemDefaultDevice() else { return false }
+        let scene = SCNScene()
+        scene.background.contents = UIColor.black
+        let path = Segment(points: [SCNVector3(-1, 0, 0), SCNVector3(1, 0, 0)],
+            feature: "Outer wall", width: 1, feedrate: 1200)
+        scene.rootNode.addChildNode(GCodePathGeometry(segments: [path]).makeNode(color: .white, lightweight: true))
+        let camera = SCNNode()
+        camera.camera = SCNCamera()
+        camera.camera?.usesOrthographicProjection = true
+        camera.camera?.orthographicScale = 1
+        camera.position = SCNVector3(0, 0, 4)
+        scene.rootNode.addChildNode(camera)
+        let renderer = SCNRenderer(device: device, options: nil)
+        renderer.scene = scene
+        renderer.pointOfView = camera
+        guard let image = renderer.snapshot(atTime: 0, with: CGSize(width: 32, height: 32), antialiasingMode: .none).cgImage else { return false }
+        var pixels = [UInt8](repeating: 0, count: 32 * 32 * 4)
+        return pixels.withUnsafeMutableBytes { bytes in
+            guard let context = CGContext(data: bytes.baseAddress, width: 32, height: 32, bitsPerComponent: 8,
+                bytesPerRow: 128, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue) else { return false }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: 32, height: 32))
+            let offset = (16 * 32 + 16) * 4
+            let r = Int(bytes[offset]), g = Int(bytes[offset+1]), b = Int(bytes[offset+2]), a = Int(bytes[offset+3])
+            // Allow color-management differences, while rejecting white, black
+            // and swapped channels for the desktop orange outer-wall palette.
+            return r > 150 && r > g + 10 && g > b + 10 && a > 200
+        }
+    }
+
     static func previewSmokeTest() -> Bool {
         let path = Segment(points: [SCNVector3(0, 0, 0), SCNVector3(1, 0, 2), SCNVector3(2, 0, 0)],
                            feature: "Outer wall", width: 0.45, feedrate: 1200, height: 0.3)
@@ -1409,8 +1443,9 @@ struct GCodePathGeometry {
               compactMesh.elements.first?.primitiveType == .triangles,
               compactMesh.elements.first?.bytesPerIndex == 2,
               compactMesh.sources(for: .normal).isEmpty,
-              compactMesh.sources(for: .color).first?.bytesPerComponent == 1,
-              compactMesh.sources(for: .vertex).first?.vectorCount == 8 else { return false }
+              compactMesh.sources(for: .color).count == 1,
+              compactMesh.sources(for: .vertex).first?.vectorCount == 8,
+              compactColorSmokeTest() else { return false }
         let node = GCodePathGeometry(segments: [bead]).makeNode(color: .white)
         guard let geometry = node.childNodes.first else { return false }
         let bounds = geometry.boundingBox
@@ -1735,9 +1770,18 @@ struct GCodePathGeometry {
                 bytesPerIndex: MemoryLayout<UInt16>.size)
             // Color components are normalized bytes; chunks remain below 65,536
             // vertices so 16-bit indices retain every corner without sampling.
-            let colorSource = SCNGeometrySource(data: colors.withUnsafeBytes { Data($0) }, semantic: .color,
-                vectorCount: vertexCount, usesFloatComponents: false, componentsPerVector: 4,
-                bytesPerComponent: 1, dataOffset: 0, dataStride: 4)
+            let colorSource: SCNGeometrySource
+            if let device = MTLCreateSystemDefaultDevice(),
+               let buffer = colors.withUnsafeBytes({ bytes in
+                   device.makeBuffer(bytes: bytes.baseAddress!, length: bytes.count, options: .storageModeShared)
+               }) {
+                // The Data initializer describes raw integers and clamps colors
+                // above 1 to white. Request normalized GPU input explicitly.
+                colorSource = SCNGeometrySource(buffer: buffer, vertexFormat: .uchar4Normalized,
+                    semantic: .color, vertexCount: vertexCount, dataOffset: 0, dataStride: 4)
+            } else {
+                colorSource = source(colors.map { Float($0) / 255 }, .color, 4)
+            }
             var sources = [source(positions, .vertex, 3), colorSource]
             if includeNormals { sources.append(source(normals, .normal, 3)) }
             let geometry = SCNGeometry(sources: sources, elements: [element])

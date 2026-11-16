@@ -38,6 +38,12 @@ final class WorkspaceUITests: XCTestCase {
         for title in ["Prepare", "Preview", "Device"] {
             XCTAssertTrue(app.buttons[title].isHittable, "Main tabs must remain visible above Preview controls")
         }
+        app.buttons["File and project actions"].tap()
+        XCTAssertTrue(app.buttons["Open model…"].waitForExistence(timeout: 10))
+        app.buttons["Open model…"].tap()
+        openSlicedPreview(app)
+        app.buttons["Preview controls"].tap()
+        XCTAssertTrue(app.buttons["Hide preview controls"].waitForExistence(timeout: 10))
         let settled = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             !app.progressIndicators["preview-building"].exists
         }, object: nil)

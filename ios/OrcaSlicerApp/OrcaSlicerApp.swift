@@ -3592,6 +3592,7 @@ struct OrcaRootView: View {
     }
 
     private func requestDocumentPicker(_ kind: DocumentImportKind) {
+        showPreviewControls = false
         let request = DocumentImportRequest(kind: kind)
         if showProcess {
             pendingDocumentPicker = request
@@ -3605,7 +3606,7 @@ struct OrcaRootView: View {
     }
 
     private var editingModalPresented: Bool {
-        showModelLibrary || showPlateInspector || showPreviewControls || showProcess || showWizard || showCalibration || showObjectSettings || showPreferences || showAbout || showShortcuts
+        showModelLibrary || showPlateInspector || showProcess || showWizard || showCalibration || showObjectSettings || showPreferences || showAbout || showShortcuts
     }
 
     private func importCloudPresetsIfReady() {
