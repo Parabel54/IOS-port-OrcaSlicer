@@ -1642,7 +1642,7 @@ final class OrcaEngine: ObservableObject {
         projectDisplayColors = colors.map(FilamentColor.uiColor)
         filamentPaintRevision += 1
         objectFilamentColors = objectNames.indices.map { index in
-            let slot = max(0, (Int(getObjectOption(index: index, key: "extruder") ?? "1") ?? 1) - 1)
+            let slot = max(0, (Int(readObjectOption(index: index, key: "extruder") ?? "1") ?? 1) - 1)
             return FilamentColor.uiColor(colors[min(slot, colors.count - 1)])
         }
     }
@@ -2006,7 +2006,8 @@ final class OrcaEngine: ObservableObject {
                 sidetext: sidetext,
                 type: ConfigOptionEntry.Kind(rawValue: Int(type)) ?? .other,
                 value: value,
-                enumChoices: []
+                enumChoices: [],
+                supportsObjectOverride: key.withCString { orca_object_option_supported($0) == 1 }
             ))
         }
         return out
@@ -2775,17 +2776,24 @@ final class OrcaEngine: ObservableObject {
     @discardableResult
     func setObjectOption(index: Int, key: String, value: String) -> Bool {
         #if ORCA_LINKED
-        guard let s = session, index >= 0 else { return false }
-        pushUndoSnapshot(label: key)
+        guard let s = session, objectNames.indices.contains(index), !sessionBusy, !sliceRunning, !presetsLoading else {
+            lastMessage = "Wait for the current operation to finish, then select an object"; return false
+        }
+        if getObjectOption(index: index, key: key) == value { return true }
+        let snapshot = writeSnapshotFile(session: s, prefix: "undo")
         let rc = key.withCString { k in
             value.withCString { v in
                 orca_session_set_object_option(s, Int32(index), k, v)
             }
         }
         if rc == 0 {
+            if let snapshot { recordUndoSnapshot(snapshot, label: key) }
+            invalidateSlice()
+            if key == "extruder" { refreshObjectFilamentColors() }
             lastMessage = "Object \(index + 1): \(key)=\(value)"
             return true
         }
+        if let snapshot { try? FileManager.default.removeItem(at: snapshot) }
         lastMessage = orca_session_last_error(s).map { String(cString: $0) } ?? "object option failed"
         return false
         #else
@@ -2794,9 +2802,16 @@ final class OrcaEngine: ObservableObject {
     }
 
     func getObjectOption(index: Int, key: String) -> String? {
+        guard !sessionBusy, !sliceRunning, !presetsLoading else { return nil }
+        return readObjectOption(index: index, key: key)
+    }
+
+    // Internal refreshes run after the native task finishes, while the host's
+    // busy flag remains set until its enclosing import/edit method returns.
+    private func readObjectOption(index: Int, key: String) -> String? {
         #if ORCA_LINKED
         guard let s = session, index >= 0 else { return nil }
-        var buf = [CChar](repeating: 0, count: 512)
+        var buf = [CChar](repeating: 0, count: 4096)
         let rc = key.withCString { k in
             orca_session_get_object_option(s, Int32(index), k, &buf, buf.count)
         }
@@ -2807,24 +2822,30 @@ final class OrcaEngine: ObservableObject {
         #endif
     }
 
-    func eraseObjectOption(index: Int, key: String) {
+    @discardableResult
+    func eraseObjectOption(index: Int, key: String) -> Bool {
         #if ORCA_LINKED
-        guard let s = session, index >= 0 else { return }
-        _ = key.withCString { orca_session_erase_object_option(s, Int32(index), $0) }
-        lastMessage = "Cleared object \(key)"
+        guard let s = session, objectNames.indices.contains(index), !sessionBusy, !sliceRunning, !presetsLoading else {
+            lastMessage = "Wait for the current operation to finish, then select an object"; return false
+        }
+        guard getObjectOption(index: index, key: key) != nil else { return true }
+        let snapshot = writeSnapshotFile(session: s, prefix: "undo")
+        let rc = key.withCString { orca_session_erase_object_option(s, Int32(index), $0) }
+        if rc == 0 {
+            if let snapshot { recordUndoSnapshot(snapshot, label: "Reset " + key) }
+            invalidateSlice()
+            if key == "extruder" { refreshObjectFilamentColors() }
+        } else if let snapshot { try? FileManager.default.removeItem(at: snapshot) }
+        lastMessage = rc == 0 ? "Object now uses global \(key)"
+            : (orca_session_last_error(s).map { String(cString: $0) } ?? "Reset object setting failed")
+        return rc == 0
+        #else
+        return false
         #endif
     }
 
     func setObjectExtruder(index: Int, extruder1Based: Int) {
-        #if ORCA_LINKED
-        guard let s = session, index >= 0 else { return }
-        pushUndoSnapshot(label: "extruder")
-        let rc = orca_session_set_object_extruder(s, Int32(index), Int32(extruder1Based))
-        if rc == 0 { refreshObjectFilamentColors(); invalidateSlice() }
-        lastMessage = rc == 0
-            ? "Object \(index + 1) → extruder \(extruder1Based)"
-            : (orca_session_last_error(s).map { String(cString: $0) } ?? "extruder failed")
-        #endif
+        _ = setObjectOption(index: index, key: "extruder", value: String(extruder1Based))
     }
 
     // MARK: - wx-parity W1: facet painting (support / seam / MMU / fuzzy)

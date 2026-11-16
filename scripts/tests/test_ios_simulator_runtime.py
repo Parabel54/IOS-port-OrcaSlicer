@@ -1,5 +1,6 @@
 """Keep SDK/runtime selection shared by engine and standalone graphics checks."""
 import json
+import importlib.util
 from pathlib import Path
 import subprocess
 import tempfile
@@ -49,3 +50,31 @@ class SimulatorRuntimeTests(unittest.TestCase):
         result = self.select('18.5', [self.runtime('26.2'), self.runtime('18.5', False)])
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('No available simulator runtime matches selected iOS SDK 18.5', result.stderr)
+
+
+class RendererReceiptTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        path = HELPER.with_name('check_ios_preview_receipt.py')
+        spec = importlib.util.spec_from_file_location('renderer_receipt', path)
+        cls.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.module)
+
+    def receipt(self):
+        return {'source': 'current-checkout', 'passed': True,
+                'tests': {name: True for name in self.module.EXPECTED_TESTS}}
+
+    def test_accepts_all_required_checks_from_current_source(self):
+        self.assertEqual(set(self.module.validate(self.receipt(), 'current-checkout')), self.module.EXPECTED_TESTS)
+
+    def test_rejects_stale_missing_and_inconsistent_green_receipts(self):
+        cases = []
+        stale = self.receipt(); stale['source'] = 'old-checkout'; cases.append(stale)
+        missing = self.receipt(); del missing['tests']['progressive_gpu']; cases.append(missing)
+        failed = self.receipt(); failed['tests']['progressive_gpu'] = False; cases.append(failed)
+        wrong_type = self.receipt(); wrong_type['tests']['progressive_gpu'] = 1; cases.append(wrong_type)
+        empty = self.receipt(); empty['tests'] = {}; cases.append(empty)
+        green = self.receipt(); green['passed'] = False; cases.append(green)
+        for receipt in cases:
+            with self.subTest(receipt=receipt), self.assertRaises(ValueError):
+                self.module.validate(receipt, 'current-checkout')

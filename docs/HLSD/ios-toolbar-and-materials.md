@@ -246,3 +246,33 @@ child failures to fail the phase. Empty prefix batches are explicitly hidden;
 the GPU check now also exercises a nonempty prefix and logs pixel measurements.
 That earlier green job is not accepted as a graphics pass. Fresh results are
 required for these fixes.
+
+
+Objects settings now follow desktop `TabPrintObject` ownership: the union of
+`PrintObjectConfig` and `PrintRegionConfig`, filtered through the same presentation
+catalog, page/group order and Basic/Advanced/Expert visibility as Global. The
+browser also replaces the older four-field Object settings sheet, so toolbar and
+settings entry points use the same controls. It reuses boolean, enum and scalar
+editors, supports search, shows inherited
+versus overridden values and resets each override to its global value. A compact
+object picker replaces a long object list; filament assignment remains separate.
+Printer/global-only keys cannot be written as object overrides. Strict edits are
+staged, and both setting/reset actions invalidate stale preview/statistics and use
+snapshot undo in the host. Rejected edits discard their temporary snapshot without
+clearing redo history. Object drafts are isolated by selection and never save
+into the selected global preset. Save 3MF retains these settings. Native cases
+cover ownership, invalid-edit isolation, neighboring objects/global values, reset,
+3MF restore and retaining a previous preview on rejected edits; Apple/native UI
+execution remains pending. Per-part and per-height-range editors remain separate
+work, as do desktop conditional enable/disable rules for dependent controls.
+
+
+SDK60 passed both interface/host jobs on retry. Its renderer receipt records
+passing progressive ranges, actual progressive GPU pixels (empty prefix black,
+half edge left=255/right=0, nonempty prefix completed=255/future=0) and static
+preview geometry. The camera aggregate still failed, so the workflow correctly
+fails and is not an overall graphics pass. The next harness reports filament
+painting separately from camera math and logs failed camera assertion locations;
+full-app smoke coverage retains the combined checks by default. The receipt gate
+also independently requires every named test to be boolean true and the receipt
+source to equal the checked-out commit; a summary flag cannot override failures.

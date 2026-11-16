@@ -3782,18 +3782,51 @@ int orca_session_get_calib_mode(orca_session_t *s)
     return static_cast<int>(s->calib_params.mode);
 }
 
+int orca_object_option_supported(const char *key)
+{
+    if (!key || !*key) return 0;
+    // TabPrintObject uses this exact union. Do not expose printer/global-only
+    // options as object overrides: the slicing pipeline does not consume them.
+    static const std::set<std::string> keys = [] {
+        const auto objects = PrintObjectConfig().keys();
+        const auto regions = PrintRegionConfig().keys();
+        std::set<std::string> result(objects.begin(), objects.end());
+        result.insert(regions.begin(), regions.end());
+        result.insert("extruder");
+        return result;
+    }();
+    const ConfigOptionDef *def = lookup_option_def(key);
+    return def && !def->readonly && keys.count(key) != 0 ? 1 : 0;
+}
+
+static void invalidate_object_slice(orca_session_t *s)
+{
+    s->has_slice_stats = false;
+    s->preview_segments.clear(); s->preview_metadata.clear(); s->preview_total_segments = 0;
+    s->role_names.clear(); s->role_meters.clear(); s->role_grams.clear();
+}
+
 int orca_session_set_object_option(
     orca_session_t *s, int index, const char *key, const char *value)
 {
     if (!s || !s->has_model || !key || !value || index < 0
         || index >= int(s->model.objects.size()))
         return -1;
+    s->clear_error();
     try {
         ModelObject *obj = s->model.objects[size_t(index)];
-        if (!obj)
-            return -2;
-        ConfigSubstitutionContext ctx(ForwardCompatibilitySubstitutionRule::EnableSilent);
-        obj->config.set_deserialize(key, value, ctx);
+        if (!obj) return -2;
+        if (!orca_object_option_supported(key)) {
+            s->set_error("This setting is not available per object"); return -3;
+        }
+        // A bad enum/number must not leave a partially changed override behind.
+        DynamicPrintConfig staged = obj->config.get();
+        staged.set_deserialize_strict(key, value);
+        if (std::strcmp(key, "extruder") == 0 && staged.opt_int("extruder") < 0) {
+            s->set_error("Filament must be global (0) or a positive slot"); return -3;
+        }
+        obj->config.assign_config(std::move(staged));
+        invalidate_object_slice(s);
         return 0;
     } catch (const std::exception &ex) {
         s->set_error(std::string("set_object_option: ") + ex.what());
@@ -3831,11 +3864,15 @@ int orca_session_erase_object_option(
     if (!s || !s->has_model || !key || index < 0
         || index >= int(s->model.objects.size()))
         return -1;
+    s->clear_error();
     try {
         ModelObject *obj = s->model.objects[size_t(index)];
         if (!obj)
             return -2;
-        obj->config.erase(key);
+        if (obj->config.has(key)) {
+            obj->config.erase(key);
+            invalidate_object_slice(s);
+        }
         return 0;
     } catch (const std::exception &ex) {
         s->set_error(std::string("erase_object_option: ") + ex.what());

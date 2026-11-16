@@ -62,6 +62,51 @@ int main(int argc, char **argv)
                      "invalid curve helper inputs have explicit failure results")) return 4;
         std::printf("PASS: native gradient curve encoding, inspection, Hermite/PCHIP samples and invalid-input rejection\n");
     }
+    {
+        std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+            objects(orca_session_create(argv[2]), orca_session_destroy);
+        diagnostic_session = objects.get();
+        char value[256]{}, global[256]{};
+        if (!require(orca_object_option_supported("enable_support") == 1 &&
+                     orca_object_option_supported("support_type") == 1 &&
+                     orca_object_option_supported("wall_loops") == 1 &&
+                     orca_object_option_supported("extruder") == 1,
+                     "object settings use native object/region ownership") ||
+            !require(orca_object_option_supported("nozzle_diameter") == 0 &&
+                     orca_object_option_supported("post_process") == 0 &&
+                     orca_object_option_supported("not_a_setting") == 0 &&
+                     orca_object_option_supported(nullptr) == 0,
+                     "global/printer-only settings cannot become object overrides") ||
+            !require(orca_session_add_primitive(objects.get(), 0, 10, 10, 10) == 0 &&
+                     orca_session_add_primitive(objects.get(), 0, 10, 10, 10) == 0 &&
+                     orca_session_set_option(objects.get(), "wall_loops", "2") == 0 &&
+                     orca_session_set_object_option(objects.get(), 0, "wall_loops", "5") == 0 &&
+                     orca_session_set_object_option(objects.get(), 0, "enable_support", "1") == 0 &&
+                     orca_session_set_object_option(objects.get(), 0, "support_type", "tree(auto)") == 0,
+                     "object overrides cover numeric, boolean and enum editors") ||
+            !require(orca_session_get_option(objects.get(), "wall_loops", global, sizeof(global)) == 0 &&
+                     std::string(global) == "2" &&
+                     orca_session_get_object_option(objects.get(), 1, "wall_loops", value, sizeof(value)) != 0,
+                     "object edits leave global and neighboring object unchanged") ||
+            !require(orca_session_set_object_option(objects.get(), 0, "wall_loops", "invalid") != 0 &&
+                     orca_session_set_object_option(objects.get(), 0, "support_type", "not_a_support_type") != 0 &&
+                     orca_session_set_object_option(objects.get(), 0, "nozzle_diameter", "0.8") != 0 &&
+                     orca_session_get_object_option(objects.get(), 0, "wall_loops", value, sizeof(value)) == 0 &&
+                     std::string(value) == "5" &&
+                     orca_session_get_object_option(objects.get(), 0, "support_type", value, sizeof(value)) == 0 &&
+                     std::string(value) == "tree(auto)", "invalid edits preserve existing object values")) return 4;
+        const std::string object_snapshot = directory + "/object-settings.3mf";
+        if (!require(orca_session_snapshot(objects.get(), object_snapshot.c_str()) == 0 &&
+                     orca_session_erase_object_option(objects.get(), 0, "wall_loops") == 0 &&
+                     orca_session_get_object_option(objects.get(), 0, "wall_loops", value, sizeof(value)) != 0,
+                     "reset object setting removes the override") ||
+            !require(orca_session_restore_snapshot(objects.get(), object_snapshot.c_str()) == 0 &&
+                     orca_session_get_object_option(objects.get(), 0, "wall_loops", value, sizeof(value)) == 0 &&
+                     std::string(value) == "5" &&
+                     orca_session_get_object_option(objects.get(), 0, "enable_support", value, sizeof(value)) == 0 &&
+                     std::string(value) == "1", "3MF snapshot retains object overrides")) return 4;
+        std::printf("PASS: native object setting ownership, isolation, strict edits, reset and 3MF persistence\n");
+    }
     // All desktop primitives must be real, bed-placed engine objects.
     for (int kind = 0; kind < 6; ++kind) {
         std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
@@ -469,6 +514,9 @@ int main(int argc, char **argv)
                      "connected cube cannot be split") ||
             !require(orca_session_lay_on_face(session.get(), 0, 100000, 100000, 100000) < 0,
                      "failed face pick on an already sliced model") ||
+            !require(orca_session_set_object_option(session.get(), 0, "wall_loops", "invalid") != 0 &&
+                     orca_session_set_object_option(session.get(), 0, "nozzle_diameter", "0.8") != 0,
+                     "reject invalid/global-only override on an already sliced model") ||
             !require(orca_session_export_preview(session.get(), &retained, &retained_count, &retained_total) == 0 &&
                      retained_count == count && retained_total == total,
                      "unsuccessful staged split/face picks preserve the sliced preview")) {
@@ -510,6 +558,20 @@ int main(int argc, char **argv)
         std::ifstream after_open(output);
         const std::string untouched((std::istreambuf_iterator<char>(after_open)), std::istreambuf_iterator<char>());
         if (!require(untouched == gcode, "G-code viewer never rewrites the opened file")) return 11;
+        for (int action = 0; action < 2; ++action) {
+            if (!require(orca_session_load_gcode(viewer.get(), output.c_str()) == 0,
+                         "reload preview before object setting edit/reset")) return 11;
+            const int edited = action == 0
+                ? orca_session_set_object_option(viewer.get(), 0, "wall_loops", "4")
+                : orca_session_erase_object_option(viewer.get(), 0, "wall_loops");
+            opened = nullptr; opened_count = 0; opened_total = 0;
+            float seconds = 0, volume = 0; int layers = 0;
+            const bool cleared = edited == 0 &&
+                orca_session_export_preview(viewer.get(), &opened, &opened_count, &opened_total) != 0 &&
+                orca_session_last_slice_stats(viewer.get(), &seconds, &volume, &layers) != 0;
+            orca_free(opened);
+            if (!require(cleared, "object setting edit and reset invalidate previous toolpaths and statistics")) return 11;
+        }
         std::printf("PASS: standalone G-code preview, file metadata, preserved model/presets/source and failed-open recovery\n");
     }
     diagnostic_session = session.get();

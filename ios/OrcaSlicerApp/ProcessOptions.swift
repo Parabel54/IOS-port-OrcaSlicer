@@ -36,6 +36,7 @@ struct ConfigOptionEntry: Identifiable, Hashable {
     let type: Kind
     var value: String
     let enumChoices: [ProcessEnumChoice]
+    var supportsObjectOverride = false
 
     var displayCategory: String {
         category.isEmpty ? "Other" : category
@@ -242,6 +243,7 @@ private struct PresetSelectionList: View {
 struct ProcessSettingsBrowser: View {
     @ObservedObject var engine: OrcaEngine
     var onChanged: (() -> Void)?
+    var onClose: (() -> Void)?
     @AppStorage("orca.settings.scope") private var scope = 0
     @AppStorage("orca.settings.visibility") private var mode = 0
     @State private var objectScope = false
@@ -263,16 +265,37 @@ struct ProcessSettingsBrowser: View {
     private let themeText = Color(red: 0xEF / 255.0, green: 0xEF / 255.0, blue: 0xF0 / 255.0)
     private let themeField = Color(red: 0x2D / 255.0, green: 0x2D / 255.0, blue: 0x31 / 255.0)
 
+    init(engine: OrcaEngine, objects: Bool = false, onClose: (() -> Void)? = nil, onChanged: (() -> Void)? = nil) {
+        self.engine = engine
+        self.onChanged = onChanged
+        self.onClose = onClose
+        _objectScope = State(initialValue: objects)
+    }
+
+    private var activeScope: Int { objectScope ? 0 : scope }
+
+    private var scopedEntries: [ConfigOptionEntry] {
+        entries.filter { entry in
+            entry.scope == activeScope && entry.mode <= mode &&
+                (!objectScope || (entry.supportsObjectOverride && entry.key != "extruder"))
+        }.map { entry in
+            guard objectScope else { return entry }
+            var result = entry
+            result.value = engine.getObjectOption(index: engine.selectedObjectIndex, key: entry.key) ?? entry.value
+            return result
+        }
+    }
+
     private var categories: [String] {
-        let scoped = entries.filter { $0.scope == scope && $0.mode <= mode }
+        let scoped = scopedEntries
         return Array(Set(scoped.map { DesktopSettings.location($0).page })).sorted {
-            let a = DesktopSettings.pageOrder($0, scope: scope), b = DesktopSettings.pageOrder($1, scope: scope)
+            let a = DesktopSettings.pageOrder($0, scope: activeScope), b = DesktopSettings.pageOrder($1, scope: activeScope)
             return a == b ? $0.localizedStandardCompare($1) == .orderedAscending : a < b
         }
     }
 
     private var filtered: [ConfigOptionEntry] {
-        var list = entries.filter { $0.scope == scope && $0.mode <= mode }
+        var list = scopedEntries
         if !categoryFilter.isEmpty {
             list = list.filter { DesktopSettings.location($0).page == categoryFilter }
         }
@@ -293,7 +316,7 @@ struct ProcessSettingsBrowser: View {
     private var grouped: [(String, [ConfigOptionEntry])] {
         let ordered = filtered.sorted {
             let a = DesktopSettings.location($0), b = DesktopSettings.location($1)
-            let pa = DesktopSettings.pageOrder(a.page, scope: scope), pb = DesktopSettings.pageOrder(b.page, scope: scope)
+            let pa = DesktopSettings.pageOrder(a.page, scope: activeScope), pb = DesktopSettings.pageOrder(b.page, scope: activeScope)
             if pa != pb { return pa < pb }
             if a.order != b.order { return a.order < b.order }
             return $0.label == $1.label ? $0.key < $1.key : $0.label.localizedStandardCompare($1.label) == .orderedAscending
@@ -333,23 +356,7 @@ struct ProcessSettingsBrowser: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .foregroundStyle(themeMuted)
                 } else {
-                    if !categories.isEmpty {
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 8) {
-                                catChip("All", selected: categoryFilter.isEmpty) {
-                                    categoryFilter = ""
-                                }
-                                ForEach(categories, id: \.self) { c in
-                                    catChip(c, selected: categoryFilter == c) {
-                                        categoryFilter = c
-                                    }
-                                }
-                            }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                        }
-                        .background(themePanel)
-                    }
+                    categoryPicker
                     if let applyError {
                         Text(applyError)
                             .font(.system(size: 12))
@@ -380,6 +387,9 @@ struct ProcessSettingsBrowser: View {
             .navigationTitle("Print settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    if let onClose { Button("Done", action: onClose) }
+                }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     if !objectScope && scope != 2 {
                         Button("Save preset…") {
@@ -397,8 +407,13 @@ struct ProcessSettingsBrowser: View {
             }
             .preferredColorScheme(.dark)
             .tint(themeAccent)
-            .onAppear { categoryFilter = DesktopSettings.pages[scope]?.first ?? ""; reload() }
-            .onChange(of: scope) { _ in categoryFilter = DesktopSettings.pages[scope]?.first ?? "" }
+            .onAppear { categoryFilter = DesktopSettings.pages[activeScope]?.first ?? ""; reload() }
+            .onChange(of: scope) { _ in categoryFilter = DesktopSettings.pages[activeScope]?.first ?? "" }
+            .onChange(of: objectScope) { _ in
+                categoryFilter = DesktopSettings.pages[activeScope]?.first ?? ""
+                objectDrafts = [:]; applyError = nil
+            }
+            .onChange(of: engine.selectedObjectIndex) { _ in objectDrafts = [:]; applyError = nil }
             .onChange(of: engine.selectedPrinter) { _ in reload() }
             .onChange(of: engine.selectedFilament) { _ in reload() }
             .onChange(of: engine.selectedProcess) { _ in reload() }
@@ -463,56 +478,76 @@ struct ProcessSettingsBrowser: View {
         }
     }
 
-    private var objectSettings: some View {
-        List {
-            Section("Objects on this plate") {
-                if engine.objectNames.isEmpty { Text("Add a model to change its settings.") }
-                ForEach(Array(engine.objectNames.enumerated()), id: \.offset) { index, name in
-                    Button {
-                        engine.selectObject(at: index)
-                        objectDrafts = [:]
-                        applyError = nil
-                    } label: {
-                        HStack { Text(name); Spacer(); if engine.selectedObjectIndex == index { Image(systemName: "checkmark") } }
+    @ViewBuilder
+    private var categoryPicker: some View {
+        if !categories.isEmpty {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    catChip("All", selected: categoryFilter.isEmpty) { categoryFilter = "" }
+                    ForEach(categories, id: \.self) { category in
+                        catChip(category, selected: categoryFilter == category) { categoryFilter = category }
                     }
                 }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
             }
-            if engine.selectedObjectIndex >= 0 {
-                Section("Object overrides") {
-                    objectField("layer_height", label: "Layer height (mm)")
-                    objectField("wall_loops", label: "Wall loops")
-                    objectField("sparse_infill_density", label: "Infill density (%)")
-                    Picker("Filament", selection: Binding(get: {
-                        Int(engine.getObjectOption(index: engine.selectedObjectIndex, key: "extruder") ?? "0") ?? 0
-                    }, set: { engine.setObjectExtruder(index: engine.selectedObjectIndex, extruder1Based: $0) })) {
-                        Text("Use global").tag(0)
-                        ForEach(0..<engine.projectFilamentColors.count, id: \.self) { Text("Filament \($0 + 1)").tag($0 + 1) }
-                    }
-                }
-            }
-            if let applyError { Text(applyError).foregroundStyle(.red) }
-        }.scrollContentBackground(.hidden)
+            .background(themePanel)
+        }
     }
 
-    private func objectField(_ key: String, label: String) -> some View {
-        VStack(alignment: .leading) {
-            Text(label).font(.subheadline)
-            HStack {
-                TextField(label, text: Binding(get: {
-                    objectDrafts[key] ?? engine.getObjectOption(index: engine.selectedObjectIndex, key: key) ?? engine.getOption(key) ?? ""
-                }, set: { objectDrafts[key] = $0 })).keyboardType(.decimalPad)
-                Button("Apply") {
-                    var value = objectDrafts[key] ?? engine.getObjectOption(index: engine.selectedObjectIndex, key: key) ?? engine.getOption(key) ?? ""
-                    if key == "sparse_infill_density" && !value.hasSuffix("%") { value += "%" }
-                    let ok = engine.setObjectOption(index: engine.selectedObjectIndex, key: key, value: value)
-                    applyError = ok ? nil : engine.lastMessage
+    private var objectSettings: some View {
+        VStack(spacing: 0) {
+            Picker("Setting visibility", selection: $mode) {
+                Text("Basic").tag(0)
+                Text("Advanced").tag(1)
+                Text("Expert").tag(2)
+            }.pickerStyle(.segmented).padding(.horizontal, 8)
+            categoryPicker
+            List {
+                Section("Objects on this plate") {
+                    if engine.objectNames.isEmpty { Text("Add a model to change its settings.") }
+                    else {
+                        Picker("Selected object", selection: Binding(get: { engine.selectedObjectIndex }, set: {
+                            engine.selectObject(at: $0)
+                        })) {
+                            if engine.selectedObjectIndex < 0 { Text("Select an object").tag(-1) }
+                            ForEach(Array(engine.objectNames.enumerated()), id: \.offset) { index, name in
+                                Text(name).tag(index)
+                            }
+                        }
+                    }
                 }
-            }
-            Button("Use global value") {
-                engine.eraseObjectOption(index: engine.selectedObjectIndex, key: key)
-                objectDrafts.removeValue(forKey: key)
-            }.font(.caption)
+                if engine.objectNames.indices.contains(engine.selectedObjectIndex) {
+                    Section {
+                        Picker("Filament", selection: Binding(get: {
+                            Int(engine.getObjectOption(index: engine.selectedObjectIndex, key: "extruder") ?? "0") ?? 0
+                        }, set: {
+                            apply("extruder", value: String($0))
+                        })) {
+                            Text("Use global").tag(0)
+                            ForEach(0..<engine.projectFilamentColors.count, id: \.self) { Text("Filament \($0 + 1)").tag($0 + 1) }
+                        }
+                    } footer: {
+                        Text("Changes apply only to this object. Use global value removes an override. Save the project as 3MF to keep object settings.")
+                    }
+                    ForEach(grouped, id: \.0) { title, rows in
+                        Section(title) { ForEach(rows) { entry in optionRow(entry) } }
+                    }
+                    if grouped.isEmpty { Text("No object settings match this search and visibility level.").foregroundStyle(.secondary) }
+                }
+                if let applyError { Text(applyError).foregroundStyle(.red) }
+            }.scrollContentBackground(.hidden)
         }
+        .disabled(engine.sessionBusy || engine.sliceRunning || engine.presetsLoading)
+    }
+
+    private func draftValue(_ entry: ConfigOptionEntry) -> String {
+        (objectScope ? objectDrafts[entry.key] : draftValues[entry.key]) ?? entry.value
+    }
+
+    private func setDraft(_ key: String, value: String) {
+        if objectScope { objectDrafts[key] = value }
+        else { draftValues[key] = value }
     }
 
     private var presetSelector: some View {
@@ -560,6 +595,20 @@ struct ProcessSettingsBrowser: View {
                         .foregroundStyle(themeMuted)
                 }
             }
+            if objectScope {
+                let overridden = engine.getObjectOption(index: engine.selectedObjectIndex, key: entry.key) != nil
+                HStack {
+                    Text(overridden ? "Object override" : "Using global value").font(.caption).foregroundStyle(themeMuted)
+                    Spacer()
+                    if overridden {
+                        Button("Use global value") {
+                            let ok = engine.eraseObjectOption(index: engine.selectedObjectIndex, key: entry.key)
+                            applyError = ok ? nil : engine.lastMessage
+                            if ok { objectDrafts.removeValue(forKey: entry.key); onChanged?() }
+                        }.font(.caption)
+                    }
+                }
+            }
             if mode == 2 {
                 Text(entry.key)
                     .font(.system(size: 11, design: .monospaced))
@@ -569,7 +618,7 @@ struct ProcessSettingsBrowser: View {
 
             if entry.key == "default_filament_colour" {
                 ColorPicker("Default color", selection: Binding(get: {
-                    colorValue(draftValues[entry.key] ?? entry.value)
+                    colorValue(draftValue(entry))
                 }, set: { color in
                     let hex = colorHex(color)
                     apply(entry.key, value: hex)
@@ -584,7 +633,7 @@ struct ProcessSettingsBrowser: View {
             case .bool:
                 Toggle(isOn: Binding(
                     get: {
-                        let v = (draftValues[entry.key] ?? entry.value).lowercased()
+                        let v = (draftValue(entry)).lowercased()
                         return v == "1" || v == "true" || v == "yes" || v == "on"
                     },
                     set: { on in
@@ -602,7 +651,7 @@ struct ProcessSettingsBrowser: View {
                     return engine.enumChoices(for: entry.key)
                 }()
                 if !choices.isEmpty && !entry.value.contains(",") && !entry.value.contains(";") {
-                    let current = draftValues[entry.key] ?? entry.value
+                    let current = draftValue(entry)
                     let matched = ProcessOptionCatalog.match(
                         current, in: choices, fallback: choices[0].key
                     )
@@ -633,8 +682,8 @@ struct ProcessSettingsBrowser: View {
 
     private func scalarEditor(_ entry: ConfigOptionEntry) -> some View {
         let draft = Binding<String>(
-            get: { draftValues[entry.key] ?? entry.value },
-            set: { draftValues[entry.key] = $0 }
+            get: { draftValue(entry) },
+            set: { setDraft(entry.key, value: $0) }
         )
         return HStack(spacing: 8) {
             TextField(entry.label, text: draft, axis: .vertical)
@@ -647,7 +696,7 @@ struct ProcessSettingsBrowser: View {
                 .background(themeField)
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             Button("Apply") {
-                apply(entry.key, value: draftValues[entry.key] ?? entry.value)
+                apply(entry.key, value: draftValue(entry))
             }
             .font(.system(size: 13, weight: .bold))
             .foregroundStyle(themeAccent)
@@ -655,6 +704,12 @@ struct ProcessSettingsBrowser: View {
     }
 
     private func apply(_ key: String, value: String) {
+        if objectScope {
+            let ok = engine.setObjectOption(index: engine.selectedObjectIndex, key: key, value: value)
+            applyError = ok ? nil : engine.lastMessage
+            if ok { objectDrafts.removeValue(forKey: key); onChanged?() }
+            return
+        }
         let ok = engine.applyConfigOption(key: key, value: value)
         if ok {
             applyError = nil

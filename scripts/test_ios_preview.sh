@@ -44,12 +44,13 @@ trap cleanup EXIT
 ios_test_run 120 xcrun simctl boot "$DEVICE"
 ios_test_run 240 xcrun simctl bootstatus "$DEVICE" -b
 ios_test_run 120 xcrun simctl install "$DEVICE" "$APP"
-SIMCTL_CHILD_ORCA_GRAPHICS_SOURCE="$(git -C "$ROOT" rev-parse HEAD)" \
+SOURCE_COMMIT="$(git -C "$ROOT" rev-parse HEAD)"
+SIMCTL_CHILD_ORCA_GRAPHICS_SOURCE="$SOURCE_COMMIT" \
   ios_test_run 90 xcrun simctl launch "$DEVICE" com.orcaslicer.preview-smoke | tee "$TEST_DIR/launch.log"
 APP_DATA="$(ios_test_run 30 xcrun simctl get_app_container "$DEVICE" com.orcaslicer.preview-smoke data)"
 ios_test_run 75 python3 - "$APP_DATA" "$TEST_DIR" <<'PYRESULT'
 from pathlib import Path
-import json, shutil, sys, time
+import shutil, sys, time
 source = Path(sys.argv[1]) / 'tmp/preview-renderer.json'
 deadline = time.monotonic() + 60
 while not source.is_file():
@@ -57,11 +58,8 @@ while not source.is_file():
         raise SystemExit('No renderer result within 60 seconds')
     time.sleep(1)
 shutil.copy2(source, Path(sys.argv[2]) / source.name)
-result = json.loads(source.read_text())
-for name, passed in result['tests'].items():
-    print(('PASS: ' if passed else 'FAIL: ') + name)
-if result.get('passed') is not True or not result['tests']:
-    raise SystemExit('Renderer tests failed')
 PYRESULT
+ios_test_run 20 python3 "$ROOT/scripts/check_ios_preview_receipt.py" \
+  "$TEST_DIR/preview-renderer.json" "$SOURCE_COMMIT"
 # A receipt must come from a still-running app, not a process that crashed later.
 ios_test_run 20 xcrun simctl terminate "$DEVICE" com.orcaslicer.preview-smoke

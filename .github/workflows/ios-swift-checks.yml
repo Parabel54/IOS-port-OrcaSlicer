@@ -6,6 +6,7 @@ on:
       - 'src/ios/orca_slice_c_api.h'
       - 'scripts/check_ios_swift.sh'
       - 'scripts/test_ios_preview.sh'
+      - 'scripts/check_ios_preview_receipt.py'
       - 'scripts/ios_simulator_helpers.sh'
       - 'scripts/tests/test_ios*.py'
       - '.github/workflows/ios-swift-checks.yml'

@@ -629,10 +629,14 @@ ORCA_API int orca_session_get_calib_mode(orca_session_t *s);
 
 /**
  * Per-object config override (ModelObject::config) — desktop Object Settings.
- * index: object index. set: deserialize key=value into object config.
+ * index: object index. set: strictly deserialize a supported key into object config.
+ * Successful edits/erases invalidate slice statistics and cached preview.
  * get: serialize option into buf (empty if not overridden).
  * erase: remove override so global process value applies.
  */
+/** 1 for desktop PrintObjectConfig/PrintRegionConfig keys (including extruder), else 0. */
+ORCA_API int orca_object_option_supported(const char *key);
+
 ORCA_API int orca_session_set_object_option(
     orca_session_t *s, int index, const char *key, const char *value);
 ORCA_API int orca_session_get_object_option(

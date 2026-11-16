@@ -152,10 +152,6 @@ struct OrcaRootView: View {
     @State private var wizardVendors: Set<String> = Set(OrcaEngine.preferredVendors)
     @State private var wizardLanguage: String = OrcaEngine.appLanguage
     @State private var wizardRegion: String = OrcaEngine.appRegion
-    @State private var objLayerHeight = ""
-    @State private var objWalls = ""
-    @State private var objInfill = ""
-    @State private var objExtruder = "0"
     @State private var measurePointA: SIMD3<Float>?
     @State private var measurePointB: SIMD3<Float>?
     @State private var measureDistanceText = ""
@@ -525,7 +521,6 @@ struct OrcaRootView: View {
             Menu {
                 cameraViewMenu
                 Button("Object settings…") {
-                    loadObjectSettingsFields()
                     showObjectSettings = true
                 }
                 .disabled(!engine.hasModel || engine.selectedObjectIndex < 0)
@@ -2769,18 +2764,6 @@ struct OrcaRootView: View {
         }
     }
 
-    private func loadObjectSettingsFields() {
-        let idx = engine.selectedObjectIndex >= 0 ? engine.selectedObjectIndex : 0
-        objLayerHeight = engine.getObjectOption(index: idx, key: "layer_height")
-            ?? engine.getOptionFirst("layer_height") ?? "0.2"
-        objWalls = engine.getObjectOption(index: idx, key: "wall_loops")
-            ?? engine.getOptionFirst("wall_loops") ?? "2"
-        objInfill = (engine.getObjectOption(index: idx, key: "sparse_infill_density")
-            ?? engine.getOptionPercent("sparse_infill_density") ?? "15")
-            .replacingOccurrences(of: "%", with: "")
-        objExtruder = engine.getObjectOption(index: idx, key: "extruder") ?? "0"
-    }
-
     private var configWizardSheet: AnyView {
         AnyView(NavigationStack {
             List {
@@ -2979,49 +2962,8 @@ struct OrcaRootView: View {
     }
 
     private var objectSettingsSheet: AnyView {
-        let idx = engine.selectedObjectIndex >= 0 ? engine.selectedObjectIndex : 0
-        return AnyView(NavigationStack {
-            List {
-                Section("Object \(idx + 1)") {
-                    labeled("Name", engine.objectNames.indices.contains(idx) ? engine.objectNames[idx] : "—")
-                }
-                Section("Overrides (desktop Object Settings)") {
-                    processField(title: "layer_height", unit: "mm", text: $objLayerHeight) {
-                        _ = engine.setObjectOption(index: idx, key: "layer_height", value: objLayerHeight)
-                        status = engine.lastMessage
-                    }
-                    processField(title: "wall_loops", unit: "", text: $objWalls) {
-                        _ = engine.setObjectOption(index: idx, key: "wall_loops", value: objWalls)
-                        status = engine.lastMessage
-                    }
-                    processField(title: "sparse_infill_density", unit: "%", text: $objInfill) {
-                        _ = engine.setObjectOption(index: idx, key: "sparse_infill_density", value: "\(objInfill)%")
-                        status = engine.lastMessage
-                    }
-                    processField(title: "extruder (0=default)", unit: "", text: $objExtruder) {
-                        if let e = Int(objExtruder) {
-                            engine.setObjectExtruder(index: idx, extruder1Based: e)
-                            status = engine.lastMessage
-                        }
-                    }
-                    Button("Clear layer_height override") {
-                        engine.eraseObjectOption(index: idx, key: "layer_height")
-                        loadObjectSettingsFields()
-                    }
-                    .foregroundStyle(OrcaTheme.danger)
-                    .listRowBackground(OrcaTheme.panel)
-                }
-            }
-            .scrollContentBackground(.hidden)
-            .background(OrcaTheme.bg)
-            .navigationTitle("Object settings")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Done") { showObjectSettings = false }
-                        .foregroundStyle(OrcaTheme.accent)
-                }
-            }
+        AnyView(ProcessSettingsBrowser(engine: engine, objects: true, onClose: { showObjectSettings = false }) {
+            status = engine.lastMessage
         })
     }
 
@@ -3660,32 +3602,6 @@ struct OrcaRootView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .buttonStyle(.plain)
-    }
-
-    private func processField(title: String, unit: String, text: Binding<String>, apply: @escaping () -> Void) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.system(size: 13, weight: .medium, design: .monospaced))
-                .foregroundStyle(OrcaTheme.muted)
-            HStack(spacing: 10) {
-                TextField(title, text: text)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .keyboardType(.decimalPad)
-                    .font(.system(size: 16, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(OrcaTheme.text)
-                    .padding(10)
-                    .background(OrcaTheme.field)
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                if !unit.isEmpty {
-                    Text(unit).font(.system(size: 13)).foregroundStyle(OrcaTheme.muted).frame(width: 28)
-                }
-                Button("Apply", action: apply)
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundStyle(OrcaTheme.accent)
-            }
-        }
-        .listRowBackground(OrcaTheme.panel)
     }
 
     private func sliceNow() {

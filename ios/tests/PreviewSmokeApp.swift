@@ -18,7 +18,8 @@ final class PreviewSmokeApp: UIResponder, UIApplicationDelegate {
 
     private func runChecks() {
         let checks: [(String, () -> Bool)] = [
-            ("camera", { PlateSceneView.cameraSmokeTest(includePreview: false) }),
+            ("camera", { PlateSceneView.cameraSmokeTest(includePreview: false, includePaint: false) }),
+            ("painted_filaments_gpu", PlateSceneView.filamentPaintSmokeTest),
             ("progressive_ranges", GCodePathGeometry.progressiveCursorSmokeTest),
             ("progressive_gpu", GCodePathGeometry.progressiveGPUSmokeTest),
             ("preview_geometry", { GCodePathGeometry.previewSmokeTest(includeProgressive: false) })
