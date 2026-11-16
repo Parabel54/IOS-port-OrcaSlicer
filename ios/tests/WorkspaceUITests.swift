@@ -26,9 +26,13 @@ final class WorkspaceUITests: XCTestCase {
         continueAfterFailure = false
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication(bundleIdentifier: "com.orcaslicer.ios")
-        app.launchArguments = ["--test-document-import", "--test-native-picker"]
+        app.launchArguments = ["--test-document-import", "--test-native-picker", "--test-preview-memory-warning"]
         app.launch()
         openSlicedPreview(app)
+        XCTAssertFalse(app.staticTexts["Slice the plate to preview toolpaths"].exists, "Memory pressure must retain the successful slice")
+        XCTAssertTrue(app.buttons["camera-home"].isHittable)
+        XCTAssertTrue(app.otherElements["Navigation cube"].exists)
+        app.buttons["camera-home"].tap()
         app.buttons["Preview controls"].tap()
         XCTAssertTrue(app.buttons["Hide preview controls"].waitForExistence(timeout: 10))
         for title in ["Prepare", "Preview", "Device"] {

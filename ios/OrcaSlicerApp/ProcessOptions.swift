@@ -257,12 +257,13 @@ struct ProcessSettingsBrowser: View {
     private var categories: [String] {
         let scoped = entries.filter { $0.scope == scope && $0.mode <= mode }
         return Array(Set(scoped.map { DesktopSettings.location($0).page })).sorted {
-            DesktopSettings.pageOrder($0, scope: scope) < DesktopSettings.pageOrder($1, scope: scope)
+            let a = DesktopSettings.pageOrder($0, scope: scope), b = DesktopSettings.pageOrder($1, scope: scope)
+            return a == b ? $0.localizedStandardCompare($1) == .orderedAscending : a < b
         }
     }
 
     private var filtered: [ConfigOptionEntry] {
-        var list = entries.filter { $0.scope == scope && $0.mode <= mode && $0.key != "post_process" }
+        var list = entries.filter { $0.scope == scope && $0.mode <= mode }
         if !categoryFilter.isEmpty {
             list = list.filter { DesktopSettings.location($0).page == categoryFilter }
         }
@@ -281,7 +282,13 @@ struct ProcessSettingsBrowser: View {
     }
 
     private var grouped: [(String, [ConfigOptionEntry])] {
-        let ordered = filtered.sorted { DesktopSettings.location($0).order < DesktopSettings.location($1).order }
+        let ordered = filtered.sorted {
+            let a = DesktopSettings.location($0), b = DesktopSettings.location($1)
+            let pa = DesktopSettings.pageOrder(a.page, scope: scope), pb = DesktopSettings.pageOrder(b.page, scope: scope)
+            if pa != pb { return pa < pb }
+            if a.order != b.order { return a.order < b.order }
+            return $0.label == $1.label ? $0.key < $1.key : $0.label.localizedStandardCompare($1.label) == .orderedAscending
+        }
         var groups: [(String, [ConfigOptionEntry])] = []
         for entry in ordered {
             let place = DesktopSettings.location(entry)
@@ -338,17 +345,12 @@ struct ProcessSettingsBrowser: View {
                             .background(themePanel)
                     }
                     List {
-                        if scope == 0 && (categoryFilter.isEmpty || categoryFilter == "Others") {
-                            NavigationLink("Post-processing plugins") { NativeProcessingPanel(engine: engine) }
-                        }
-                        Text("Options: \(filtered.count)")
-                            .font(.caption)
-                            .foregroundStyle(themeMuted)
-                            .listRowBackground(themePanel)
                         ForEach(grouped, id: \.0) { cat, rows in
                             Section(cat) {
                                 ForEach(rows) { entry in
-                                    optionRow(entry)
+                                    if entry.key == "post_process" {
+                                        NavigationLink("Post-processing plugins") { NativeProcessingPanel(engine: engine) }
+                                    } else { optionRow(entry) }
                                 }
                             }
                         }
@@ -371,8 +373,8 @@ struct ProcessSettingsBrowser: View {
             }
             .preferredColorScheme(.dark)
             .tint(themeAccent)
-            .onAppear { reload() }
-            .onChange(of: scope) { _ in categoryFilter = "" }
+            .onAppear { categoryFilter = DesktopSettings.pages[scope]?.first ?? ""; reload() }
+            .onChange(of: scope) { _ in categoryFilter = DesktopSettings.pages[scope]?.first ?? "" }
             .onChange(of: engine.selectedPrinter) { _ in reload() }
             .onChange(of: engine.selectedFilament) { _ in reload() }
             .onChange(of: engine.selectedProcess) { _ in reload() }
@@ -556,7 +558,7 @@ enum DesktopSettings {
     static let pages: [Int: [String]] = [
         0: ["Quality", "Strength", "Speed", "Support", "Multimaterial", "Others"],
         1: ["Filament", "Cooling", "Advanced", "Multimaterial", "Dependencies", "Notes"],
-        2: ["Basic information", "Machine G-code", "Notes", "Motion ability", "Multimaterial", "Extruder"],
+        2: ["Basic information", "Machine G-code", "Multimaterial", "Extruder", "Motion ability", "Notes"],
     ]
     static let locations: [String: Location] = [
         "0:layer_height": Location(page: "Quality", group: "Layer height", order: 0),
@@ -1114,51 +1116,61 @@ enum DesktopSettings {
         "2:input_shaping_freq_y": Location(page: "Motion ability", group: "Resonance Compensation", order: 552),
         "2:input_shaping_damp_x": Location(page: "Motion ability", group: "Resonance Compensation", order: 553),
         "2:input_shaping_damp_y": Location(page: "Motion ability", group: "Resonance Compensation", order: 554),
-        "2:machine_max_acceleration_": Location(page: "Motion ability", group: "Acceleration limitation", order: 555),
-        "2:machine_max_acceleration_extruding": Location(page: "Motion ability", group: "Acceleration limitation", order: 556),
-        "2:machine_max_acceleration_retracting": Location(page: "Motion ability", group: "Acceleration limitation", order: 557),
-        "2:machine_max_acceleration_travel": Location(page: "Motion ability", group: "Acceleration limitation", order: 558),
-        "2:machine_max_junction_deviation": Location(page: "Motion ability", group: "Jerk limitation", order: 559),
-        "2:machine_max_jerk_": Location(page: "Motion ability", group: "Jerk limitation", order: 560),
-        "2:single_extruder_multi_material": Location(page: "Multimaterial", group: "Single extruder multi-material setup", order: 561),
-        "2:manual_filament_change": Location(page: "Multimaterial", group: "Single extruder multi-material setup", order: 562),
-        "2:bed_temperature_formula": Location(page: "Multimaterial", group: "Single extruder multi-material setup", order: 563),
-        "2:wipe_tower_type": Location(page: "Multimaterial", group: "Wipe tower", order: 564),
-        "2:purge_in_prime_tower": Location(page: "Multimaterial", group: "Wipe tower", order: 565),
-        "2:enable_filament_ramming": Location(page: "Multimaterial", group: "Wipe tower", order: 566),
-        "2:tool_change_on_wipe_tower": Location(page: "Multimaterial", group: "Wipe tower", order: 567),
-        "2:wait_for_temp_on_wipe_tower": Location(page: "Multimaterial", group: "Wipe tower", order: 568),
-        "2:enable_belt_purge_tower": Location(page: "Multimaterial", group: "Belt purge tower", order: 569),
-        "2:cooling_tube_retraction": Location(page: "Multimaterial", group: "Single extruder multi-material parameters", order: 570),
-        "2:cooling_tube_length": Location(page: "Multimaterial", group: "Single extruder multi-material parameters", order: 571),
-        "2:parking_pos_retraction": Location(page: "Multimaterial", group: "Single extruder multi-material parameters", order: 572),
-        "2:extra_loading_move": Location(page: "Multimaterial", group: "Single extruder multi-material parameters", order: 573),
-        "2:high_current_on_filament_swap": Location(page: "Multimaterial", group: "Single extruder multi-material parameters", order: 574),
-        "2:machine_load_filament_time": Location(page: "Multimaterial", group: "Advanced", order: 575),
-        "2:machine_unload_filament_time": Location(page: "Multimaterial", group: "Advanced", order: 576),
-        "2:machine_tool_change_time": Location(page: "Multimaterial", group: "Advanced", order: 577),
-        "2:is_imex": Location(page: "Multimaterial", group: "IDEX/IQEX Configuration", order: 578),
-        "2:imex_firmware_managed_zones": Location(page: "Multimaterial", group: "IDEX/IQEX Configuration", order: 579),
-        "2:imex_gantry_count": Location(page: "Multimaterial", group: "IDEX/IQEX Configuration", order: 580),
-        "2:imex_tools_per_gantry": Location(page: "Multimaterial", group: "IDEX/IQEX Configuration", order: 581),
-        "2:imex_tool_layout": Location(page: "Multimaterial", group: "IDEX/IQEX Configuration", order: 582),
-        "2:imex_nozzle_clearance_x": Location(page: "Multimaterial", group: "IDEX/IQEX Configuration", order: 583),
-        "2:imex_nozzle_clearance_y": Location(page: "Multimaterial", group: "IDEX/IQEX Configuration", order: 584),
-        "2:imex_carriage_margin": Location(page: "Multimaterial", group: "IDEX/IQEX Configuration", order: 585),
-        "2:imex_viz_theme": Location(page: "Multimaterial", group: "IDEX/IQEX Configuration", order: 586),
-        "2:nozzle_diameter": Location(page: "Extruder", group: "Basic information", order: 587),
-        "2:nozzle_type": Location(page: "Extruder", group: "Basic information", order: 588),
-        "2:nozzle_volume": Location(page: "Extruder", group: "Basic information", order: 589),
-        "2:extruder_printable_height": Location(page: "Extruder", group: "Basic information", order: 590),
-        "2:extruder_printable_area": Location(page: "Extruder", group: "Basic information", order: 591),
-        "2:extruder_bed_exclude_volumes": Location(page: "Extruder", group: "Basic information", order: 592),
-        "2:min_layer_height": Location(page: "Extruder", group: "Layer height limits", order: 593),
-        "2:max_layer_height": Location(page: "Extruder", group: "Layer height limits", order: 594),
-        "2:extruder_offset": Location(page: "Extruder", group: "Position", order: 595),
-        "2:retract_length_toolchange": Location(page: "Extruder", group: "Retraction when switching material", order: 596),
-        "2:retract_restart_extra_toolchange": Location(page: "Extruder", group: "Retraction when switching material", order: 597),
-        "2:long_retractions_when_cut": Location(page: "Extruder", group: "Retraction when switching material", order: 598),
-        "2:retraction_distances_when_cut": Location(page: "Extruder", group: "Retraction when switching material", order: 599),
+        "2:machine_max_speed_x": Location(page: "Motion ability", group: "Speed limitation", order: 555),
+        "2:machine_max_speed_y": Location(page: "Motion ability", group: "Speed limitation", order: 556),
+        "2:machine_max_speed_z": Location(page: "Motion ability", group: "Speed limitation", order: 557),
+        "2:machine_max_speed_e": Location(page: "Motion ability", group: "Speed limitation", order: 558),
+        "2:machine_max_acceleration_x": Location(page: "Motion ability", group: "Acceleration limitation", order: 559),
+        "2:machine_max_acceleration_y": Location(page: "Motion ability", group: "Acceleration limitation", order: 560),
+        "2:machine_max_acceleration_z": Location(page: "Motion ability", group: "Acceleration limitation", order: 561),
+        "2:machine_max_acceleration_e": Location(page: "Motion ability", group: "Acceleration limitation", order: 562),
+        "2:machine_max_acceleration_extruding": Location(page: "Motion ability", group: "Acceleration limitation", order: 563),
+        "2:machine_max_acceleration_retracting": Location(page: "Motion ability", group: "Acceleration limitation", order: 564),
+        "2:machine_max_acceleration_travel": Location(page: "Motion ability", group: "Acceleration limitation", order: 565),
+        "2:machine_max_junction_deviation": Location(page: "Motion ability", group: "Jerk limitation", order: 566),
+        "2:machine_max_jerk_x": Location(page: "Motion ability", group: "Jerk limitation", order: 567),
+        "2:machine_max_jerk_y": Location(page: "Motion ability", group: "Jerk limitation", order: 568),
+        "2:machine_max_jerk_z": Location(page: "Motion ability", group: "Jerk limitation", order: 569),
+        "2:machine_max_jerk_e": Location(page: "Motion ability", group: "Jerk limitation", order: 570),
+        "2:single_extruder_multi_material": Location(page: "Multimaterial", group: "Single extruder multi-material setup", order: 571),
+        "2:manual_filament_change": Location(page: "Multimaterial", group: "Single extruder multi-material setup", order: 572),
+        "2:bed_temperature_formula": Location(page: "Multimaterial", group: "Single extruder multi-material setup", order: 573),
+        "2:wipe_tower_type": Location(page: "Multimaterial", group: "Wipe tower", order: 574),
+        "2:purge_in_prime_tower": Location(page: "Multimaterial", group: "Wipe tower", order: 575),
+        "2:enable_filament_ramming": Location(page: "Multimaterial", group: "Wipe tower", order: 576),
+        "2:tool_change_on_wipe_tower": Location(page: "Multimaterial", group: "Wipe tower", order: 577),
+        "2:wait_for_temp_on_wipe_tower": Location(page: "Multimaterial", group: "Wipe tower", order: 578),
+        "2:enable_belt_purge_tower": Location(page: "Multimaterial", group: "Belt purge tower", order: 579),
+        "2:cooling_tube_retraction": Location(page: "Multimaterial", group: "Single extruder multi-material parameters", order: 580),
+        "2:cooling_tube_length": Location(page: "Multimaterial", group: "Single extruder multi-material parameters", order: 581),
+        "2:parking_pos_retraction": Location(page: "Multimaterial", group: "Single extruder multi-material parameters", order: 582),
+        "2:extra_loading_move": Location(page: "Multimaterial", group: "Single extruder multi-material parameters", order: 583),
+        "2:high_current_on_filament_swap": Location(page: "Multimaterial", group: "Single extruder multi-material parameters", order: 584),
+        "2:machine_load_filament_time": Location(page: "Multimaterial", group: "Advanced", order: 585),
+        "2:machine_unload_filament_time": Location(page: "Multimaterial", group: "Advanced", order: 586),
+        "2:machine_tool_change_time": Location(page: "Multimaterial", group: "Advanced", order: 587),
+        "2:is_imex": Location(page: "Multimaterial", group: "IDEX/IQEX Configuration", order: 588),
+        "2:imex_firmware_managed_zones": Location(page: "Multimaterial", group: "IDEX/IQEX Configuration", order: 589),
+        "2:imex_gantry_count": Location(page: "Multimaterial", group: "IDEX/IQEX Configuration", order: 590),
+        "2:imex_tools_per_gantry": Location(page: "Multimaterial", group: "IDEX/IQEX Configuration", order: 591),
+        "2:imex_tool_layout": Location(page: "Multimaterial", group: "IDEX/IQEX Configuration", order: 592),
+        "2:imex_nozzle_clearance_x": Location(page: "Multimaterial", group: "IDEX/IQEX Configuration", order: 593),
+        "2:imex_nozzle_clearance_y": Location(page: "Multimaterial", group: "IDEX/IQEX Configuration", order: 594),
+        "2:imex_carriage_margin": Location(page: "Multimaterial", group: "IDEX/IQEX Configuration", order: 595),
+        "2:imex_viz_theme": Location(page: "Multimaterial", group: "IDEX/IQEX Configuration", order: 596),
+        "2:nozzle_diameter": Location(page: "Extruder", group: "Basic information", order: 597),
+        "2:nozzle_type": Location(page: "Extruder", group: "Basic information", order: 598),
+        "2:nozzle_volume": Location(page: "Extruder", group: "Basic information", order: 599),
+        "2:extruder_printable_height": Location(page: "Extruder", group: "Basic information", order: 600),
+        "2:extruder_printable_area": Location(page: "Extruder", group: "Basic information", order: 601),
+        "2:extruder_bed_exclude_volumes": Location(page: "Extruder", group: "Basic information", order: 602),
+        "2:min_layer_height": Location(page: "Extruder", group: "Layer height limits", order: 603),
+        "2:max_layer_height": Location(page: "Extruder", group: "Layer height limits", order: 604),
+        "2:extruder_offset": Location(page: "Extruder", group: "Position", order: 605),
+        "2:retract_length_toolchange": Location(page: "Extruder", group: "Retraction when switching material", order: 606),
+        "2:retract_restart_extra_toolchange": Location(page: "Extruder", group: "Retraction when switching material", order: 607),
+        "2:long_retractions_when_cut": Location(page: "Extruder", group: "Retraction when switching material", order: 608),
+        "2:retraction_distances_when_cut": Location(page: "Extruder", group: "Retraction when switching material", order: 609),
     ]
 }
 

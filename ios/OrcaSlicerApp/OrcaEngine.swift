@@ -72,6 +72,7 @@ final class OrcaEngine: ObservableObject {
     @Published var previewColorMode: GCodePathGeometry.ColorMode = .feature
     @Published var previewThroughMove = Int.max
     @Published private(set) var previewBuilding = false
+    @Published private(set) var previewLightweight = false
 
     // MARK: System presets (all vendors / printers / process / filament)
     @Published private(set) var startupFinished = false
@@ -234,22 +235,17 @@ final class OrcaEngine: ObservableObject {
         filamentByRole = []
     }
 
-    /// Drop G-code preview + settings-browser caches. Model mesh kept for prepare.
+    /// A memory warning must not turn a successful slice into an unsliced plate.
+    /// Retain paths/file/statistics; rebuild compact lines with every move intact.
     func handleMemoryWarning() {
-        previewRefreshTask?.cancel()
-        previewBuildTask?.cancel()
-        previewGeneration = UUID()
-        previewBuilding = false
         #if ORCA_LINKED
-        gcodePathNode = nil
-        gcodeGeometry = nil
-        previewLayerHeights = []
-        gcodeURL = nil
         if let s = session, !presetsLoading, !sliceRunning, !sessionBusy {
             orca_session_purge_option_caches(s)
         }
-        lastMessage = "Freed preview/settings caches (memory pressure)"
         #endif
+        previewLightweight = true
+        if gcodeGeometry != nil { applyPreviewLayer() }
+        lastMessage = "Memory-saving preview: all toolpaths retained"
     }
 
     /// Approximate app footprint (MB) for status after profile load.
@@ -1103,11 +1099,12 @@ final class OrcaEngine: ObservableObject {
         let tools = previewHiddenTools, filaments = previewHiddenFilaments
         let through = previewThroughMove, mode = previewColorMode
         let toolMarker = previewShowToolMarker, cog = previewShowCenterOfGravity
+        let lightweight = previewLightweight || geo.moveCount > 250_000
         previewBuilding = true
         let work = Task.detached(priority: .userInitiated) {
             let filtered = geo.filtered(minZ: lo, maxZ: hi, hiddenFeatures: hidden,
                 enabledMoves: moves, hiddenTools: tools, hiddenFilaments: filaments, throughMove: through, cancelled: { Task.isCancelled })
-            return filtered.makeNode(color: .white, colorMode: mode, showToolMarker: toolMarker, showCenterOfGravity: cog, cancelled: { Task.isCancelled })
+            return filtered.makeNode(color: .white, colorMode: mode, showToolMarker: toolMarker, showCenterOfGravity: cog, lightweight: lightweight, cancelled: { Task.isCancelled })
         }
         previewBuildTask = work
         Task { @MainActor [weak self] in
@@ -2100,6 +2097,11 @@ final class OrcaEngine: ObservableObject {
         roles.sort { $0.grams > $1.grams }
         self.filamentByRole = roles
         if let preview {
+            // Filters belong to this job, not a previously opened project.
+            self.previewHiddenFeatures = []
+            self.previewHiddenTools = []
+            self.previewHiddenFilaments = []
+            self.previewEnabledMoves = [.extrude]
             self.previewThroughMove = .max
             self.previewIsReduced = preview.reduced
             self.previewLayerHeights = preview.layers
@@ -2109,6 +2111,9 @@ final class OrcaEngine: ObservableObject {
             self.previewMinZ = self.gcodeZMin
             self.previewMaxZ = self.gcodeZMax
             self.applyPreviewLayer()
+            if ProcessInfo.processInfo.arguments.contains("--test-preview-memory-warning") {
+                handleMemoryWarning()
+            }
         } else {
             self.slicePhase = "G-code exported; preview unavailable"
         }

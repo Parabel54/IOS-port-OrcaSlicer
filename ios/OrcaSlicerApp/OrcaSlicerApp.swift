@@ -413,15 +413,16 @@ struct OrcaRootView: View {
             }
         }
         .sheet(item: $documentPicker) { request in
-            NativeDocumentPicker(settingsOnly: request.isSettings) { url in
-                if let url { documents.receive(url, kind: request.kind) }
-                else if ProcessInfo.processInfo.arguments.contains("--test-native-picker") {
+            NativeDocumentPicker(settingsOnly: request.isSettings, onPick: { url in
+                documents.receive(url, kind: request.kind)
+            }, onDismiss: {
+                if ProcessInfo.processInfo.arguments.contains("--test-native-picker"), documents.receiving == 0, documents.pending.isEmpty {
                     // UI automation cancels through the system button, then
                     // exercises the document inbox with its local fixture.
                     documents.receive(testDocumentFixture, kind: request.kind)
                 }
                 documentPicker = nil
-            }
+            })
         }
         .onAppear {
             importPendingDocuments()
@@ -1011,7 +1012,7 @@ struct OrcaRootView: View {
             let key = try connections.apiKey(for: printer)
             resetPrinterConnection()
             hostType = type
-            printerHost = printer.address
+            printerHost = printer.connectionAddress
             octoApiKey = key
             flashforgeSerial = printer.serialNumber ?? ""
             printerStatus = "Selected \(printer.name)"
@@ -2348,7 +2349,7 @@ struct OrcaRootView: View {
         AnyView(ZStack {
             PlateSceneView(
                 mesh: engine.mesh,
-                framingBounds: mainTab == .preview && engine.previewFromFile ? engine.previewBounds : nil,
+                framingBounds: mainTab == .preview ? engine.previewBounds : nil,
                 meshRevision: engine.meshRevision,
                 objectMeshes: engine.objectMeshes,
                 selectedObjectIndex: engine.selectedObjectIndex,
@@ -2414,7 +2415,7 @@ struct OrcaRootView: View {
                                 toolChip("Add", "plus") { showModelLibrary = true }.accessibilityIdentifier("model-library-shortcut")
                                 toolChip("Transform", "slider.horizontal.3") { showPlateInspector = true }
                             }
-                            toolChip("Fit", "arrow.up.left.and.arrow.down.right") { fitCameraRequest = UUID() }
+                            toolChip("Home", "house") { fitCameraRequest = UUID() }.accessibilityIdentifier("camera-home")
                         }.padding(8)
                     }
                     if activePlateTouchMode == .rotate {
@@ -2992,6 +2993,9 @@ struct OrcaRootView: View {
                     engine.previewThroughMove = .max
                     engine.requestPreviewLayer()
                 }
+            }
+            if engine.previewLightweight || (engine.gcodeGeometry?.moveCount ?? 0) > 250_000 {
+                Text("Memory-saving preview · all toolpaths retained").font(.caption).foregroundStyle(.secondary)
             }
             if engine.previewBuilding {
                 ProgressView("Updating toolpaths…").accessibilityIdentifier("preview-building")

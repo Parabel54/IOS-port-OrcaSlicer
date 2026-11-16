@@ -54,6 +54,21 @@ enum PlateTouchMode: String, CaseIterable, Identifiable {
     }
 }
 
+enum CameraPreset: String, CaseIterable {
+    case front = "Front", right = "Right", back = "Back", left = "Left", top = "Top", bottom = "Bottom", home = "Home"
+    var direction: SIMD3<Float> {
+        switch self {
+        case .front: return SIMD3(0, 0, 1)
+        case .back: return SIMD3(0, 0, -1)
+        case .right: return SIMD3(1, 0, 0)
+        case .left: return SIMD3(-1, 0, 0)
+        case .top: return SIMD3(0, 1, 0)
+        case .bottom: return SIMD3(0, -1, 0)
+        case .home: return simd_normalize(SIMD3(0.55, 0.65, 0.8))
+        }
+    }
+}
+
 /// Interactive build plate with official-engine mesh geometry + optional G-code paths.
 struct PlateSceneView: UIViewRepresentable {
     var mesh: MeshGeometry?
@@ -168,6 +183,13 @@ struct PlateSceneView: UIViewRepresentable {
         coordinator.frameCamera(view: view, minimum: SIMD3(0, 0, 990), maximum: SIMD3(10, 10, 1010))
         let raisedTarget = view.defaultCameraController.target
         guard abs(raisedTarget.y - 1000) < 0.001, camera.position.y > raisedTarget.y else { return false }
+        for preset in CameraPreset.allCases {
+            coordinator.frameCamera(view: view, minimum: SIMD3(0, 0, 990), maximum: SIMD3(10, 10, 1010), preset: preset)
+            let center = SIMD3<Float>(5, 1000, -5)
+            let direction = simd_normalize(camera.simdPosition - center)
+            guard simd_dot(direction, preset.direction) > 0.999,
+                  camera.simdOrientation.vector.x.isFinite else { return false }
+        }
         return GCodePathGeometry.previewSmokeTest()
 
     }
@@ -191,6 +213,7 @@ struct PlateSceneView: UIViewRepresentable {
         context.coordinator.lastBed = bedSize
         context.coordinator.lastTexture = bedTexturePath ?? ""
         context.coordinator.installGestures(on: view)
+        context.coordinator.installNavigationCube(on: view)
         return view
     }
 
@@ -541,6 +564,7 @@ struct PlateSceneView: UIViewRepresentable {
 
     final class Coordinator: NSObject, UIGestureRecognizerDelegate {
         weak var view: SCNView?
+        weak var navigationCube: SCNView?
         var parent: PlateSceneView?
         var lastMeshKey: String = ""
         var lastPreviewID: ObjectIdentifier?
@@ -619,6 +643,80 @@ struct PlateSceneView: UIViewRepresentable {
             controller.target = SCNVector3(nextTarget.x, nextTarget.y, nextTarget.z)
         }
 
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            guard let cube = navigationCube, let touched = touch.view else { return true }
+            return !touched.isDescendant(of: cube)
+        }
+
+        func installNavigationCube(on view: SCNView) {
+            let cube = PlateSCNView(frame: .zero)
+            cube.scene = SCNScene()
+            cube.backgroundColor = .clear
+            cube.isPlaying = false
+            cube.translatesAutoresizingMaskIntoConstraints = false
+            cube.accessibilityLabel = "Navigation cube"
+            cube.isAccessibilityElement = true
+            let box = SCNBox(width: 1, height: 1, length: 1, chamferRadius: 0.025)
+            let faces: [CameraPreset] = [.front, .right, .back, .left, .top, .bottom]
+            box.materials = faces.map { face in
+                let material = SCNMaterial()
+                material.lightingModel = .constant
+                material.diffuse.contents = UIGraphicsImageRenderer(size: CGSize(width: 128, height: 128)).image { context in
+                    UIColor(white: 0.24, alpha: 1).setFill()
+                    context.fill(CGRect(x: 0, y: 0, width: 128, height: 128))
+                    let attributes: [NSAttributedString.Key: Any] = [.font: UIFont.boldSystemFont(ofSize: 24), .foregroundColor: UIColor.white]
+                    let text = face.rawValue as NSString
+                    let size = text.size(withAttributes: attributes)
+                    text.draw(at: CGPoint(x: (128-size.width)/2, y: (128-size.height)/2), withAttributes: attributes)
+                }
+                return material
+            }
+            cube.scene?.rootNode.addChildNode(SCNNode(geometry: box))
+            let camera = SCNNode()
+            camera.camera = SCNCamera()
+            camera.camera?.usesOrthographicProjection = true
+            camera.camera?.orthographicScale = 1.8
+            cube.scene?.rootNode.addChildNode(camera)
+            cube.pointOfView = camera
+            cube.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(cubeTapped(_:))))
+            cube.accessibilityCustomActions = CameraPreset.allCases.map { preset in
+                UIAccessibilityCustomAction(name: preset.rawValue) { [weak self] _ in
+                    self?.selectCamera(preset)
+                    return true
+                }
+            }
+            view.addSubview(cube)
+            NSLayoutConstraint.activate([
+                cube.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -8),
+                cube.topAnchor.constraint(equalTo: view.topAnchor, constant: 8),
+                cube.widthAnchor.constraint(equalToConstant: 84), cube.heightAnchor.constraint(equalToConstant: 84)
+            ])
+            navigationCube = cube
+            updateNavigationCube()
+        }
+
+        @objc private func cubeTapped(_ gesture: UITapGestureRecognizer) {
+            guard let cube = navigationCube,
+                  let hit = cube.hitTest(gesture.location(in: cube), options: nil).first else { return }
+            let faces: [CameraPreset] = [.front, .right, .back, .left, .top, .bottom]
+            guard faces.indices.contains(hit.geometryIndex) else { return }
+            selectCamera(faces[hit.geometryIndex])
+        }
+
+        func selectCamera(_ preset: CameraPreset) {
+            guard let view, let parent else { return }
+            let low = parent.framingBounds?.min ?? parent.mesh?.min ?? SIMD3<Float>(0, 0, 0)
+            let high = parent.framingBounds?.max ?? parent.mesh?.max ?? SIMD3<Float>(parent.bedSize.x, parent.bedSize.y, 0)
+            frameCamera(view: view, minimum: low, maximum: high, preset: preset)
+        }
+
+        private func updateNavigationCube() {
+            guard let source = view?.pointOfView, let camera = navigationCube?.pointOfView else { return }
+            camera.simdOrientation = source.simdOrientation
+            camera.simdPosition = source.simdOrientation.act(SIMD3<Float>(0, 0, 3))
+            navigationCube?.setNeedsDisplay()
+        }
+
         private func cameraPan(_ gesture: UIPanGestureRecognizer, view: SCNView, mode: PlateTouchMode) {
             // Consume the recognizer's initial movement too; subsequent changes
             // are incremental so crossing its recognition threshold cannot jump.
@@ -626,6 +724,7 @@ struct PlateSceneView: UIViewRepresentable {
             let delta = gesture.translation(in: view)
             gesture.setTranslation(.zero, in: view)
             cameraDrag(delta: delta, view: view, mode: mode)
+            updateNavigationCube()
         }
 
         func cameraDrag(delta: CGPoint, view: SCNView, mode: PlateTouchMode) {
@@ -954,7 +1053,7 @@ struct PlateSceneView: UIViewRepresentable {
             view.defaultCameraController.target = target
         }
 
-        func frameCamera(view: SCNView, minimum: SIMD3<Float>, maximum: SIMD3<Float>) {
+        func frameCamera(view: SCNView, minimum: SIMD3<Float>, maximum: SIMD3<Float>, preset: CameraPreset = .home) {
             guard let cam = view.scene?.rootNode.childNode(withName: "camera", recursively: false) else { return }
 
             // Mesh in slic3r Z-up under content; world after R_x(-90): (x, z, -y)
@@ -974,12 +1073,11 @@ struct PlateSceneView: UIViewRepresentable {
             let dist = max(radius / sinf(limitingAngle) * 1.15, 3)
             cam.camera?.zNear = max(Double(dist) / 1000, 0.01)
 
-            cam.position = SCNVector3(
-                target.x + dist * 0.55,
-                target.y + dist * 0.65,
-                target.z + dist * 0.8
-            )
-            cam.look(at: target)
+            let direction = preset.direction
+            cam.simdPosition = SIMD3(target.x, target.y, target.z) + direction * dist
+            let up = preset == .top ? SCNVector3(0, 0, -1) : preset == .bottom ? SCNVector3(0, 0, 1) : SCNVector3(0, 1, 0)
+            cam.look(at: target, up: up, localFront: SCNVector3(0, 0, -1))
+            updateNavigationCube()
             view.pointOfView = cam
             view.defaultCameraController.pointOfView = cam
             view.defaultCameraController.automaticTarget = false
@@ -1300,6 +1398,11 @@ struct GCodePathGeometry {
               clipped.segments.allSatisfy({ $0.points.allSatisfy({ $0.z >= 1 && $0.z <= 1.5 }) }) else { return false }
         let bead = Segment(points: [SCNVector3(0, 0, 1), SCNVector3(10, 0, 1)],
                            feature: "Outer wall", width: 0.45, feedrate: 1200, height: 0.3)
+        let support = Segment(points: [SCNVector3(0, 0, 0.2), SCNVector3(10, 0, 0.2)], feature: "Support", width: 0.4, feedrate: 1200, height: 0.2)
+        let supportPaths = GCodePathGeometry(segments: [support]).filtered(maxZ: 0.2, enabledMoves: [.extrude])
+        guard supportPaths.segments.count == 1,
+              !supportPaths.makeNode(color: .white).childNodes.isEmpty,
+              !supportPaths.makeNode(color: .white, lightweight: true).childNodes.isEmpty else { return false }
         let node = GCodePathGeometry(segments: [bead]).makeNode(color: .white)
         guard let geometry = node.childNodes.first else { return false }
         let bounds = geometry.boundingBox
@@ -1498,7 +1601,7 @@ struct GCodePathGeometry {
     /// A bounded number of geometry buffers share TWO materials for the entire job.
     /// Per-path materials caused quadratic SceneKit resource-manager cleanup on
     /// device (exit watchdog in SCNMTLResourceManager::_materialWillDie).
-    func makeNode(color: UIColor, colorMode: ColorMode = .feature, showToolMarker: Bool = false, showCenterOfGravity: Bool = false, cancelled: () -> Bool = { false }) -> SCNNode {
+    func makeNode(color: UIColor, colorMode: ColorMode = .feature, showToolMarker: Bool = false, showCenterOfGravity: Bool = false, lightweight: Bool = false, cancelled: () -> Bool = { false }) -> SCNNode {
         let root = SCNNode()
         root.name = "gcode"
         let solid = SCNMaterial()
@@ -1514,7 +1617,7 @@ struct GCodePathGeometry {
             if cancelled() { return SCNNode() }
             guard seg.points.count > 1 else { continue }
             let rgba = self.color(for: seg, mode: colorMode)
-            if seg.kind != .extrude || seg.width <= 0.01 {
+            if lightweight || seg.kind != .extrude || seg.width <= 0.01 {
                 if seg.kind.isMarker, let p = seg.points.last {
                     // Batched cross markers, never one sphere/material per event.
                     let r: Float = seg.kind == .seam ? 0.35 : 0.65
@@ -1524,7 +1627,7 @@ struct GCodePathGeometry {
                     travels.appendLines(ends, color: rgba)
                 } else {
                     for (a, b) in zip(seg.points, seg.points.dropFirst()) {
-                        travels.appendLines([a, b], color: rgba.withAlphaComponent(0.65))
+                        travels.appendLines([a, b], color: rgba.withAlphaComponent(seg.kind == .extrude ? 1 : 0.65))
                         if travels.vertexCount >= 32768 { travels.flush(into: root) }
                     }
                 }

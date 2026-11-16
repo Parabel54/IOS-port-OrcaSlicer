@@ -9,6 +9,9 @@ struct PrinterConnection: Codable, Identifiable, Equatable {
     let kind: String
     var cloudPrinterID: String? = nil
     var serialNumber: String? = nil
+    var remoteAddress: String? = nil
+    var useRemote: Bool? = nil
+    var connectionAddress: String { useRemote == true ? (remoteAddress ?? address) : address }
 
     static func validatedURL(_ address: String) -> URL? {
         guard let parts = URLComponents(string: address.trimmingCharacters(in: .whitespacesAndNewlines)),
@@ -123,7 +126,9 @@ final class PrinterConnections: ObservableObject {
             let printer = PrinterConnection(id: existing.map { printers[$0].id } ?? UUID(),
                                             name: name, address: address, kind: kind,
                                             cloudPrinterID: existing.flatMap { printers[$0].cloudPrinterID },
-                                            serialNumber: serialNumber?.trimmingCharacters(in: .whitespacesAndNewlines))
+                                            serialNumber: serialNumber?.trimmingCharacters(in: .whitespacesAndNewlines),
+                                            remoteAddress: existing.flatMap { printers[$0].remoteAddress },
+                                            useRemote: existing.flatMap { printers[$0].useRemote })
             var updated = printers
             if let existing { updated[existing] = printer } else { updated.append(printer) }
             let data = try JSONEncoder().encode(updated)
@@ -131,6 +136,21 @@ final class PrinterConnections: ObservableObject {
             defaults.set(data, forKey: storageKey)
             printers = updated
             message = String(localized: "Printer connection saved.")
+        } catch { message = error.localizedDescription }
+    }
+
+    func setRemoteRoute(for printer: PrinterConnection, address: String, enabled: Bool) {
+        guard canSave, let index = printers.firstIndex(where: { $0.id == printer.id }) else { return }
+        do {
+            let trimmed = address.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !enabled || !trimmed.isEmpty else { throw ConnectionError.invalidAddress }
+            guard trimmed.isEmpty || PrinterConnection.validatedURL(trimmed) != nil else { throw ConnectionError.invalidAddress }
+            var updated = printers
+            updated[index].remoteAddress = trimmed.isEmpty ? nil : trimmed
+            updated[index].useRemote = enabled
+            defaults.set(try JSONEncoder().encode(updated), forKey: storageKey)
+            printers = updated
+            message = "Printer route saved. Select the printer to use this route."
         } catch { message = error.localizedDescription }
     }
 

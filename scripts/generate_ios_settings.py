@@ -7,6 +7,35 @@ import re
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def function_body(source, name):
+    start = re.search(r'(?:void|PageShp) ' + re.escape(name) + r'\(', source).end()
+    start = source.index('{', start)
+    depth = 0
+    # Ignore braces in translated labels, character literals and lambdas' strings.
+    for match in re.finditer(r"\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[{}]", source[start:]):
+        token = match[0]
+        if token == '{':
+            depth += 1
+        elif token == '}':
+            depth -= 1
+            if depth == 0:
+                return source[start:start + match.end()]
+    raise ValueError(f'Unclosed desktop settings function: {name}')
+
+
+def expand_option_loops(body):
+    vectors = {m[1]: re.findall(r'"([^"\n]+)"', m[2]) for m in
+               re.finditer(r'std::vector<std::string>\s+(\w+)\s*\{([^}]+)\}', body)}
+    pattern = r'for\s*\(const std::string\s*&\s*(\w+)\s*:\s*(\w+)\)\s*\{([^{}]+)\}'
+    def expand(match):
+        variable, vector, statements = match.groups()
+        if vector not in vectors or 'append_option_line' not in statements:
+            return match[0]
+        result = ''.join(re.sub(r'\b' + variable + r'\b', json.dumps(value), statements) for value in vectors[vector])
+        return re.sub(r'"([^"\n]*)"\s*\+\s*"([^"\n]*)"', lambda m: json.dumps(m[1] + m[2]), result)
+    return re.sub(pattern, expand, body)
+
+
 def catalog():
     source = (ROOT / 'src/slic3r/GUI/Tab.cpp').read_text()
     source = re.sub(r'/\*.*?\*/|//[^\n]*', '', source, flags=re.S)
@@ -15,8 +44,7 @@ def catalog():
                  (2, 'TabPrinter::build_fff'), (2, 'TabPrinter::build_kinematics_page'),
                  (2, 'TabPrinter::build_unregular_pages')]
     for scope, function in functions:
-        body = re.split(r'(?:void|PageShp) ' + re.escape(function) + r'\(', source, maxsplit=1)[1]
-        body = re.split(r'\n(?:void|PageShp) \w+::', body, maxsplit=1)[0]
+        body = expand_option_loops(function_body(source, function))
         page, group = 'Other', 'General'
         pages.setdefault(scope, [])
         pattern = (r'add_options_page\(L\("([^"]+)"\)|new_optgroup\(L\("([^"]+)"\)|'
@@ -32,6 +60,9 @@ def catalog():
             else:
                 key = match[3] or match[4]
                 locations.setdefault(f'{scope}:{key}', (page, group, len(locations)))
+    # Desktop inserts dynamic printer pages into m_pages, rather than appending
+    # them in function-definition order (build_unregular_pages).
+    pages[2] = ['Basic information', 'Machine G-code', 'Multimaterial', 'Extruder', 'Motion ability', 'Notes']
     return locations, pages
 
 

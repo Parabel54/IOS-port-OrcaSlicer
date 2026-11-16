@@ -21,6 +21,7 @@ struct PrinterConnectionsPanel: View {
     let serialNumber: String?
     let onSelect: (PrinterConnection) -> Void
     @State private var name = ""
+    @State private var remotePrinter: PrinterConnection?
     @State private var browser: BrowserDestination?
 
     private struct BrowserDestination: Identifiable {
@@ -41,10 +42,12 @@ struct PrinterConnectionsPanel: View {
                     Button { onSelect(printer) } label: {
                         VStack(alignment: .leading) {
                             Text(printer.name)
-                            Text("\(printer.kind) · \(printer.address)").font(.caption)
+                            Text("\(printer.kind) · \(printer.connectionAddress)").font(.caption)
                         }
                     }
                     Spacer()
+                    Button { remotePrinter = printer } label: { Image(systemName: "network") }
+                        .accessibilityLabel(Text("Remote access for \(printer.name)"))
                     Button(role: .destructive) { connections.remove(printer) } label: {
                         Image(systemName: "trash")
                     }
@@ -72,5 +75,42 @@ struct PrinterConnectionsPanel: View {
         .padding(12)
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
         .sheet(item: $browser) { ConnectionBrowser(url: $0.url) }
+        .sheet(item: $remotePrinter) { printer in
+            RemotePrinterRoutePanel(printer: printer, connections: connections)
+        }
+    }
+}
+
+struct RemotePrinterRoutePanel: View {
+    let printer: PrinterConnection
+    @ObservedObject var connections: PrinterConnections
+    @Environment(\.dismiss) private var dismiss
+    @State private var address = ""
+    @State private var enabled = false
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Connection route") {
+                    Text(printer.name)
+                    Text("Local: \(printer.address)").font(.caption)
+                    TextField("Remote or VPN printer URL", text: $address)
+                        .keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
+                    Toggle("Use remote route", isOn: $enabled)
+                }
+                Section("Access from other networks") {
+                    Text("Use a VPN such as Tailscale or WireGuard on this device and your home network, or enter a reachable HTTPS relay URL. The printer must be reachable through that route.")
+                    Text("Orca Cloud preset sync does not provide a tunnel to LAN printers. Your saved printer credentials are also used for the remote route.")
+                }
+                if !connections.message.isEmpty { Text(connections.message) }
+                Button("Save route") {
+                    connections.setRemoteRoute(for: printer, address: address, enabled: enabled)
+                    if connections.printers.first(where: { $0.id == printer.id })?.useRemote == enabled,
+                       connections.printers.first(where: { $0.id == printer.id })?.remoteAddress == (address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : address.trimmingCharacters(in: .whitespacesAndNewlines)) { dismiss() }
+                }
+            }.navigationTitle("Remote access")
+                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
+                .onAppear { address = printer.remoteAddress ?? ""; enabled = printer.useRemote == true; connections.message = "" }
+        }
     }
 }
