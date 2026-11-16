@@ -247,6 +247,14 @@ ORCA_API int orca_session_arrange(orca_session_t *s);
  * FFF extruder / multi-filament slots from selected printer.
  * @return nozzle count (max(1, nozzle_diameter.size()))
  */
+/** Add one project filament using desktop PresetBundle sizing and flush data.
+ * Preserves existing material/process edits; respects the desktop paint limit. */
+ORCA_API int orca_session_add_project_filament(orca_session_t *s);
+/** Desktop virtual mixed filament: 2-3 distinct physical, 1-based slots,
+ * positive integer percentages totaling 100. Linear gradients require 2 slots. */
+ORCA_API int orca_session_add_mixed_filament(orca_session_t *s, const int *components, const int *ratios,
+                                           size_t count, int gradient, int reverse, int per_part);
+
 ORCA_API int orca_session_extruder_count(orca_session_t *s);
 
 /**

@@ -69,7 +69,7 @@ final class OrcaEngine: ObservableObject {
     @Published var previewHiddenFilaments: Set<Int> = []
     @Published var previewHiddenFeatures: Set<String> = []
     @Published var previewEnabledMoves: Set<GCodePathGeometry.MoveKind> = [.extrude]
-    @Published var previewColorMode: GCodePathGeometry.ColorMode = .feature
+    @Published var previewColorMode: GCodePathGeometry.ColorMode = .filament
     @Published var previewThroughMove = Int.max
     @Published private(set) var previewBuilding = false
     @Published private(set) var previewLightweight = false
@@ -323,6 +323,8 @@ final class OrcaEngine: ObservableObject {
         }
         // Restore last selection if still present; else prefer known printers
         let savedPrinter = UserDefaults.standard.string(forKey: prefsPrinterKey) ?? ""
+        let savedProcess = UserDefaults.standard.string(forKey: prefsProcessKey)
+        let savedFilament = UserDefaults.standard.string(forKey: prefsFilamentKey)
         var picked = false
         if !savedPrinter.isEmpty, printerNames.contains(savedPrinter) {
             picked = selectPrinter(savedPrinter)
@@ -342,12 +344,12 @@ final class OrcaEngine: ObservableObject {
             _ = selectPrinter(first)
         }
         // Restore process/filament if still in (filtered) lists
-        if let sp = UserDefaults.standard.string(forKey: prefsProcessKey),
-           !sp.isEmpty, processNames.contains(sp) {
+        if let sp = savedProcess,
+           !sp.isEmpty, processNames.contains(sp) || userProcessNames.contains(sp) {
             _ = selectProcess(sp)
         }
-        if let sf = UserDefaults.standard.string(forKey: prefsFilamentKey),
-           !sf.isEmpty, filamentNames.contains(sf) {
+        if let sf = savedFilament,
+           !sf.isEmpty, filamentNames.contains(sf) || userFilamentNames.contains(sf) {
             _ = selectFilament(sf)
         }
         let mem = reportMemoryMB()
@@ -438,6 +440,7 @@ final class OrcaEngine: ObservableObject {
         }
         presetOrigins = origins
         compatibleOnly = orca_session_get_compatible_only(s) != 0
+        refreshObjectFilamentColors()
     }
 
     private func refreshCoverAndBedTexture() {
@@ -567,8 +570,7 @@ final class OrcaEngine: ObservableObject {
             return false
         }
         refreshPresetLists()
-        selectedProcess = trimmed
-        activeProcessProfile = trimmed
+        activeProcessProfile = selectedProcess
         persistSelection()
         lastMessage = "Saved user process “\(trimmed)”"
         return true
@@ -593,7 +595,6 @@ final class OrcaEngine: ObservableObject {
             return false
         }
         refreshPresetLists()
-        selectedFilament = trimmed
         persistSelection()
         lastMessage = "Saved user filament “\(trimmed)”"
         return true
@@ -1070,6 +1071,16 @@ final class OrcaEngine: ObservableObject {
     }
     #endif
 
+    @Published var previewToolheadPosition: SCNVector3?
+    @Published var smoothToolheadMovement = true
+
+    func scrubToolhead(to value: Double) {
+        guard let geometry = gcodeGeometry else { return }
+        previewThroughMove = Int(value)
+        previewShowToolMarker = true
+        previewToolheadPosition = geometry.position(atMove: value)
+    }
+
     private var previewRefreshTask: Task<Void, Never>?
 
     func requestPreviewLayer() {
@@ -1182,6 +1193,7 @@ final class OrcaEngine: ObservableObject {
             per.append(MeshGeometry(positions: pos, indices: ind, min: omin, max: omax))
         }
         objectMeshes = per
+        refreshObjectFilamentColors()
         #endif
     }
 
@@ -1493,6 +1505,65 @@ final class OrcaEngine: ObservableObject {
     static var appRegion: String {
         get { UserDefaults.standard.string(forKey: prefsRegionKey) ?? "International" }
         set { UserDefaults.standard.set(newValue, forKey: prefsRegionKey) }
+    }
+
+    var projectFilamentColors: [String] {
+        let colors = (getOption("filament_colour") ?? "#009688").split(separator: ";").map(String.init)
+        return colors.isEmpty ? ["#009688"] : colors
+    }
+
+    @discardableResult
+    func setProjectFilamentColor(_ index: Int, hex: String) -> Bool {
+        var colors = projectFilamentColors
+        guard colors.indices.contains(index) else { return false }
+        colors[index] = hex
+        let ok = applyConfigOption(key: "filament_colour", value: colors.joined(separator: ";"))
+        if ok { refreshObjectFilamentColors(); invalidateSlice() }
+        return ok
+    }
+
+    func addProjectFilament() {
+        #if ORCA_LINKED
+        guard let session else { return }
+        let result = orca_session_add_project_filament(session)
+        lastMessage = result == 0 ? "Filament added" :
+            (orca_session_last_error(session).map { String(cString: $0) } ?? "Cannot add filament")
+        if result == 0 { refreshObjectFilamentColors(); invalidateSlice() }
+        #endif
+    }
+
+    @Published private(set) var objectFilamentColors: [UIColor] = []
+
+    private func refreshObjectFilamentColors() {
+        let colors = projectFilamentColors
+        objectFilamentColors = objectNames.indices.map { index in
+            let slot = max(0, (Int(getObjectOption(index: index, key: "extruder") ?? "1") ?? 1) - 1)
+            return FilamentColor.uiColor(colors[min(slot, colors.count - 1)])
+        }
+    }
+
+    var physicalFilamentIndices: [Int] {
+        let flags = (getOption("filament_is_mixed") ?? "").split(separator: ",").map(String.init)
+        return projectFilamentColors.indices.filter { $0 >= flags.count || flags[$0] != "1" }
+    }
+
+    func addMixedFilament(components: [Int], ratios: [Int], gradient: Bool, reverse: Bool, perPart: Bool) -> Bool {
+        #if ORCA_LINKED
+        guard let session, components.count == ratios.count else { return false }
+        let ids = components.map { Int32($0 + 1) }, weights = ratios.map(Int32.init)
+        let result = ids.withUnsafeBufferPointer { ids in
+            weights.withUnsafeBufferPointer { weights in
+                orca_session_add_mixed_filament(session, ids.baseAddress, weights.baseAddress, ids.count,
+                    gradient ? 1 : 0, reverse ? 1 : 0, perPart ? 1 : 0)
+            }
+        }
+        lastMessage = result == 0 ? "Mixed filament added" :
+            (orca_session_last_error(session).map { String(cString: $0) } ?? "Cannot add mixed filament")
+        if result == 0 { refreshObjectFilamentColors(); invalidateSlice() }
+        return result == 0
+        #else
+        return false
+        #endif
     }
 
     var extruderCount: Int {
@@ -2515,6 +2586,7 @@ final class OrcaEngine: ObservableObject {
         guard let s = session, index >= 0 else { return }
         pushUndoSnapshot(label: "extruder")
         let rc = orca_session_set_object_extruder(s, Int32(index), Int32(extruder1Based))
+        if rc == 0 { refreshObjectFilamentColors(); invalidateSlice() }
         lastMessage = rc == 0
             ? "Object \(index + 1) → extruder \(extruder1Based)"
             : (orca_session_last_error(s).map { String(cString: $0) } ?? "extruder failed")

@@ -4,6 +4,8 @@
 
 import Foundation
 import SwiftUI
+import UIKit
+
 
 /// One selectable enum option: official serialize key + human label.
 struct ProcessEnumChoice: Identifiable, Hashable {
@@ -237,6 +239,8 @@ struct ProcessSettingsBrowser: View {
     var onChanged: (() -> Void)?
     @AppStorage("orca.settings.scope") private var scope = 0
     @AppStorage("orca.settings.visibility") private var mode = 0
+    @State private var objectScope = false
+    @State private var objectDrafts: [String: String] = [:]
     @State private var saveName = ""
     @State private var savePreset = false
 
@@ -302,6 +306,12 @@ struct ProcessSettingsBrowser: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
+                Picker("Settings target", selection: $objectScope) {
+                    Text("Global").tag(false)
+                    Text("Objects").tag(true)
+                }.pickerStyle(.segmented).padding(8)
+                if objectScope { objectSettings }
+                else {
                 Picker("Settings scope", selection: $scope) {
                     Text("Printer").tag(2)
                     Text("Filament").tag(1)
@@ -345,6 +355,7 @@ struct ProcessSettingsBrowser: View {
                             .background(themePanel)
                     }
                     List {
+                        if scope == 1 { projectFilaments }
                         ForEach(grouped, id: \.0) { cat, rows in
                             Section(cat) {
                                 ForEach(rows) { entry in
@@ -357,6 +368,7 @@ struct ProcessSettingsBrowser: View {
                     }
                     .scrollContentBackground(.hidden)
                 }
+                }
             }
             .background(themeBg)
             .searchable(text: $search, prompt: "Search key, label, value")
@@ -364,9 +376,16 @@ struct ProcessSettingsBrowser: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
+                    if !objectScope && scope != 2 {
+                        Button("Save preset…") {
+                            saveName = scope == 1 ? engine.selectedFilament : engine.selectedProcess
+                            savePreset = true
+                        }
+                    }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
                     Menu {
                         Button("Reload") { reload() }
-                        if scope != 2 { Button("Save preset as…") { savePreset = true } }
                     } label: { Image(systemName: "ellipsis.circle") }
                         .foregroundStyle(themeAccent)
                 }
@@ -382,11 +401,89 @@ struct ProcessSettingsBrowser: View {
                 TextField("Preset name", text: $saveName)
                 Button("Save") {
                     let ok = scope == 1 ? engine.saveUserFilament(name: saveName) : engine.saveUserProcess(name: saveName)
-                    if !ok { applyError = engine.lastMessage }
+                    let message = engine.lastMessage
                     reload()
+                    if !ok { applyError = message }
                 }
                 Button("Cancel", role: .cancel) {}
             }
+        }
+    }
+
+    private func colorValue(_ hex: String) -> Color {
+        Color(uiColor: FilamentColor.uiColor(hex))
+    }
+
+    private func colorHex(_ color: Color) -> String {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        UIColor(color).getRed(&r, green: &g, blue: &b, alpha: &a)
+        return String(format: "#%02X%02X%02X", min(255, max(0, Int((r*255).rounded()))), min(255, max(0, Int((g*255).rounded()))), min(255, max(0, Int((b*255).rounded()))))
+    }
+
+    private var projectFilaments: some View {
+        Section("Project filaments") {
+            ForEach(Array(engine.projectFilamentColors.enumerated()), id: \.offset) { index, hex in
+                ColorPicker("Filament \(index + 1)", selection: Binding(get: { colorValue(hex) }, set: {
+                    if !engine.setProjectFilamentColor(index, hex: colorHex($0)) { applyError = engine.lastMessage }
+                }), supportsOpacity: false)
+            }
+            Button("Add filament") { engine.addProjectFilament(); applyError = engine.lastMessage }
+                .disabled(engine.projectFilamentColors.count >= 16)
+            NavigationLink("Add mixed filament…") { MixedFilamentEditor(engine: engine) }
+                .disabled(engine.physicalFilamentIndices.count < 2 || engine.projectFilamentColors.count >= 16)
+            Text("Project colors are separate from the number of physical nozzles. Desktop painting supports up to 16 filament slots.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private var objectSettings: some View {
+        List {
+            Section("Objects on this plate") {
+                if engine.objectNames.isEmpty { Text("Add a model to change its settings.") }
+                ForEach(Array(engine.objectNames.enumerated()), id: \.offset) { index, name in
+                    Button {
+                        engine.selectObject(at: index)
+                        objectDrafts = [:]
+                    } label: {
+                        HStack { Text(name); Spacer(); if engine.selectedObjectIndex == index { Image(systemName: "checkmark") } }
+                    }
+                }
+            }
+            if engine.selectedObjectIndex >= 0 {
+                Section("Object overrides") {
+                    objectField("layer_height", label: "Layer height (mm)")
+                    objectField("wall_loops", label: "Wall loops")
+                    objectField("sparse_infill_density", label: "Infill density (%)")
+                    Picker("Filament", selection: Binding(get: {
+                        Int(engine.getObjectOption(index: engine.selectedObjectIndex, key: "extruder") ?? "0") ?? 0
+                    }, set: { engine.setObjectExtruder(index: engine.selectedObjectIndex, extruder1Based: $0) })) {
+                        Text("Use global").tag(0)
+                        ForEach(0..<engine.projectFilamentColors.count, id: \.self) { Text("Filament \($0 + 1)").tag($0 + 1) }
+                    }
+                }
+            }
+        }.scrollContentBackground(.hidden)
+    }
+
+    private func objectField(_ key: String, label: String) -> some View {
+        VStack(alignment: .leading) {
+            Text(label).font(.subheadline)
+            HStack {
+                TextField(label, text: Binding(get: {
+                    objectDrafts[key] ?? engine.getObjectOption(index: engine.selectedObjectIndex, key: key) ?? engine.getOption(key) ?? ""
+                }, set: { objectDrafts[key] = $0 })).keyboardType(.decimalPad)
+                Button("Apply") {
+                    var value = objectDrafts[key] ?? engine.getObjectOption(index: engine.selectedObjectIndex, key: key) ?? engine.getOption(key) ?? ""
+                    if key == "sparse_infill_density" && !value.hasSuffix("%") { value += "%" }
+                    if !engine.setObjectOption(index: engine.selectedObjectIndex, key: key, value: value) {
+                        applyError = engine.lastMessage
+                    }
+                }
+            }
+            Button("Use global value") {
+                engine.eraseObjectOption(index: engine.selectedObjectIndex, key: key)
+                objectDrafts.removeValue(forKey: key)
+            }.font(.caption)
         }
     }
 
@@ -442,6 +539,15 @@ struct ProcessSettingsBrowser: View {
                     .lineLimit(1)
             }
 
+            if entry.key == "default_filament_colour" {
+                ColorPicker("Default color", selection: Binding(get: {
+                    colorValue(draftValues[entry.key] ?? entry.value)
+                }, set: { color in
+                    let hex = colorHex(color)
+                    apply(entry.key, value: hex)
+                    _ = engine.setProjectFilamentColor(0, hex: hex)
+                }), supportsOpacity: false)
+            } else {
             switch entry.type {
             case .bool where entry.value.contains(",") || entry.value.contains(";") || entry.value == "nil":
                 // Vector and nullable values must not be collapsed by a single
@@ -491,6 +597,7 @@ struct ProcessSettingsBrowser: View {
             default:
                 scalarEditor(entry)
             }
+            }
         }
         .padding(.vertical, 4)
         .listRowBackground(themePanel)
@@ -523,6 +630,11 @@ struct ProcessSettingsBrowser: View {
         let ok = engine.applyConfigOption(key: key, value: value)
         if ok {
             applyError = nil
+            if scope == 0 && engine.userProcessNames.contains(engine.selectedProcess) {
+                if !engine.saveUserProcess(name: engine.selectedProcess) { applyError = engine.lastMessage }
+            } else if scope == 1 && engine.userFilamentNames.contains(engine.selectedFilament) {
+                if !engine.saveUserFilament(name: engine.selectedFilament) { applyError = engine.lastMessage }
+            }
             draftValues[key] = value
             if let idx = entries.firstIndex(where: { $0.key == key }) {
                 entries[idx].value = value
@@ -543,6 +655,83 @@ struct ProcessSettingsBrowser: View {
         entries = snap
         draftValues = drafts
         isLoading = false
+    }
+}
+
+// Uses the same component/percentage and linear-gradient fields as desktop's
+// MixedFilamentDialog; color blending and sublayer scheduling remain native C++.
+private struct MixedFilamentEditor: View {
+    @ObservedObject var engine: OrcaEngine
+    @Environment(\.dismiss) private var dismiss
+    @State private var count = 2
+    @State private var first = 0
+    @State private var second = 1
+    @State private var third = 2
+    @State private var firstRatio = 50.0
+    @State private var secondRatio = 25.0
+    @State private var gradient = false
+    @State private var reverse = false
+    @State private var perPart = false
+    @State private var error: String?
+
+    var body: some View {
+        Form {
+            Section {
+                Text("Mix two or three filaments using Orca's sublayer color mixing. Components must use the same material type.")
+                Picker("Components", selection: $count) {
+                    Text("Two colors").tag(2)
+                    if engine.physicalFilamentIndices.count >= 3 { Text("Three colors").tag(3) }
+                }
+                component("First filament", selection: $first)
+                component("Second filament", selection: $second)
+                if count == 3 { component("Third filament", selection: $third) }
+            }
+            Section("Mix proportions") {
+                Text("First: \(Int(firstRatio))%")
+                Slider(value: $firstRatio, in: 1...Double(count == 2 ? 99 : 98), step: 1)
+                if count == 3 {
+                    Text("Second: \(Int(secondRatio))%")
+                    Slider(value: $secondRatio, in: 1...max(1, 99-firstRatio), step: 1)
+                    Text("Third: \(100-Int(firstRatio)-Int(secondRatio))%")
+                } else { Text("Second: \(100-Int(firstRatio))%") }
+            }
+            if count == 2 {
+                Section("Gradient") {
+                    Toggle("Blend along height", isOn: $gradient)
+                    if gradient {
+                        Toggle("Reverse direction", isOn: $reverse)
+                        Toggle("Restart for each object", isOn: $perPart)
+                        Text("The linear blend changes from 90/10 to 10/90 along the model height.")
+                            .font(.caption)
+                    }
+                }
+            }
+            if let error { Text(error).foregroundStyle(.red) }
+            Button("Add mixed filament") {
+                let components = count == 2 ? [first, second] : [first, second, third]
+                let ratios = count == 2 ? [Int(firstRatio), 100-Int(firstRatio)] :
+                    [Int(firstRatio), Int(secondRatio), 100-Int(firstRatio)-Int(secondRatio)]
+                if engine.addMixedFilament(components: components, ratios: ratios,
+                    gradient: count == 2 && gradient, reverse: reverse, perPart: perPart) { dismiss() }
+                else { error = engine.lastMessage }
+            }.disabled(engine.projectFilamentColors.count >= 16)
+        }
+        .navigationTitle("Mixed filament")
+        .onAppear {
+            let physical = engine.physicalFilamentIndices
+            first = physical.first ?? 0
+            second = physical.dropFirst().first ?? 1
+            third = physical.dropFirst(2).first ?? 2
+        }
+        .onChange(of: firstRatio) { _ in secondRatio = min(secondRatio, 99-firstRatio) }
+    }
+
+    private func component(_ label: String, selection: Binding<Int>) -> some View {
+        Picker(label, selection: selection) {
+            ForEach(engine.physicalFilamentIndices, id: \.self) { index in
+                Text("Filament \(index + 1)").tag(index)
+            }
+        }
     }
 }
 

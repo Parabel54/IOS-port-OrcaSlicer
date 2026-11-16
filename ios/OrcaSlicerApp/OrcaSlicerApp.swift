@@ -2380,9 +2380,13 @@ struct OrcaRootView: View {
                 framingBounds: mainTab == .preview ? engine.previewBounds : nil,
                 meshRevision: engine.meshRevision,
                 objectMeshes: engine.objectMeshes,
+                objectColors: engine.objectFilamentColors,
                 selectedObjectIndex: engine.selectedObjectIndex,
                 gcodeNode: engine.gcodePathNode,
                 showGCode: mainTab == .preview,
+                toolheadPosition: engine.previewToolheadPosition,
+                showToolhead: engine.previewShowToolMarker,
+                smoothToolhead: engine.smoothToolheadMovement,
                 showShell: engine.previewShowShell,
                 bedSize: mainTab == .preview && engine.previewFromFile ? (engine.previewBedSize ?? engine.bedSize) : engine.bedSize,
                 bedTexturePath: mainTab == .preview && engine.previewFromFile ? nil : engine.bedTexturePath,
@@ -2510,9 +2514,9 @@ struct OrcaRootView: View {
                     paintToolState = 2; status = "Brush: blocker"
                 }
             } else if gizmoMode == .paintMMU {
-                toolChip("Ext \(paintMMUExtruder)", "paintpalette", selected: paintToolState != 0) {
+                toolChip("Filament \(paintMMUExtruder)", "paintpalette", selected: paintToolState != 0) {
                     paintToolState = 1
-                    paintMMUExtruder = paintMMUExtruder >= 4 ? 1 : paintMMUExtruder + 1
+                    paintMMUExtruder = paintMMUExtruder >= engine.projectFilamentColors.count ? 1 : paintMMUExtruder + 1
                     status = "MMU extruder \(paintMMUExtruder)"
                 }
             } else if gizmoMode == .paintFuzzy {
@@ -2998,8 +3002,38 @@ struct OrcaRootView: View {
         }.background(OrcaTheme.panel))
     }
 
+    private var toolpathScrubber: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let geometry = engine.gcodeGeometry {
+                Text("Toolhead position").font(.subheadline.weight(.semibold))
+                Slider(value: Binding(get: { Double(min(engine.previewThroughMove, max(0, geometry.moveCount - 1))) },
+                    set: { engine.scrubToolhead(to: $0) }),
+                    in: 0...Double(max(1, geometry.moveCount - 1)), onEditingChanged: { editing in
+                        if !editing { engine.requestPreviewLayer() }
+                    }).accessibilityLabel("Toolpath move")
+                Toggle("Smooth toolhead movement", isOn: $engine.smoothToolheadMovement)
+                Button("Show complete toolpath") {
+                    engine.previewThroughMove = .max
+                    engine.previewToolheadPosition = nil
+                    engine.requestPreviewLayer()
+                }
+            }
+        }
+    }
+
     private var layerScrubber: some View {
         VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Color by").font(.subheadline.weight(.semibold))
+                Spacer()
+                Picker("Color by", selection: Binding(
+                get: { engine.previewColorMode },
+                set: { engine.previewColorMode = $0; engine.requestPreviewLayer() }
+            )) {
+                ForEach(GCodePathGeometry.ColorMode.allCases) { mode in Text(mode.label).tag(mode) }
+            }.pickerStyle(.menu).labelsHidden()
+            }
+
             if engine.gcodeGeometry == nil { Text("Slice the plate to preview toolpaths.") }
             else {
                 if engine.previewFromFile, let url = engine.gcodeURL { Text(url.lastPathComponent).font(.headline) }
@@ -3007,7 +3041,7 @@ struct OrcaRootView: View {
                 if engine.previewIsReduced {
                     Text("Toolpaths are reduced to fit available memory.").font(.caption).foregroundStyle(.secondary)
                 }
-                previewLayerBar
+                toolpathScrubber
                 Text("Lower layer \(lowerPreviewLayer + 1)").font(.caption)
                 Slider(value: Binding(get: { Double(lowerPreviewLayer) }, set: { value in
                     let i = Int(value.rounded())
@@ -3086,23 +3120,9 @@ struct OrcaRootView: View {
                         }))
                     }
                 }
-                DisclosureGroup("Toolpath sequence") {
-                    Text("Move \(min(engine.previewThroughMove, geometry.moveCount)) / \(geometry.moveCount)")
-                        .font(.caption.monospacedDigit())
-                    Slider(value: Binding(get: { Double(min(engine.previewThroughMove, max(0, geometry.moveCount - 1))) }, set: {
-                        engine.previewThroughMove = Int($0.rounded()); engine.requestPreviewLayer()
-                    }), in: 0...Double(max(1, geometry.moveCount - 1)), step: 1)
-                        .accessibilityLabel("Toolpath move")
-                    Button("Show complete toolpath") { engine.previewThroughMove = .max; engine.requestPreviewLayer() }
-                }
+
             }
 
-            Picker("Color by", selection: Binding(
-                get: { engine.previewColorMode },
-                set: { engine.previewColorMode = $0; engine.requestPreviewLayer() }
-            )) {
-                ForEach(GCodePathGeometry.ColorMode.allCases) { mode in Text(mode.label).tag(mode) }
-            }.pickerStyle(.menu)
             if engine.previewColorMode.isNumeric, let geometry = engine.gcodeGeometry {
                 let range = geometry.colorRange(for: engine.previewColorMode)
                 let unit = engine.previewColorMode.unit

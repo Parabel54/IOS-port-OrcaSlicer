@@ -10,6 +10,16 @@ import SceneKit
 import Metal
 import UIKit
 
+enum FilamentColor {
+    static func uiColor(_ hex: String) -> UIColor {
+        let text = String(hex.trimmingCharacters(in: CharacterSet(charactersIn: "#\" ")).prefix(6))
+        let value = UInt32(text, radix: 16) ?? 0x009688
+        return UIColor(red: CGFloat((value >> 16) & 255)/255, green: CGFloat((value >> 8) & 255)/255,
+                       blue: CGFloat(value & 255)/255, alpha: 1)
+    }
+}
+
+
 /// Pause display work without tearing down GPU resources during background/exit.
 /// The scene is released only when the representable is actually dismantled.
 private final class PlateSCNView: SCNView {
@@ -77,9 +87,13 @@ struct PlateSceneView: UIViewRepresentable {
     var meshRevision: Int = 0
     /// Per-object meshes for tap-to-select (same order as engine.objectNames).
     var objectMeshes: [MeshGeometry] = []
+    var objectColors: [UIColor] = []
     var selectedObjectIndex: Int = -1
     var gcodeNode: SCNNode? = nil
     var showGCode: Bool = false
+    var toolheadPosition: SCNVector3?
+    var showToolhead = false
+    var smoothToolhead = true
     var showShell: Bool = false
     var bedSize: SIMD2<Float> = SIMD2(220, 220)
     /// Optional machine bed texture / cover PNG path (from system profiles)
@@ -286,21 +300,19 @@ struct PlateSceneView: UIViewRepresentable {
                 for (i, om) in objectMeshes.enumerated() {
                     guard om.vertexCount > 0 else { continue }
                     let selected = (i == selectedObjectIndex)
-                    let color = selected
-                        ? UIColor(red: 0.15, green: 0.85, blue: 0.75, alpha: 1)
-                        : accent
+                    let color = objectColors.indices.contains(i) ? objectColors[i] : accent
                     let node = om.makeNode(color: color)
                     node.name = "object_\(i)"
                     if selected {
                         node.geometry?.firstMaterial?.emission.contents = UIColor(
-                            red: 0, green: 0.35, blue: 0.3, alpha: 1
+                            red: 0.10, green: 0.10, blue: 0.10, alpha: 1
                         )
                     }
                     root.addChildNode(node)
                 }
                 content.addChildNode(root)
             } else if let mesh {
-                let node = mesh.makeNode(color: accent)
+                let node = mesh.makeNode(color: objectColors.first ?? accent)
                 node.name = "object_0"
                 root.addChildNode(node)
                 content.addChildNode(root)
@@ -314,11 +326,9 @@ struct PlateSceneView: UIViewRepresentable {
                     guard let name = child.name, name.hasPrefix("object_"),
                           let idx = Int(name.dropFirst("object_".count)) else { continue }
                     let selected = idx == selectedObjectIndex
-                    child.geometry?.firstMaterial?.diffuse.contents = selected
-                        ? UIColor(red: 0.15, green: 0.85, blue: 0.75, alpha: 1)
-                        : accent
+                    child.geometry?.firstMaterial?.diffuse.contents = objectColors.indices.contains(idx) ? objectColors[idx] : accent
                     child.geometry?.firstMaterial?.emission.contents = selected
-                        ? UIColor(red: 0, green: 0.35, blue: 0.3, alpha: 1)
+                        ? UIColor(red: 0.10, green: 0.10, blue: 0.10, alpha: 1)
                         : UIColor.black
                 }
             }
@@ -344,6 +354,29 @@ struct PlateSceneView: UIViewRepresentable {
             }
             context.coordinator.lastPreviewID = previewID
             context.coordinator.lastShowGCode = showGCode
+        }
+        if let preview = content.childNode(withName: "gcode", recursively: false) {
+            var marker = preview.childNode(withName: "scrub-toolhead", recursively: false)
+            if marker == nil, showToolhead, let position = toolheadPosition {
+                let sphere = SCNSphere(radius: 1)
+                sphere.segmentCount = 12
+                let material = SCNMaterial()
+                material.diffuse.contents = UIColor.systemYellow
+                material.lightingModel = .constant
+                sphere.materials = [material]
+                let node = SCNNode(geometry: sphere)
+                node.name = "scrub-toolhead"
+                node.position = position
+                marker = node
+                preview.addChildNode(node)
+            }
+            marker?.isHidden = !showToolhead
+            if let marker, let position = toolheadPosition {
+                SCNTransaction.begin()
+                SCNTransaction.animationDuration = smoothToolhead ? 0.08 : 0
+                marker.position = position
+                SCNTransaction.commit()
+            }
         }
         if let model = content.childNode(withName: "model", recursively: false) {
             model.isHidden = showGCode && !showShell
@@ -1338,6 +1371,22 @@ struct GCodePathGeometry {
         return .other
     }
 
+    func position(atMove value: Double) -> SCNVector3? {
+        guard !segments.isEmpty else { return nil }
+        var low = 0, high = segments.count
+        while low < high {
+            let mid = (low + high) / 2
+            if Double(segments[mid].lastMove) < value { low = mid + 1 } else { high = mid }
+        }
+        let segment = segments[min(low, segments.count - 1)]
+        guard let last = segment.points.last else { return nil }
+        let offset = max(0, min(Double(segment.points.count - 1), value - Double(segment.firstMove) + 1))
+        let index = Int(offset)
+        guard index + 1 < segment.points.count else { return last }
+        let a = segment.points[index], b = segment.points[index + 1], t = Float(offset - Double(index))
+        return SCNVector3(a.x + (b.x-a.x)*t, a.y + (b.y-a.y)*t, a.z + (b.z-a.z)*t)
+    }
+
     func filtered(minZ: Float = -.greatestFiniteMagnitude, maxZ: Float, enabledGroups: Set<FeatureGroup>? = nil, hiddenFeatures: Set<String> = [],
                   enabledMoves: Set<MoveKind>? = nil, hiddenTools: Set<Int> = [], hiddenFilaments: Set<Int> = [], throughMove: Int = .max, cancelled: () -> Bool = { false }) -> GCodePathGeometry {
         var out: [Segment] = []
@@ -1426,6 +1475,11 @@ struct GCodePathGeometry {
     }
 
     static func previewSmokeTest() -> Bool {
+        let motion = Segment(points: [SCNVector3(0,0,0), SCNVector3(10,0,0), SCNVector3(20,0,0)],
+                             feature: "Outer wall", width: 0.4, feedrate: 600, firstMove: 0, lastMove: 1)
+        guard let halfway = GCodePathGeometry(segments: [motion]).position(atMove: 0.5),
+              abs(halfway.x - 15) < 0.001 else { return false }
+
         let path = Segment(points: [SCNVector3(0, 0, 0), SCNVector3(1, 0, 2), SCNVector3(2, 0, 0)],
                            feature: "Outer wall", width: 0.45, feedrate: 1200, height: 0.3)
         let clipped = GCodePathGeometry(segments: [path]).filtered(minZ: 1, maxZ: 1.5)
@@ -1496,7 +1550,7 @@ struct GCodePathGeometry {
               data.colorRange(for: .layerTime) == 30...30,
               abs((data.centerOfGravity?.x ?? -1) - 7.5) < 0.001,
               abs((data.centerOfGravity?.y ?? -1) - 2.5) < 0.001,
-              data.makeNode(color: .white, showToolMarker: true, showCenterOfGravity: true).childNodes.count == 2,
+              data.makeNode(color: .white, showToolMarker: true, showCenterOfGravity: true).childNodes.count == 3,
               data.filtered(maxZ: 1, hiddenFeatures: ["Outer wall"]).segments.isEmpty,
               data.filtered(maxZ: 1, hiddenTools: [1]).segments.isEmpty,
               data.filtered(maxZ: 1, hiddenFilaments: [2]).segments.isEmpty,
@@ -1689,7 +1743,13 @@ struct GCodePathGeometry {
             }
         }
         if showToolMarker, let p = segments.last?.points.last {
-            travels.appendMarker(p, radius: 3, color: .systemYellow)
+            let marker = SCNNode()
+            marker.name = "scrub-toolhead"
+            marker.position = p
+            var cross = Batch(material: lines, primitive: .line, includeNormals: false)
+            cross.appendMarker(SCNVector3Zero, radius: 3, color: .systemYellow)
+            cross.flush(into: marker)
+            root.addChildNode(marker)
         }
         if showCenterOfGravity, let p = centerOfGravity {
             travels.appendMarker(p, radius: 4, color: .systemPink)

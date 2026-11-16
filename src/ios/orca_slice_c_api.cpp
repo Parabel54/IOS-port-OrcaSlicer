@@ -29,6 +29,7 @@
 #include <string>
 
 #include "libslic3r/Config.hpp"
+#include "libslic3r/FilamentMixer.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintBase.hpp"
@@ -251,14 +252,14 @@ struct orca_session {
 
     void sync_selected_caches() {
         selected_printer_cache.clear();
-        selected_process_cache.clear();
-        selected_filament_cache.clear();
+        if (!active_process_from_user) selected_process_cache.clear();
+        if (!active_filament_from_user) selected_filament_cache.clear();
         if (!preset_bundle)
             return;
         try {
             selected_printer_cache = preset_bundle->printers.get_selected_preset().name;
-            selected_process_cache  = preset_bundle->prints.get_selected_preset().name;
-            selected_filament_cache = preset_bundle->filaments.get_selected_preset().name;
+            if (!active_process_from_user) selected_process_cache = preset_bundle->prints.get_selected_preset().name;
+            if (!active_filament_from_user) selected_filament_cache = preset_bundle->filaments.get_selected_preset().name;
         } catch (...) {
         }
     }
@@ -1477,12 +1478,110 @@ const char *orca_session_filament_slot_name(orca_session_t *s, int slot)
         const auto &fps = s->preset_bundle->filament_presets;
         if (size_t(slot) >= fps.size())
             return empty.c_str();
-        // Cache into selected_filament_cache only for slot 0; use cover_path_cache as temp for others
-        // Prefer dedicated static storage per call via session string
-        s->selected_filament_cache = fps[size_t(slot)];
-        return s->selected_filament_cache.c_str();
+        empty = fps[size_t(slot)];
+        return empty.c_str();
     } catch (...) {
         return empty.c_str();
+    }
+}
+
+static int append_project_filament(orca_session_t *s, const std::string &color, bool mixed, size_t source_slot = 0)
+{
+    if (!s || !s->preset_bundle) return -1;
+    s->clear_error();
+    try {
+        ensure_default_config(s);
+        const auto old = s->config;
+        const size_t count = old.option<ConfigOptionStrings>("filament_colour")->values.size();
+        if (count >= size_t(EnforcerBlockerType::ExtruderMax)) {
+            s->set_error("The desktop filament painting limit has been reached");
+            return -2;
+        }
+        auto &bundle = *s->preset_bundle;
+        bundle.project_config.apply_only(old, bundle.project_config.keys(), true);
+        if (!mixed && bundle.num_mixed_filaments() != 0) {
+            s->set_error("Add physical filaments before creating mixed filaments");
+            return -2;
+        }
+        bundle.set_num_filaments(unsigned(count + 1), color);
+        if (mixed) bundle.filament_presets.back() = bundle.filament_presets.at(source_slot);
+        auto updated = bundle.full_config(true);
+        updated.apply_only(old, Preset::print_options(), true);
+        // Preserve edited values in existing slots; the new slot receives the
+        // selected native preset defaults, as on desktop.
+        for (const auto &key : Preset::filament_options()) {
+            const auto *source = old.option(key);
+            auto *target = updated.option(key);
+            if (!source || !target) continue;
+            const auto *from = dynamic_cast<const ConfigOptionVectorBase *>(source);
+            auto *to = dynamic_cast<ConfigOptionVectorBase *>(target);
+            if (from && to && from->size() > 0) {
+                for (size_t slot = 0; slot < std::min(count, to->size()); ++slot)
+                    to->set_at(from, slot, std::min(slot, from->size() - 1));
+            } else if (!from) updated.set_key_value(key, source->clone());
+        }
+        s->config = std::move(updated);
+        s->has_config = true;
+        return 0;
+    } catch (const std::exception &ex) {
+        s->set_error(std::string("add_project_filament: ") + ex.what());
+        return -3;
+    }
+}
+
+int orca_session_add_project_filament(orca_session_t *s)
+{
+    return append_project_filament(s, "#FFFFFF", false);
+}
+
+int orca_session_add_mixed_filament(orca_session_t *s, const int *components, const int *ratios,
+                                    size_t count, int gradient, int reverse, int per_part)
+{
+    if (!s || !s->preset_bundle || !components || !ratios) return -1;
+    s->clear_error();
+    try {
+        ensure_default_config(s);
+        if ((count != 2 && count != 3) || (gradient && count != 2))
+            throw std::runtime_error("Choose two or three physical filaments; gradients require two");
+        const auto &colors = s->config.option<ConfigOptionStrings>("filament_colour")->values;
+        const auto *flags = s->config.option<ConfigOptionBools>("filament_is_mixed");
+        const auto *types = s->config.option<ConfigOptionStrings>("filament_type");
+        std::vector<unsigned int> ids;
+        std::vector<int> weights;
+        std::vector<std::string> hex;
+        std::set<int> seen;
+        int sum = 0;
+        for (size_t i = 0; i < count; ++i) {
+            const int slot = components[i] - 1;
+            if (slot < 0 || size_t(slot) >= colors.size() || !seen.insert(slot).second ||
+                (flags && size_t(slot) < flags->values.size() && flags->values[slot]))
+                throw std::runtime_error("Mixed filaments need distinct physical components");
+            if (ratios[i] <= 0 || ratios[i] >= 100) throw std::runtime_error("Each ratio must be between 1 and 99 percent");
+            if (types && !types->values.empty() && types->get_at(slot) != types->get_at(components[0] - 1))
+                throw std::runtime_error("Mixed filaments must use the same material type");
+            ids.push_back(unsigned(components[i])); weights.push_back(ratios[i]);
+            hex.push_back(colors[slot]); sum += ratios[i];
+        }
+        if (sum != 100) throw std::runtime_error("Mixed filament ratios must total 100 percent");
+        const size_t index = colors.size();
+        const std::string blended = blend_color_multi(hex, weights);
+        const int result = append_project_filament(s, blended, true, ids.front() - 1);
+        if (result != 0) return result;
+        // Same project fields and serialization used by desktop's MixedFilamentDialog.
+        auto &project = s->preset_bundle->project_config;
+        project.option<ConfigOptionBools>("filament_is_mixed")->values[index] = true;
+        project.option<ConfigOptionStrings>("filament_mixed_components")->values[index] = format_mixed_components(ids);
+        project.option<ConfigOptionStrings>("filament_mixed_sublayer_ratios")->values[index] = format_mixed_ratios(weights);
+        project.option<ConfigOptionBools>("filament_mixed_gradient")->values[index] = gradient != 0;
+        project.option<ConfigOptionStrings>("filament_mixed_gradient_range")->values[index] =
+            gradient ? (reverse ? "0.1000,0.9000" : "0.9000,0.1000") : "";
+        project.option<ConfigOptionStrings>("filament_mixed_gradient_curve")->values[index] = "";
+        project.option<ConfigOptionBools>("filament_mixed_gradient_per_part")->values[index] = gradient && per_part;
+        s->config.apply_only(project, project.keys(), true);
+        return 0;
+    } catch (const std::exception &ex) {
+        s->set_error(std::string("mixed filament: ") + ex.what());
+        return -3;
     }
 }
 
@@ -2109,11 +2208,13 @@ int orca_session_select_process(orca_session_t *s, const char *name)
             std::map<std::string, std::string> key_values;
             std::string reason;
             ConfigSubstitutionContext ctx(ForwardCompatibilitySubstitutionRule::Enable);
-            int rc = s->config.load_from_json(user_json.string(), ctx, true, key_values, reason);
+            DynamicPrintConfig loaded;
+            int rc = loaded.load_from_json(user_json.string(), ctx, true, key_values, reason);
             if (rc != 0) {
                 s->set_error(reason.empty() ? "load user process failed" : reason);
                 return -4;
             }
+            s->config.apply_only(loaded, Preset::print_options(), true);
             s->has_config = true;
             s->selected_process_cache = name;
             s->active_process_from_user = true;
@@ -2146,11 +2247,13 @@ int orca_session_select_filament(orca_session_t *s, const char *name)
             std::map<std::string, std::string> key_values;
             std::string reason;
             ConfigSubstitutionContext ctx(ForwardCompatibilitySubstitutionRule::Enable);
-            int rc = s->config.load_from_json(user_json.string(), ctx, true, key_values, reason);
+            DynamicPrintConfig loaded;
+            int rc = loaded.load_from_json(user_json.string(), ctx, true, key_values, reason);
             if (rc != 0) {
                 s->set_error(reason.empty() ? "load user filament failed" : reason);
                 return -4;
             }
+            s->config.apply_only(loaded, Preset::filament_options(), true);
             s->has_config = true;
             s->selected_filament_cache = name;
             s->active_filament_from_user = true;
@@ -2185,9 +2288,9 @@ int orca_session_apply_presets(orca_session_t *s)
         if (had_user_proc || had_user_fil) {
             // Snapshot full session config; overlays re-applied after full_config
             if (had_user_proc)
-                user_process_overlay = s->config;
+                user_process_overlay.apply_only(s->config, Preset::print_options(), true);
             if (had_user_fil)
-                user_filament_overlay = s->config;
+                user_filament_overlay.apply_only(s->config, Preset::filament_options(), true);
         }
 
         s->config = s->preset_bundle->full_config(true);
@@ -2244,7 +2347,9 @@ int orca_session_save_user_process(orca_session_t *s, const char *name)
         }
         fs::path path = dir / (safe + ".json");
         // Official DynamicPrintConfig::save_to_json
-        s->config.save_to_json(path.string(), safe, "User", SoftFever_VERSION);
+        DynamicPrintConfig scoped;
+        scoped.apply_only(s->config, Preset::print_options(), true);
+        scoped.save_to_json(path.string(), safe, "User", SoftFever_VERSION);
         s->scan_user_process_presets();
         s->refresh_name_caches();
         s->selected_process_cache = safe;
@@ -2288,7 +2393,9 @@ int orca_session_save_user_filament(orca_session_t *s, const char *name)
             return -2;
         }
         fs::path path = dir / (safe + ".json");
-        s->config.save_to_json(path.string(), safe, "User", SoftFever_VERSION);
+        DynamicPrintConfig scoped;
+        scoped.apply_only(s->config, Preset::filament_options(), true);
+        scoped.save_to_json(path.string(), safe, "User", SoftFever_VERSION);
         s->scan_user_filament_presets();
         s->refresh_name_caches();
         s->selected_filament_cache = safe;

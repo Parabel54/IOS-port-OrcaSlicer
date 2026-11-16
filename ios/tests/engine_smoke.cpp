@@ -419,6 +419,40 @@ int main(int argc, char **argv)
         !require(orca_session_preset_origin(session.get(), 1, "iOS cloud PLA") == 2, "cloud filament ownership") ||
         !require(orca_session_preset_origin(session.get(), 0, "iOS cloud process") == 2, "cloud process ownership") ||
         !require(orca_session_preset_origin(session.get(), 2, "iOS imported printer") == 1, "local printer ownership")) return 16;
+    // A filament snapshot must never overwrite process settings, including after
+    // recreating the session and reading old on-disk user presets.
+    if (!require(orca_session_set_option(session.get(), "layer_height", "0.12") == 0 &&
+                 orca_session_save_user_process(session.get(), "Mobile+ Fine") == 0, "save process with sanitized name") ||
+        !require(std::string(orca_session_selected_process(session.get())) == "Mobile_ Fine", "canonical saved process name") ||
+        !require(orca_session_set_option(session.get(), "layer_height", "0.28") == 0 &&
+                 orca_session_set_option(session.get(), "nozzle_temperature", "235") == 0 &&
+                 orca_session_save_user_filament(session.get(), "Mobile+ PLA") == 0, "save filament independently")) return 17;
+    std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+        reopened(orca_session_create(argv[2]), orca_session_destroy);
+    if (!require(orca_session_set_data_dir(reopened.get(), data_dir.c_str()) == 0 &&
+                 orca_session_load_all_presets(reopened.get()) == 0 &&
+                 orca_session_select_process(reopened.get(), "Mobile_ Fine") == 0 &&
+                 orca_session_select_filament(reopened.get(), "Mobile_ PLA") == 0 &&
+                 orca_session_apply_presets(reopened.get()) == 0, "restore saved process and filament in fresh session")) return 17;
+    char restored_value[4096] = {};
+    if (!require(orca_session_get_option(reopened.get(), "layer_height", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value) == "0.12", "filament restore preserves process height") ||
+        !require(orca_session_get_option(reopened.get(), "nozzle_temperature", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value) == "235", "process restore preserves filament temperature") ||
+        !require(orca_session_add_project_filament(reopened.get()) == 0, "add project filament using native sizing") ||
+        !require(orca_session_get_option(reopened.get(), "layer_height", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value) == "0.12", "adding filament preserves process edits")) return 17;
+    const int mix_ids[] = {1, 2}, mix_ratios[] = {40, 60}, bad_ratios[] = {40, 40};
+    if (!require(orca_session_add_mixed_filament(reopened.get(), mix_ids, bad_ratios, 2, 0, 0, 0) != 0,
+                 "reject invalid mixed ratios") ||
+        !require(orca_session_add_mixed_filament(reopened.get(), mix_ids, mix_ratios, 2, 1, 0, 1) == 0,
+                 "native mixed filament with per-object gradient") ||
+        !require(orca_session_get_option(reopened.get(), "filament_mixed_components", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value).find("1,2") != std::string::npos, "mixed physical component metadata") ||
+        !require(orca_session_get_option(reopened.get(), "filament_mixed_gradient_range", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value).find("0.9000,0.1000") != std::string::npos, "desktop linear gradient metadata")) return 17;
+    std::printf("PASS: native mixed filament ratios, validation and gradient metadata\n");
+    std::printf("PASS: independent process/filament persistence, canonical names and native filament addition\n");
     std::printf("PASS: primitives, centered axis scaling, flush matrix repair and processed preview height\n");
     std::printf("PASS: native preset bundle, cloud printer/filament catalog, selection and profile export\n");
     std::printf("PASS: 3MF import, slicing, G-code export, processed preview, validation, cancellation and recovery\n");

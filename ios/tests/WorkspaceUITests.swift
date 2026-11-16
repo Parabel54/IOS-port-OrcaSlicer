@@ -35,6 +35,9 @@ final class WorkspaceUITests: XCTestCase {
         app.buttons["camera-home"].tap()
         app.buttons["Preview controls"].tap()
         XCTAssertTrue(app.buttons["Hide preview controls"].waitForExistence(timeout: 10))
+        XCTAssertEqual(app.sliders.matching(identifier: "Upper preview layer").count, 1,
+                       "Preview controls must not duplicate the upper-layer slider")
+        XCTAssertTrue(app.sliders["Toolpath move"].exists)
         let information = app.buttons["Model and slice information"]
         XCTAssertTrue(information.isHittable)
         XCTAssertFalse(information.frame.intersects(app.otherElements["Navigation cube"].frame),
