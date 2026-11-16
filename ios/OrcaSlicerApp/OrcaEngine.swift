@@ -243,8 +243,9 @@ final class OrcaEngine: ObservableObject {
             orca_session_purge_option_caches(s)
         }
         #endif
+        let wasLightweight = previewLightweight
         previewLightweight = true
-        if gcodeGeometry != nil { applyPreviewLayer() }
+        if !wasLightweight && gcodeGeometry != nil { applyPreviewLayer() }
         lastMessage = "Memory-saving preview: all toolpaths retained"
     }
 
@@ -2113,6 +2114,7 @@ final class OrcaEngine: ObservableObject {
             self.applyPreviewLayer()
             if ProcessInfo.processInfo.arguments.contains("--test-preview-memory-warning") {
                 handleMemoryWarning()
+                handleMemoryWarning() // Repeated warnings must not restart the build.
             }
         } else {
             self.slicePhase = "G-code exported; preview unavailable"

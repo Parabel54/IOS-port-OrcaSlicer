@@ -2372,7 +2372,7 @@ struct OrcaRootView: View {
                 },
                 measureMode: gizmoMode == .measure && mainTab == .prepare,
                 paintMode: isPaintGizmo && mainTab == .prepare && engine.hasModel,
-                paintOverlay: isPaintGizmo ? engine.paintOverlayMesh : nil,
+                paintOverlay: isPaintGizmo && mainTab == .prepare ? engine.paintOverlayMesh : nil,
                 paintOverlayColor: paintOverlayUIColor,
                 onDragCommit: { dx, dy, objIdx in
                     // Use index captured at drag start — never rely on post-tap selection
