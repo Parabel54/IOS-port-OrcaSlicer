@@ -236,7 +236,7 @@ final class OrcaEngine: ObservableObject {
     /// Integration fixture only: exercise public commands under each worker
     /// owner without scheduling concurrent native access in the test itself.
     @MainActor
-    func sessionGateSmokeTest() -> String {
+    func sessionGateSmokeTest() async -> String {
         #if ORCA_LINKED
         guard requireIdleSession(), let session, hasModel, objectCount > 0 else {
             return "FAIL: session ownership fixture needs a loaded, idle model"
@@ -273,14 +273,15 @@ final class OrcaEngine: ObservableObject {
         }
         let before = fingerprint()
         let height = getOption("layer_height") ?? "0.2"
-        let actions: [(String, () -> Void)] = [
+        let actions: [(String, () async -> Void)] = [
             ("translate", { self.translate(dx: 100, dy: 100) }),
             ("rotate", { self.rotate(axis: 2, degrees: 45) }),
             ("scale", { self.scale(factor: 2) }),
             ("mirror", { self.mirror(axis: 0) }),
-            ("duplicate", { self.duplicateObject(at: 0) }),
-            ("delete", { self.deleteObject(at: 0) }),
+            ("duplicate", { _ = await self.duplicateObject(at: 0) }),
+            ("delete", { _ = await self.deleteObject(at: 0) }),
             ("clear", { self.clearPlate() }),
+            ("clear with undo", { _ = await self.clearPlateWithUndo() }),
             ("primitive", { _ = self.addPrimitive(kind: 0, x: 10, y: 10, z: 10) }),
             ("grid", { _ = self.cloneGrid(nx: 2, ny: 2) }),
             ("config", { _ = self.applyConfigOption(key: "layer_height", value: "0.6") }),
@@ -301,7 +302,7 @@ final class OrcaEngine: ObservableObject {
                 return "FAIL: could not restore the read-isolation fixture"
             }
             for (name, action) in actions {
-                action()
+                await action()
                 guard fingerprint() == before else { return "FAIL: \(name) modified a session owned by worker \(owner)" }
             }
         }
@@ -1984,64 +1985,36 @@ final class OrcaEngine: ObservableObject {
         UserDefaults.standard.set(list, forKey: Self.recentKey)
     }
 
-    func duplicateObject(at index: Int) {
-        guard requireIdleSession() else { return }
-        #if ORCA_LINKED
-        guard let s = session, hasModel, index >= 0 else { return }
-        let rc = orca_session_duplicate_object(s, Int32(index))
-        if rc >= 0 {
-            hasModel = true
-            refreshObjectList()
-            selectedObjectIndex = Int(rc)
-            refreshMesh(); refreshBounds(); refreshModelInfo()
-            lastMessage = "Duplicated object → index \(rc)"
-        } else {
-            lastMessage = orca_session_last_error(s).map { String(cString: $0) } ?? "duplicate failed"
-        }
-        #endif
+    @discardableResult
+    func duplicateObject(at index: Int) async -> Bool {
+        guard requireIdleSession() else { return false }
+        return await editMesh(.duplicate(index))
     }
 
-    func duplicateSelected() {
-        let idx = selectedObjectIndex >= 0 ? selectedObjectIndex : 0
-        duplicateObject(at: idx)
+    @discardableResult
+    func duplicateSelected() async -> Bool {
+        guard requireIdleSession() else { return false }
+        return await editMesh(.duplicate(selectedObjectIndex >= 0 ? selectedObjectIndex : nil))
     }
 
-    func deleteObject(at index: Int) {
-        guard requireIdleSession() else { return }
-        #if ORCA_LINKED
-        guard let s = session, hasModel, index >= 0 else { return }
-        let rc = orca_session_delete_object(s, Int32(index))
-        if rc == 0 {
-            let n = Int(orca_session_object_count(s))
-            hasModel = n > 0
-            if !hasModel {
-                modelName = nil
-                objectNames = []
-                objectInstanceCounts = []
-                objectCount = 0
-                modelVolumeMm3 = 0
-                selectedObjectIndex = -1
-                refreshMesh()
-                clearPaintOverlay()
-                refreshBounds()
-                lastMessage = "Plate empty"
-            } else {
-                if selectedObjectIndex >= n {
-                    selectedObjectIndex = n - 1
-                }
-                refreshObjectList()
-                refreshMesh(); refreshBounds(); refreshModelInfo()
-                lastMessage = "Deleted object \(index)"
-            }
-        } else {
-            lastMessage = orca_session_last_error(s).map { String(cString: $0) } ?? "delete failed"
-        }
-        #endif
+    @discardableResult
+    func deleteObject(at index: Int) async -> Bool {
+        guard requireIdleSession() else { return false }
+        return await editMesh(.delete(index))
     }
 
-    func deleteSelected() {
-        let idx = selectedObjectIndex >= 0 ? selectedObjectIndex : 0
-        deleteObject(at: idx)
+    @discardableResult
+    func deleteSelected() async -> Bool {
+        guard requireIdleSession() else { return false }
+        if selectedObjectIndex >= 0 { return await editMesh(.delete(selectedObjectIndex)) }
+        return await clearPlateWithUndo()
+    }
+
+    @discardableResult
+    func clearPlateWithUndo() async -> Bool {
+        guard requireIdleSession() else { return false }
+        if !hasModel { return true }
+        return await editMesh(.clearPlate)
     }
 
     func clearPlate() {
@@ -2983,7 +2956,8 @@ final class OrcaEngine: ObservableObject {
             return "FAIL: instance history fixture needs a fresh single-object plate"
         }
         let selection = selectedObjectIndex
-        defer { selectedObjectIndex = selection }
+        let message = lastMessage
+        defer { selectedObjectIndex = selection; lastMessage = message }
         selectedObjectIndex = 0
         let originalHeight = getOption("layer_height") ?? ""
         guard await editMesh(.copies(0)), !hasModel, canUndo else { return "FAIL: zero copies did not create undo" }
@@ -3012,6 +2986,33 @@ final class OrcaEngine: ObservableObject {
               undoStack.count == depths.0, redoStack.count == depths.1 else {
             return "FAIL: unchanged/invalid copies changed history"
         }
+        guard await duplicateSelected(), objectCount == 2, canUndo, !canRedo else {
+            return "FAIL: public Duplicate did not create an independent undoable object"
+        }
+        undo()
+        guard objectCount == 1, canRedo else { return "FAIL: Duplicate Undo" }
+        redo()
+        guard objectCount == 2, await deleteSelected(), objectCount == 1 else { return "FAIL: public Delete" }
+        undo()
+        guard objectCount == 2, await clearPlateWithUndo(), !hasModel else { return "FAIL: public Clear" }
+        undo()
+        guard objectCount == 2, canRedo else { return "FAIL: Clear Undo" }
+        redo()
+        guard !hasModel else { return "FAIL: Clear Redo" }
+        undo()
+        undo()
+        guard objectCount == 1 else { return "FAIL: restore original before whole-plate actions" }
+        selectedObjectIndex = -1
+        guard await duplicateSelected(), objectCount == 2 else { return "FAIL: duplicate whole selection" }
+        selectedObjectIndex = -1
+        guard await duplicateSelected(), objectCount == 4 else { return "FAIL: duplicate all objects did not include every source" }
+        guard await deleteSelected(), !hasModel else { return "FAIL: Delete with All selected did not clear the whole selection" }
+        undo()
+        guard objectCount == 4 else { return "FAIL: whole selection Delete Undo" }
+        undo()
+        guard objectCount == 2 else { return "FAIL: whole selection Duplicate Undo" }
+        undo()
+        guard objectCount == 1, objectInstanceCounts == [originalCopies] else { return "FAIL: original plate after bulk history" }
         for entry in undoStack + redoStack { try? FileManager.default.removeItem(at: entry.url) }
         undoStack.removeAll(); redoStack.removeAll(); refreshUndoFlags()
         let broken = undoDir().appendingPathComponent("invalid-history-\(UUID().uuidString).json")
@@ -3026,7 +3027,7 @@ final class OrcaEngine: ObservableObject {
             return "FAIL: failed restore changed the model/settings/history"
         }
         undoStack.removeAll(); refreshUndoFlags()
-        return "PASS: native instance deletion, empty-plate config Undo/Redo, first primitive history, no-op/invalid edits and failed restore"
+        return "PASS: native copies, empty-plate config/first primitive Undo/Redo, public/bulk Duplicate/Delete/Clear, no-op/invalid edits and failed restore"
         #else
         return "FAIL: engine not linked"
         #endif
@@ -3464,6 +3465,9 @@ final class OrcaEngine: ObservableObject {
 
     enum MeshEdit: Sendable {
         case repair
+        case duplicate(Int?)
+        case delete(Int)
+        case clearPlate
         case split(toObjects: Bool, part: Int, dropToBed: Bool)
         case layOnFace(SIMD3<Float>)
         case layerHeights(LayerHeightEdit)
@@ -3475,6 +3479,9 @@ final class OrcaEngine: ObservableObject {
         var undoLabel: String {
             switch self {
             case .repair: return String(localized: "Repair mesh")
+            case .duplicate: return String(localized: "Duplicate objects")
+            case .delete: return String(localized: "Delete object")
+            case .clearPlate: return String(localized: "Clear plate")
             case .split(let objects, _, _): return objects ? String(localized: "Split to objects") : String(localized: "Split to parts")
             case .layOnFace: return String(localized: "Lay on face")
             case .layerHeights: return String(localized: "Variable layer height")
@@ -3501,9 +3508,16 @@ final class OrcaEngine: ObservableObject {
         guard !sessionBusy, !sliceRunning, !presetsLoading, hasModel else { return false }
         #if ORCA_LINKED
         guard let session else { return false }
-        let index = selectedObjectIndex
-        if case .repair = edit { /* Repair also supports the whole plate. */ }
-        else if !objectNames.indices.contains(index) {
+        let index: Int
+        let wholePlate: Bool
+        switch edit {
+        case .duplicate(let target): index = target ?? -1; wholePlate = target == nil
+        case .delete(let target): index = target; wholePlate = false
+        case .clearPlate: index = -1; wholePlate = true
+        case .repair: index = selectedObjectIndex; wholePlate = index < 0
+        default: index = selectedObjectIndex; wholePlate = false
+        }
+        if !wholePlate && !objectNames.indices.contains(index) {
             lastMessage = "Select one object first"; return false
         }
         switch edit {
@@ -3525,7 +3539,7 @@ final class OrcaEngine: ObservableObject {
             if case .smooth(let radius, _) = action, !(1...10).contains(radius) {
                 lastMessage = String(localized: "Choose a smoothing radius between 1 and 10"); return false
             }
-        case .repair: break
+        case .repair, .duplicate, .delete, .clearPlate: break
         case .split(_, let part, _):
             guard part >= 0 && part <= Int(Int32.max) else { lastMessage = "Choose a valid part"; return false }
         case .layOnFace(let point):
@@ -3541,10 +3555,20 @@ final class OrcaEngine: ObservableObject {
             let saved = snapshot.path.withCString { orca_session_snapshot(s, $0) }
             let bytes = (try? snapshot.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
             guard saved == 0 && bytes > 64 else {
-                return (Int32(-1), "Could not prepare an undo snapshot; the model was not changed.", false)
+                return (Int32(-1), "Could not prepare an undo snapshot; the model was not changed.", false, false)
             }
             let code: Int32
             switch edit {
+            case .duplicate(let target):
+                let targets = target.map { [$0] } ?? Array(0..<Int(orca_session_object_count(s)))
+                var last: Int32 = -1
+                for object in targets {
+                    last = orca_session_duplicate_object(s, Int32(object))
+                    if last < 0 { break }
+                }
+                code = last
+            case .delete: code = orca_session_delete_object(s, Int32(index))
+            case .clearPlate: code = orca_session_clear_model(s)
             case .copies(let count): code = orca_session_set_object_instances(s, Int32(index), Int32(count))
             case .repair: code = orca_session_repair_mesh(s, Int32(index))
             case .split(let objects, let part, let drop):
@@ -3572,11 +3596,11 @@ final class OrcaEngine: ObservableObject {
             if code < 0 && !edit.preservesModelOnFailure {
                 restoreFailed = snapshot.path.withCString { orca_session_restore_snapshot(s, $0) } != 0
             }
-            return (code, error.isEmpty ? "Mesh operation failed" : error, restoreFailed)
+            return (code, error.isEmpty ? "Mesh operation failed" : error, restoreFailed, true)
         }.value
         if result.0 >= 0 || result.2 { recordUndoSnapshot(snapshot, label: edit.undoLabel) }
         else { try? FileManager.default.removeItem(at: snapshot) }
-        if result.0 < 0 && edit.preservesModelOnFailure { lastMessage = result.1; return false }
+        if result.0 < 0 && (!result.3 || edit.preservesModelOnFailure) { lastMessage = result.1; return false }
         if result.0 >= 0, case .layerHeights = edit {
             invalidateSlice()
             lastMessage = String(localized: "Updated variable layer heights")
@@ -3584,6 +3608,10 @@ final class OrcaEngine: ObservableObject {
         }
         if result.0 >= 0, case .boolean(let other, _, let removeOther) = edit {
             selectedObjectIndex = index - (removeOther && other < index ? 1 : 0)
+        } else if result.0 >= 0, case .duplicate(let target) = edit {
+            selectedObjectIndex = target == nil ? -1 : Int(result.0)
+        } else if result.0 >= 0, case .delete = edit {
+            selectedObjectIndex = index
         } else if result.0 >= 0, case .cut = edit { selectedObjectIndex = -1 }
         else if result.0 >= 0, case .split(let objects, _, _) = edit, objects { selectedObjectIndex = -1 }
         refreshObjectList()

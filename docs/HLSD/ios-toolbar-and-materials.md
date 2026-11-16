@@ -67,6 +67,13 @@ addition undoable. Undo/Redo capture the outgoing state before restoring the
 target and commit their stack changes only after both operations succeed.
 Failed captures/restores retain the previous history entries.
 
+User Duplicate/Delete/Clear actions share the asynchronous snapshot dispatcher.
+Duplicate with All selected clones every source object; Delete with All selected
+clears the whole selection. Explicit object actions retain their requested target
+across the background task. Raw plate clearing remains separate for plate
+switching and snapshot restore, so those internal paths do not create history.
+Snapshot capture failure returns before changing the existing rendered preview.
+
 Paint annotations belong to shared model volumes. Overlay export transforms each
 color/annotation through every instance, while annotation counts remain per
 volume. Brush hits on objects with several instances select the closest touched

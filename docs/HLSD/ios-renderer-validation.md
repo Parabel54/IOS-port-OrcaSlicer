@@ -58,3 +58,7 @@ A separate full-app history receipt exercises native instance deletion through
 Undo/Redo, empty-plate settings, first-primitive history and failed snapshot
 restoration. It uses real native serialization and public host commands; a
 source/SDK check alone does not execute this fixture.
+
+The native ABI executable prints an entry marker and line-buffered fixture
+results. A timeout or abort retains completed assertions in the result log;
+the marker distinguishes entering the executable from merely building it.

@@ -16,6 +16,9 @@
 
 int main(int argc, char **argv)
 {
+    // Preserve completed fixture results even if a later test stalls or aborts.
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
+    std::printf("RUN: native mobile ABI integration fixtures\n");
     if (argc != 3)
         return 2;
     const std::string directory = argv[1];

@@ -2264,16 +2264,28 @@ struct OrcaRootView: View {
                     }
                 }
                 toolChip("Duplicate", "plus.square.on.square") {
-                    engine.duplicateSelected(); status = engine.lastMessage
+                    Task { @MainActor in
+                        if await engine.duplicateSelected() == false { operationError = engine.lastMessage }
+                        status = engine.lastMessage
+                    }
                 }
+                .disabled(!engine.hasModel)
                 toolChip("Copies", "square.stack.3d.up") { showMeshTools = true }
                     .disabled(!engine.objectNames.indices.contains(engine.selectedObjectIndex))
                 toolChip("Delete", "trash") {
-                    engine.deleteSelected(); status = engine.lastMessage
+                    Task { @MainActor in
+                        if await engine.deleteSelected() == false { operationError = engine.lastMessage }
+                        status = engine.lastMessage
+                    }
                 }
+                .disabled(!engine.hasModel)
                 toolChip("Clear", "xmark.rectangle") {
-                    engine.clearPlate(); status = engine.lastMessage
+                    Task { @MainActor in
+                        if await engine.clearPlateWithUndo() == false { operationError = engine.lastMessage }
+                        status = engine.lastMessage
+                    }
                 }
+                .disabled(!engine.hasModel)
             }
         }
     }
@@ -3859,7 +3871,7 @@ struct OrcaRootView: View {
                         atomically: true, encoding: .utf8)
                 }
                 if ProcessInfo.processInfo.arguments.contains("--test-session-gate") {
-                    try? engine.sessionGateSmokeTest().write(
+                    try? await engine.sessionGateSmokeTest().write(
                         to: FileManager.default.temporaryDirectory.appendingPathComponent("orca-session-gate-smoke.txt"),
                         atomically: true, encoding: .utf8)
                 }
