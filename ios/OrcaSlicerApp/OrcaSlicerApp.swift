@@ -2399,6 +2399,7 @@ struct OrcaRootView: View {
             .overlay(alignment: .bottom) {
                 if mainTab != .device {
                     VStack(spacing: 4) {
+                    HStack(spacing: 0) {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
                             ForEach(PlateTouchMode.allCases) { mode in
@@ -2415,8 +2416,10 @@ struct OrcaRootView: View {
                                 toolChip("Add", "plus") { showModelLibrary = true }.accessibilityIdentifier("model-library-shortcut")
                                 toolChip("Transform", "slider.horizontal.3") { showPlateInspector = true }
                             }
-                            toolChip("Home", "house") { fitCameraRequest = UUID() }.accessibilityIdentifier("camera-home")
                         }.padding(8)
+                    }
+                    toolChip("Home", "house") { fitCameraRequest = UUID() }
+                        .accessibilityIdentifier("camera-home").padding(.trailing, 8)
                     }
                     if activePlateTouchMode == .rotate {
                         Picker("Rotation axis", selection: $rotationAxis) {

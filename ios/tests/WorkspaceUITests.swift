@@ -51,6 +51,8 @@ final class WorkspaceUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Prepare"].isHittable)
         app.buttons["Prepare"].tap()
         XCTAssertTrue(app.buttons["slice-plate"].isHittable)
+        XCTAssertTrue(app.buttons["camera-home"].isHittable, "Home must remain visible in Prepare without scrolling tools")
+        app.buttons["camera-home"].tap()
         app.buttons["Preview"].tap()
         XCTAssertTrue(app.sliders["Upper preview layer"].exists)
     }
