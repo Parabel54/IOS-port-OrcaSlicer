@@ -1596,6 +1596,110 @@ int orca_session_add_mixed_filament(orca_session_t *s, const int *components, co
     }
 }
 
+static void validate_mobile_mixes(const DynamicPrintConfig &config)
+{
+    for (const char *key : {"filament_is_mixed", "filament_mixed_components", "filament_mixed_sublayer_ratios",
+                           "filament_mixed_gradient", "filament_mixed_gradient_range", "filament_mixed_gradient_curve",
+                           "filament_mixed_gradient_per_part", "filament_colour"})
+        if (!config.has(key)) throw std::runtime_error("Missing mixed filament metadata");
+    const auto errors = validate_mixed_filament_params(
+        config.option<ConfigOptionBools>("filament_is_mixed")->values,
+        config.option<ConfigOptionStrings>("filament_mixed_components")->values,
+        config.option<ConfigOptionStrings>("filament_mixed_sublayer_ratios")->values,
+        config.option<ConfigOptionBools>("filament_mixed_gradient")->values,
+        config.option<ConfigOptionStrings>("filament_mixed_gradient_range")->values,
+        config.option<ConfigOptionStrings>("filament_mixed_gradient_curve")->values);
+    if (!errors.empty()) throw std::runtime_error(errors.begin()->second);
+}
+
+const char *orca_session_mixed_filament_json(orca_session_t *s, int slot)
+{
+    static thread_local std::string result;
+    if (!s) return nullptr;
+    s->clear_error();
+    try {
+        ensure_default_config(s);
+        validate_mobile_mixes(s->config);
+        const auto &flags = s->config.option<ConfigOptionBools>("filament_is_mixed")->values;
+        if (slot < 0 || size_t(slot) >= flags.size() || !flags[size_t(slot)])
+            throw std::runtime_error("Choose an existing mixed filament");
+        const auto &config = s->config;
+        const auto components = parse_mixed_components(config.option<ConfigOptionStrings>("filament_mixed_components")->values.at(size_t(slot)));
+        nlohmann::json info = {
+            {"components", components},
+            {"ratios", parse_mixed_ratios(config.option<ConfigOptionStrings>("filament_mixed_sublayer_ratios")->values.at(size_t(slot)), components.size())},
+            {"gradient", config.option<ConfigOptionBools>("filament_mixed_gradient")->values.at(size_t(slot)) != 0},
+            {"range", config.option<ConfigOptionStrings>("filament_mixed_gradient_range")->values.at(size_t(slot))},
+            {"curve", config.option<ConfigOptionStrings>("filament_mixed_gradient_curve")->values.at(size_t(slot))},
+            {"perPart", config.option<ConfigOptionBools>("filament_mixed_gradient_per_part")->values.at(size_t(slot)) != 0}
+        };
+        result = info.dump();
+        return result.c_str();
+    } catch (const std::exception &ex) {
+        s->set_error(std::string("mixed filament: ") + ex.what());
+        return nullptr;
+    }
+}
+
+int orca_session_update_mixed_filament(orca_session_t *s, int slot, const int *ratios,
+                                      size_t count, int gradient_mode, int per_part)
+{
+    if (!s || !s->preset_bundle || (count != 0 && !ratios)) return -1;
+    s->clear_error();
+    try {
+        ensure_default_config(s);
+        const auto &old = s->config;
+        validate_mobile_mixes(old);
+        const auto *flags = old.option<ConfigOptionBools>("filament_is_mixed");
+        if (!flags || slot < 0 || size_t(slot) >= flags->size() || !flags->values[size_t(slot)])
+            throw std::runtime_error("Choose an existing mixed filament");
+        const size_t index = size_t(slot);
+        const auto ids = parse_mixed_components(old.option<ConfigOptionStrings>("filament_mixed_components")->values.at(index));
+        if ((ids.size() != 2 && ids.size() != 3) || (count != 0 && count != ids.size()) ||
+            gradient_mode < -1 || gradient_mode > 2 || (gradient_mode > 0 && ids.size() != 2))
+            throw std::runtime_error("Unsupported mixed filament components or gradient mode");
+        DynamicPrintConfig updated = old;
+        if (count != 0) {
+            std::vector<int> weights;
+            std::vector<std::string> colors;
+            int sum = 0;
+            for (size_t i = 0; i < count; ++i) {
+                if (ratios[i] < 1 || ratios[i] > 99 || ids[i] < 1 || ids[i] > flags->size() || flags->values[ids[i] - 1])
+                    throw std::runtime_error("Choose positive percentages and physical component filaments");
+                const auto *types = old.option<ConfigOptionStrings>("filament_type");
+                if (types && !types->empty() && types->get_at(ids[i] - 1) != types->get_at(ids.front() - 1))
+                    throw std::runtime_error("Mixed filaments must use the same material type");
+                weights.push_back(ratios[i]); sum += ratios[i];
+                colors.push_back(old.option<ConfigOptionStrings>("filament_colour")->values.at(ids[i] - 1));
+            }
+            if (sum != 100) throw std::runtime_error("Mixed filament ratios must total 100 percent");
+            updated.option<ConfigOptionStrings>("filament_mixed_sublayer_ratios")->values.at(index) = format_mixed_ratios(weights);
+            updated.option<ConfigOptionStrings>("filament_colour")->values.at(index) = blend_color_multi(colors, weights);
+        }
+        if (gradient_mode >= 0) {
+            updated.option<ConfigOptionBools>("filament_mixed_gradient")->values.at(index) = gradient_mode != 0;
+            updated.option<ConfigOptionStrings>("filament_mixed_gradient_range")->values.at(index) =
+                gradient_mode == 0 ? "" : gradient_mode == 2 ? "0.1000,0.9000" : "0.9000,0.1000";
+            updated.option<ConfigOptionStrings>("filament_mixed_gradient_curve")->values.at(index).clear();
+            updated.option<ConfigOptionBools>("filament_mixed_gradient_per_part")->values.at(index) = gradient_mode > 0 && per_part;
+        }
+        validate_mobile_mixes(updated);
+        // Commit only after validation; slot IDs, facet painting and other
+        // material/printer/process settings stay in the original configuration.
+        DynamicPrintConfig project = s->preset_bundle->project_config;
+        project.apply_only(updated, project.keys(), true);
+        s->preset_bundle->project_config = std::move(project);
+        s->config = std::move(updated);
+        s->has_slice_stats = false;
+        s->preview_segments.clear(); s->preview_metadata.clear(); s->preview_total_segments = 0;
+        s->role_names.clear(); s->role_meters.clear(); s->role_grams.clear();
+        return 0;
+    } catch (const std::exception &ex) {
+        s->set_error(std::string("mixed filament: ") + ex.what());
+        return -3;
+    }
+}
+
 static void normalize_first_filament(DynamicPrintConfig &config, const DynamicPrintConfig &source)
 {
     // Older mobile saves could contain vectors for the whole project. A

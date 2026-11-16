@@ -581,6 +581,49 @@ int main(int argc, char **argv)
                  std::string(restored_value).find("1,2") != std::string::npos, "mixed physical component metadata") ||
         !require(orca_session_get_option(reopened.get(), "filament_mixed_gradient_range", restored_value, sizeof(restored_value)) == 0 &&
                  std::string(restored_value).find("0.9000,0.1000") != std::string::npos, "desktop linear gradient metadata")) return 17;
+    diagnostic_session = reopened.get();
+    const char *mix_info = orca_session_mixed_filament_json(reopened.get(), 2);
+    if (!require(mix_info != nullptr, "read existing mixed slot")) return 17;
+    const std::string mix_before = mix_info;
+    const std::string mix_profile = orca_session_filament_slot_name(reopened.get(), 2);
+    const int edited_ratios[] = {30, 70};
+    if (!require(orca_session_update_mixed_filament(reopened.get(), 2, bad_ratios, 2, -1, 0) != 0,
+                 "reject an invalid ratio edit") ||
+        !require(orca_session_update_mixed_filament(reopened.get(), 0, edited_ratios, 2, -1, 0) != 0,
+                 "reject editing a physical slot as mixed")) return 17;
+    mix_info = orca_session_mixed_filament_json(reopened.get(), 2);
+    if (!require(mix_info && std::string(mix_info) == mix_before, "failed mix edits preserve metadata") ||
+        !require(orca_session_update_mixed_filament(reopened.get(), 2, edited_ratios, 2, 2, 0) == 0,
+                 "edit proportions and reverse a linear gradient") ||
+        !require(orca_session_get_option(reopened.get(), "filament_mixed_sublayer_ratios", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value).find("0.3000,0.7000") != std::string::npos, "updated native ratios") ||
+        !require(orca_session_get_option(reopened.get(), "filament_mixed_gradient_range", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value).find("0.1000,0.9000") != std::string::npos, "updated native gradient") ||
+        !require(std::string(orca_session_filament_slot_name(reopened.get(), 2)) == mix_profile,
+                 "mix edit preserves preset identity") ||
+        !require(orca_session_get_option(reopened.get(), "layer_height", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value) == "0.12", "mix edit preserves process settings")) return 17;
+    if (!require(orca_session_set_option(reopened.get(), "filament_mixed_gradient_curve", "\"\";\"\";\"0,0.1|0.5,0.5|1,0.9\"") == 0,
+                 "import custom gradient fixture")) return 17;
+    orca_session_get_option(reopened.get(), "filament_mixed_gradient_curve", restored_value, sizeof(restored_value));
+    const std::string imported_curve = restored_value;
+    if (!require(orca_session_update_mixed_filament(reopened.get(), 2, mix_ratios, 2, -1, 1) == 0,
+                 "change ratios while retaining an imported curve") ||
+        !require(orca_session_get_option(reopened.get(), "filament_mixed_gradient_curve", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value) == imported_curve, "ratio edit does not replace imported curve") ||
+        !require(orca_session_set_option(reopened.get(), "filament_mixed_sublayer_ratios", "\"\";\"\";\"0.3333,0.6667\"") == 0,
+                 "import precise ratios")) return 17;
+    orca_session_get_option(reopened.get(), "filament_mixed_sublayer_ratios", restored_value, sizeof(restored_value));
+    const std::string imported_ratios = restored_value;
+    if (!require(orca_session_update_mixed_filament(reopened.get(), 2, nullptr, 0, -1, 1) == 0,
+                 "preserve exact imported mix without changing fields") ||
+        !require(orca_session_get_option(reopened.get(), "filament_mixed_gradient_curve", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value) == imported_curve, "custom gradient remains byte-identical") ||
+        !require(orca_session_get_option(reopened.get(), "filament_mixed_sublayer_ratios", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value) == imported_ratios, "untouched precise ratios remain byte-identical") ||
+        !require(orca_session_update_mixed_filament(reopened.get(), 2, mix_ratios, 2, 1, 1) == 0,
+                 "restore initial mix for subsequent profile regression cases")) return 17;
+    std::printf("PASS: existing mix edits, invalid-edit isolation, preset/process identity and imported curve preservation\n");
     std::printf("PASS: native mixed filament ratios, validation and gradient metadata\n");
     diagnostic_session = reopened.get();
     if (!require(orca_session_set_option(reopened.get(), "nozzle_temperature", "245,211,240") == 0 &&

@@ -1640,7 +1640,7 @@ final class OrcaEngine: ObservableObject {
     @discardableResult
     func addProjectFilament() -> Bool {
         #if ORCA_LINKED
-        guard let session else { return false }
+        guard let session, !sessionBusy, !sliceRunning, !presetsLoading else { return false }
         let result = orca_session_add_project_filament(session)
         lastMessage = result == 0 ? "Filament added" :
             (orca_session_last_error(session).map { String(cString: $0) } ?? "Cannot add filament")
@@ -1671,7 +1671,7 @@ final class OrcaEngine: ObservableObject {
 
     func addMixedFilament(components: [Int], ratios: [Int], gradient: Bool, reverse: Bool, perPart: Bool) -> Bool {
         #if ORCA_LINKED
-        guard let session, components.count == ratios.count else { return false }
+        guard let session, !sessionBusy, !sliceRunning, !presetsLoading, components.count == ratios.count else { return false }
         let ids = components.map { Int32($0 + 1) }, weights = ratios.map(Int32.init)
         let result = ids.withUnsafeBufferPointer { ids in
             weights.withUnsafeBufferPointer { weights in
@@ -1682,6 +1682,54 @@ final class OrcaEngine: ObservableObject {
         lastMessage = result == 0 ? "Mixed filament added" :
             (orca_session_last_error(session).map { String(cString: $0) } ?? "Cannot add mixed filament")
         if result == 0 { refreshObjectFilamentColors(); invalidateSlice() }
+        return result == 0
+        #else
+        return false
+        #endif
+    }
+
+    struct MixedFilamentInfo: Decodable {
+        let components: [Int]
+        let ratios: [Double]
+        let gradient: Bool
+        let range: String
+        let curve: String
+        let perPart: Bool
+        var customGradient: Bool {
+            guard gradient else { return false }
+            let ends = range.split(separator: ",").compactMap { Double($0) }
+            return !curve.isEmpty || ends.count != 2 ||
+                !(abs(ends[0] - 0.9) < 0.00001 && abs(ends[1] - 0.1) < 0.00001 ||
+                  abs(ends[0] - 0.1) < 0.00001 && abs(ends[1] - 0.9) < 0.00001)
+        }
+        var reversed: Bool { (range.split(separator: ",").first.flatMap { Double($0) } ?? 0.9) < 0.5 }
+    }
+
+    func mixedFilamentInfo(_ slot: Int) -> MixedFilamentInfo? {
+        #if ORCA_LINKED
+        guard let session, !sessionBusy, !sliceRunning, !presetsLoading else { return nil }
+        guard let text = orca_session_mixed_filament_json(session, Int32(slot)) else {
+            lastMessage = orca_session_last_error(session).map { String(cString: $0) } ?? "Cannot read mixed filament"
+            return nil
+        }
+        do { return try JSONDecoder().decode(MixedFilamentInfo.self, from: Data(String(cString: text).utf8)) }
+        catch { lastMessage = error.localizedDescription; return nil }
+        #else
+        return nil
+        #endif
+    }
+
+    func updateMixedFilament(_ slot: Int, ratios: [Int], gradientMode: Int, perPart: Bool) -> Bool {
+        #if ORCA_LINKED
+        guard let session, !sessionBusy, !sliceRunning, !presetsLoading else { return false }
+        let weights = ratios.map(Int32.init)
+        let result = weights.withUnsafeBufferPointer {
+            orca_session_update_mixed_filament(session, Int32(slot), $0.baseAddress, $0.count, Int32(gradientMode), perPart ? 1 : 0)
+        }
+        if result == 0 {
+            refreshObjectFilamentColors(); invalidateSlice()
+            lastMessage = "Updated mixed filament \(slot + 1)"
+        } else { lastMessage = orca_session_last_error(session).map { String(cString: $0) } ?? "Cannot update mixed filament" }
         return result == 0
         #else
         return false

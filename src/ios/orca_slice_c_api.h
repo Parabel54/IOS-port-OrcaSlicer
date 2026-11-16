@@ -257,6 +257,15 @@ ORCA_API int orca_session_add_project_filament(orca_session_t *s);
 ORCA_API int orca_session_add_mixed_filament(orca_session_t *s, const int *components, const int *ratios,
                                            size_t count, int gradient, int reverse, int per_part);
 
+/** Existing mixed slot data as JSON. Null on error; copy before the next call. */
+ORCA_API const char *orca_session_mixed_filament_json(orca_session_t *s, int slot);
+/** Edit an existing mix without changing its slot/components/painting IDs.
+ * Optional integer percentages must total 100; count=0 preserves original ratios.
+ * gradient_mode: -1 preserves all gradient fields, 0 disables, 1/2 use forward/
+ * reverse native linear gradients. per_part applies only with a new linear mode. */
+ORCA_API int orca_session_update_mixed_filament(orca_session_t *s, int slot,
+    const int *ratios, size_t count, int gradient_mode, int per_part);
+
 ORCA_API int orca_session_extruder_count(orca_session_t *s);
 
 /**

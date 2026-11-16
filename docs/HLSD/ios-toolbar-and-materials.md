@@ -23,7 +23,7 @@ session was unavailable. A matching label is not evidence of interaction parity.
 | Global / Objects | Explicit target tabs; initial object layer height, walls, infill and filament overrides with reset to Global |
 | Filament colors | Native color pickers, project slots, object display colors and Filament preview default; persistent painted facet colors remain attached during live transforms; each physical slot has a grouped material preset picker; full per-slot parameter editing remains incomplete |
 | Mixed Filament | Native FilamentMixer color blending, 2/3 physical components, positive percentages totaling 100, linear height gradient/direction/per-object option |
-| Mixed custom curves | Existing core data retained on import; desktop custom curve and existing-slot editing/deletion are not exposed on mobile yet |
+| Mixed editing / custom curves | Existing slots expose proportion and linear-gradient editing with stable slot IDs. Imported custom curves and untouched ratio precision are preserved. Component replacement, curve editing and deletion remain incomplete |
 | Plugin manager | General desktop plugin runtime remains missing. Native Zmod processing is not compatibility with the 18 reported plugins |
 
 The mobile painting selector no longer cycles over only four filaments. Project
@@ -147,3 +147,14 @@ million-move range, precision transitions/reversal/clamps, accessibility steppin
 partial corner endpoints and integer/start clipping; phone tests exercise direct
 manual adjustment and adjacent-move buttons. SDK/native validation for this batch
 is pending until recorded separately.
+
+Existing mixed rows now open the proportion/linear-gradient editor. Native edits
+stage configuration, validate with validate_mixed_filament_params, and commit
+without changing component or slot IDs, model painting, preset identity or other
+process/printer/material values. Invalid edits retain the previous configuration.
+The editor preserves original ratio text when only gradient settings change and
+skips a no-op save. Imported custom curves/nonstandard ranges stay intact and
+are not replaced by the linear controls. Changing components, custom-curve
+editing and deletion remain separate work. Native cases cover invalid edit
+isolation, ratio/reverse-gradient updates, identity/process preservation and
+byte-identical retained custom curves; native execution is pending.

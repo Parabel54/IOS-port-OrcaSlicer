@@ -441,10 +441,14 @@ struct ProcessSettingsBrowser: View {
                     }
                 }
                 } else {
-                    HStack {
-                        Text("Mixed filament \(index + 1)")
-                        Spacer()
-                        Circle().fill(colorValue(hex)).frame(width: 24, height: 24)
+                    NavigationLink {
+                        MixedFilamentEditor(engine: engine, slot: index)
+                    } label: {
+                        HStack {
+                            Text("Mixed filament \(index + 1)")
+                            Spacer()
+                            Circle().fill(colorValue(hex)).frame(width: 24, height: 24)
+                        }
                     }
                 }
             }
@@ -686,6 +690,10 @@ struct ProcessSettingsBrowser: View {
 // MixedFilamentDialog; color blending and sublayer scheduling remain native C++.
 private struct MixedFilamentEditor: View {
     @ObservedObject var engine: OrcaEngine
+    var slot: Int? = nil
+    @State private var original: OrcaEngine.MixedFilamentInfo?
+    @State private var initialRatios: [Int] = []
+    @State private var loaded = false
     @Environment(\.dismiss) private var dismiss
     @State private var count = 2
     @State private var first = 0
@@ -706,11 +714,16 @@ private struct MixedFilamentEditor: View {
                     Text("Two colors").tag(2)
                     if engine.physicalFilamentIndices.count >= 3 { Text("Three colors").tag(3) }
                 }
-                component("First filament", selection: $first)
-                component("Second filament", selection: $second)
-                if count == 3 { component("Third filament", selection: $third) }
+                .disabled(slot != nil)
+                Group {
+                    component("First filament", selection: $first)
+                    component("Second filament", selection: $second)
+                    if count == 3 { component("Third filament", selection: $third) }
+                }.disabled(slot != nil)
+                if slot != nil { Text("This mix keeps its original component filaments.").font(.caption).foregroundStyle(.secondary) }
             }
             Section("Mix proportions") {
+                if slot != nil { Text("Unchanged imported proportions keep their original precision.").font(.caption).foregroundStyle(.secondary) }
                 Text("First: \(Int(firstRatio))%")
                 Slider(value: $firstRatio, in: 1...Double(count == 2 ? 99 : 98), step: 1)
                 if count == 3 {
@@ -721,27 +734,63 @@ private struct MixedFilamentEditor: View {
             }
             if count == 2 {
                 Section("Gradient") {
-                    Toggle("Blend along height", isOn: $gradient)
-                    if gradient {
-                        Toggle("Reverse direction", isOn: $reverse)
-                        Toggle("Restart for each object", isOn: $perPart)
-                        Text("The linear blend changes from 90/10 to 10/90 along the model height.")
-                            .font(.caption)
+                    if original?.customGradient == true {
+                        Text("The imported gradient is kept. Custom curve editing is not available yet.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Toggle("Blend along height", isOn: $gradient)
+                        if gradient {
+                            Toggle("Reverse direction", isOn: $reverse)
+                            Toggle("Restart for each object", isOn: $perPart)
+                            Text("The linear blend changes from 90/10 to 10/90 along the model height.")
+                                .font(.caption)
+                        }
                     }
                 }
             }
             if let error { Text(error).foregroundStyle(.red) }
-            Button("Add mixed filament") {
+            Button(slot == nil ? "Add mixed filament" : "Save changes") {
                 let components = count == 2 ? [first, second] : [first, second, third]
                 let ratios = count == 2 ? [Int(firstRatio), 100-Int(firstRatio)] :
                     [Int(firstRatio), Int(secondRatio), 100-Int(firstRatio)-Int(secondRatio)]
-                if engine.addMixedFilament(components: components, ratios: ratios,
-                    gradient: count == 2 && gradient, reverse: reverse, perPart: perPart) { dismiss() }
-                else { error = engine.lastMessage }
-            }.disabled(engine.projectFilamentColors.count >= engine.maximumPaintFilaments)
+                let ok: Bool
+                if let slot, let original {
+                    let gradientChanged = !original.customGradient && (gradient != original.gradient ||
+                        gradient && (reverse != original.reversed || perPart != original.perPart))
+                    if ratios == initialRatios && !gradientChanged { dismiss(); return }
+                    let mode: Int
+                    if original.customGradient || !gradientChanged { mode = -1 }
+                    else if !gradient { mode = 0 }
+                    else { mode = reverse ? 2 : 1 }
+                    ok = engine.updateMixedFilament(slot, ratios: ratios == initialRatios ? [] : ratios,
+                        gradientMode: mode, perPart: perPart)
+                } else {
+                    ok = engine.addMixedFilament(components: components, ratios: ratios,
+                        gradient: count == 2 && gradient, reverse: reverse, perPart: perPart)
+                }
+                if ok { dismiss() } else { error = engine.lastMessage }
+            }.disabled(slot == nil ? engine.projectFilamentColors.count >= engine.maximumPaintFilaments : original == nil)
         }
         .navigationTitle("Mixed filament")
         .onAppear {
+            guard !loaded else { return }
+            loaded = true
+            if let slot {
+                guard let info = engine.mixedFilamentInfo(slot) else { error = engine.lastMessage; return }
+                guard (2...3).contains(info.components.count), info.components.count == info.ratios.count else {
+                    error = "This mix uses unsupported component data."; return
+                }
+                original = info
+                count = info.components.count
+                first = info.components[0] - 1; second = info.components[1] - 1
+                third = info.components.count == 3 ? info.components[2] - 1 : 0
+                firstRatio = max(1, min(Double(count == 2 ? 99 : 98), (info.ratios[0] * 100).rounded()))
+                secondRatio = max(1, min(99 - firstRatio, (info.ratios[1] * 100).rounded()))
+                initialRatios = count == 2 ? [Int(firstRatio), 100 - Int(firstRatio)] :
+                    [Int(firstRatio), Int(secondRatio), 100 - Int(firstRatio) - Int(secondRatio)]
+                gradient = info.gradient; reverse = info.reversed; perPart = info.perPart
+                return
+            }
             let physical = engine.physicalFilamentIndices
             first = physical.first ?? 0
             second = physical.dropFirst().first ?? 1
@@ -751,7 +800,7 @@ private struct MixedFilamentEditor: View {
             if count == 3 { secondRatio = max(1, min(secondRatio, 99-firstRatio)) }
         }
         .onChange(of: count) { value in
-            if value == 3 {
+            if value == 3 && slot == nil {
                 firstRatio = min(firstRatio, 98)
                 secondRatio = max(1, min(secondRatio, 99-firstRatio))
                 third = engine.physicalFilamentIndices.first(where: { $0 != first && $0 != second }) ?? third
