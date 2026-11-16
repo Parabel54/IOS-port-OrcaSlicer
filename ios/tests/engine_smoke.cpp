@@ -141,7 +141,19 @@ int main(int argc, char **argv)
                     return false;
             return true;
         };
+        auto paint_mesh = [&](int state) {
+            float *positions = nullptr; uint32_t *indices = nullptr;
+            size_t vertices = 0, count = 0;
+            std::pair<std::vector<float>, std::vector<uint32_t>> result;
+            if (orca_session_export_paint_mesh(copies.get(), 0, 2, state, &positions, &vertices, &indices, &count) == 0 && vertices) {
+                result.first.assign(positions, positions + 3 * vertices);
+                result.second.assign(indices, indices + count);
+            }
+            orca_free(positions); orca_free(indices);
+            return result;
+        };
         const auto single = mesh();
+        const auto single_paint = paint_mesh(1);
         int painted = 0, after_paint = 0;
         if (!require(!single.first.empty() && orca_session_object_instance_count(copies.get(), 0) == 1 &&
                      orca_session_paint_stats(copies.get(), 0, 2, 1, &painted) == 0,
@@ -152,14 +164,40 @@ int main(int argc, char **argv)
                      orca_session_object_instance_count(copies.get(), 1) == 1,
                      "copies add instances without independent objects or neighbor changes")) return 4;
         const auto triple = mesh();
+        const auto triple_paint = paint_mesh(1);
         if (!require(triple.first.size() == single.first.size() * 3 && triple.second.size() == single.second.size() * 3,
-                     "instance mesh export includes every copy")) return 4;
+                     "instance mesh export includes every copy") ||
+            !require(!single_paint.first.empty() && triple_paint.first.size() == single_paint.first.size() * 3 &&
+                     triple_paint.second.size() == single_paint.second.size() * 3,
+                     "painted colors render on every instance")) return 4;
         for (size_t instance = 0; instance < 3; ++instance)
             for (size_t i = 0; i < single.first.size(); ++i) {
                 const float offset = i % 3 == 2 ? 0 : float(instance) * 10;
                 if (!require(std::fabs(triple.first[instance * single.first.size() + i] - single.first[i] - offset) < 0.001f,
                              "copies preserve rotated/scaled mesh and original height with desktop bed offset")) return 4;
             }
+        for (size_t instance = 0; instance < 3; ++instance)
+            for (size_t i = 0; i < single_paint.first.size(); ++i) {
+                const float offset = i % 3 == 2 ? 0 : float(instance) * 10;
+                if (!require(std::fabs(triple_paint.first[instance * single_paint.first.size() + i] - single_paint.first[i] - offset) < 0.001f,
+                             "paint overlays follow every transformed copy")) return 4;
+            }
+        std::array<float, 3> hit{};
+        for (int axis = 0; axis < 3; ++axis)
+            for (int vertex = 0; vertex < 3; ++vertex)
+                hit[axis] += triple.first[3 * triple.second[2 * single.second.size() + size_t(vertex)] + size_t(axis)] / 3;
+        for (int selected : {0, -1}) {
+            const int color = orca_max_paint_filaments();
+            int shared_faces = 0, neighbor_faces = 0;
+            if (!require(orca_session_paint_fill(copies.get(), 0, 2, 1) > 0 &&
+                         orca_session_paint_at(copies.get(), selected, hit[0], hit[1], hit[2], 2, color, 0.01f) > 0 &&
+                         orca_session_paint_stats(copies.get(), 0, 2, color, &shared_faces) == 0 && shared_faces > 0 &&
+                         orca_session_paint_stats(copies.get(), 1, 2, color, &neighbor_faces) == 0 && neighbor_faces == 0,
+                         "brush on a later copy paints its shared volume for selected and automatic picks") ||
+                !require(paint_mesh(color).second.size() == size_t(shared_faces) * 3 * 3,
+                         "one shared annotation renders on all three copies")) return 4;
+        }
+        if (!require(orca_session_paint_fill(copies.get(), 0, 2, 1) > 0, "restore shared fixture colors")) return 4;
         char override_value[32]{};
         const std::string instance_snapshot = directory + "/instances.3mf";
         if (!require(orca_session_paint_stats(copies.get(), 0, 2, 1, &after_paint) == 0 && after_paint == painted &&
@@ -815,6 +853,27 @@ int main(int argc, char **argv)
             orca_session_last_slice_stats(viewer.get(), &taken_seconds, &taken_volume, &taken_layers) != 0;
         orca_free(opened);
         if (!require(copies_invalidated, "accepted copy edit invalidates old toolpaths/statistics")) return 11;
+        for (int action : {0, 1}) {
+            if (!require(orca_session_load_gcode(viewer.get(), output.c_str()) == 0,
+                         "load preview before shared paint mutation")) return 11;
+            const int edited = action == 0 ? orca_session_paint_fill(viewer.get(), 0, 2, 1) :
+                orca_session_paint_clear(viewer.get(), 0, 2);
+            if (!require(action == 0 ? edited > 0 : edited == 0, "accept shared fill/clear paint")) return 11;
+            opened = nullptr; opened_count = 0; opened_total = 0;
+            const bool paint_invalidated = orca_session_export_preview(viewer.get(), &opened, &opened_count, &opened_total) != 0 &&
+                orca_session_last_slice_stats(viewer.get(), &taken_seconds, &taken_volume, &taken_layers) != 0;
+            orca_free(opened);
+            if (!require(paint_invalidated, "accepted painting invalidates old toolpaths/statistics")) return 11;
+        }
+        if (!require(orca_session_load_gcode(viewer.get(), output.c_str()) == 0 &&
+                     orca_session_paint_clear(viewer.get(), 0, 2) == 0 &&
+                     orca_session_paint_fill(viewer.get(), 0, 2, orca_max_paint_filaments() + 1) < 0,
+                     "empty clear and invalid color leave the previous preview intact")) return 11;
+        opened = nullptr; opened_count = 0; opened_total = 0;
+        const bool paint_preserved = orca_session_export_preview(viewer.get(), &opened, &opened_count, &opened_total) == 0 &&
+            opened_count == retained_count;
+        orca_free(opened);
+        if (!require(paint_preserved, "unchanged/rejected painting preserves processed paths")) return 11;
         diagnostic_session = session.get();
         viewer.reset();
         if (!require(owned_records[0].end_x == first_endpoint && owned_records[owned_count - 1].end_z == last_endpoint,

@@ -2829,10 +2829,13 @@ final class OrcaEngine: ObservableObject {
     }
 
     private func writeSnapshotFile(session s: OpaquePointer, prefix: String) -> URL? {
-        let url = undoDir().appendingPathComponent("\(prefix)_\(UUID().uuidString).3mf")
-        let rc = url.path.withCString { orca_session_snapshot(s, $0) }
+        // Native 3MF saving requires a model. An empty plate still needs its
+        // configuration in history, using the existing native JSON serializer.
+        let suffix = hasModel ? "3mf" : "json"
+        let url = undoDir().appendingPathComponent("\(prefix)_\(UUID().uuidString).\(suffix)")
+        let rc = url.path.withCString { hasModel ? orca_session_snapshot(s, $0) : orca_session_export_config(s, $0) }
         guard rc == 0 else { return nil }
-        // Verify non-empty file — empty 3MF means store failed silently
+        // A successful return without data cannot be used as a history entry.
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
               let size = attrs[.size] as? NSNumber, size.intValue > 64
         else {
@@ -2845,6 +2848,13 @@ final class OrcaEngine: ObservableObject {
     private func applySnapshotFile(_ url: URL) -> Bool {
         #if ORCA_LINKED
         guard let s = session else { return false }
+        if url.pathExtension == "json" {
+            guard url.path.withCString({ orca_session_load_config(s, $0) }) == 0 else { return false }
+            clearPlate()
+            readBedSize()
+            refreshObjectFilamentColors()
+            return true
+        }
         let rc = url.path.withCString { orca_session_restore_snapshot(s, $0) }
         guard rc == 0 else { return false }
         let n = Int(orca_session_object_count(s))
@@ -2872,7 +2882,7 @@ final class OrcaEngine: ObservableObject {
     func pushUndoSnapshot(label: String = "edit") {
         guard requireIdleSession() else { return }
         #if ORCA_LINKED
-        guard let s = session, hasModel else { return }
+        guard let s = session else { return }
         guard let url = writeSnapshotFile(session: s, prefix: "undo") else {
             // Don't wipe existing stack if this push fails
             return
@@ -2900,25 +2910,24 @@ final class OrcaEngine: ObservableObject {
             lastMessage = "Wait for the current operation to finish"
             return
         }
-        guard let s = session, let entry = undoStack.popLast() else {
+        guard let s = session, let entry = undoStack.last else {
             lastMessage = "Nothing to undo"
             refreshUndoFlags()
             return
         }
-        // Save current as redo (post-action state)
-        if hasModel, let redoURL = writeSnapshotFile(session: s, prefix: "redo") {
-            redoStack.append(UndoEntry(url: redoURL, label: entry.label))
+        // Commit stack changes only after capture and restore both succeed.
+        guard let redoURL = writeSnapshotFile(session: s, prefix: "redo") else {
+            lastMessage = String(localized: "Could not save the current state for Redo. The model was not changed.")
+            return
         }
         if applySnapshotFile(entry.url) {
+            undoStack.removeLast()
+            redoStack.append(UndoEntry(url: redoURL, label: entry.label))
             lastMessage = "Undo · \(entry.label) · \(undoStack.count) left"
+            try? FileManager.default.removeItem(at: entry.url)
         } else {
             lastMessage = orca_session_last_error(s).map { String(cString: $0) } ?? "undo failed"
-            // Put entry back if restore failed
-            undoStack.append(entry)
-        }
-        // Drop used undo file only after successful restore
-        if lastMessage.hasPrefix("Undo") {
-            try? FileManager.default.removeItem(at: entry.url)
+            try? FileManager.default.removeItem(at: redoURL)
         }
         refreshUndoFlags()
         #endif
@@ -2930,22 +2939,83 @@ final class OrcaEngine: ObservableObject {
             lastMessage = "Wait for the current operation to finish"
             return
         }
-        guard let s = session, let entry = redoStack.popLast() else {
+        guard let s = session, let entry = redoStack.last else {
             lastMessage = "Nothing to redo"
             refreshUndoFlags()
             return
         }
-        if hasModel, let undoURL = writeSnapshotFile(session: s, prefix: "undo") {
-            undoStack.append(UndoEntry(url: undoURL, label: entry.label))
+        guard let undoURL = writeSnapshotFile(session: s, prefix: "undo") else {
+            lastMessage = String(localized: "Could not save the current state for Undo. The model was not changed.")
+            return
         }
         if applySnapshotFile(entry.url) {
+            redoStack.removeLast()
+            undoStack.append(UndoEntry(url: undoURL, label: entry.label))
             lastMessage = "Redo · \(entry.label)"
             try? FileManager.default.removeItem(at: entry.url)
         } else {
             lastMessage = orca_session_last_error(s).map { String(cString: $0) } ?? "redo failed"
-            redoStack.append(entry)
+            try? FileManager.default.removeItem(at: undoURL)
         }
         refreshUndoFlags()
+        #endif
+    }
+
+    /// Full-app integration fixture using real native history snapshots.
+    @MainActor
+    func instanceHistorySmokeTest() async -> String {
+        #if ORCA_LINKED
+        guard requireIdleSession(), hasModel, objectCount == 1, undoStack.isEmpty, redoStack.isEmpty,
+              let originalCopies = objectInstanceCounts.first else {
+            return "FAIL: instance history fixture needs a fresh single-object plate"
+        }
+        let selection = selectedObjectIndex
+        defer { selectedObjectIndex = selection }
+        selectedObjectIndex = 0
+        let originalHeight = getOption("layer_height") ?? ""
+        guard await editMesh(.copies(0)), !hasModel, canUndo else { return "FAIL: zero copies did not create undo" }
+        setOption("layer_height", value: "0.31")
+        undo()
+        guard hasModel, objectInstanceCounts == [originalCopies], getOption("layer_height") == originalHeight, canRedo else {
+            return "FAIL: Undo did not restore the deleted object/settings or preserve Redo"
+        }
+        redo()
+        guard !hasModel, objectCount == 0, getOption("layer_height") == "0.31", canUndo else {
+            return "FAIL: Redo did not restore the empty plate and its own settings"
+        }
+        guard addPrimitive(kind: 0, x: 5, y: 5, z: 5), objectCount == 1 else { return "FAIL: add on empty plate" }
+        undo()
+        guard !hasModel, canRedo else { return "FAIL: adding the first primitive is not undoable" }
+        redo()
+        guard hasModel, objectInstanceCounts == [1] else { return "FAIL: first primitive Redo" }
+        undo()
+        undo()
+        guard hasModel, objectInstanceCounts == [originalCopies], getOption("layer_height") == originalHeight else {
+            return "FAIL: history did not return to the imported model"
+        }
+        selectedObjectIndex = 0
+        let depths = (undoStack.count, redoStack.count)
+        guard await editMesh(.copies(originalCopies)), await editMesh(.copies(-1)) == false,
+              undoStack.count == depths.0, redoStack.count == depths.1 else {
+            return "FAIL: unchanged/invalid copies changed history"
+        }
+        for entry in undoStack + redoStack { try? FileManager.default.removeItem(at: entry.url) }
+        undoStack.removeAll(); redoStack.removeAll(); refreshUndoFlags()
+        let broken = undoDir().appendingPathComponent("invalid-history-\(UUID().uuidString).json")
+        do { try Data("invalid config".utf8).write(to: broken) }
+        catch { return "FAIL: cannot create history failure fixture" }
+        defer { try? FileManager.default.removeItem(at: broken) }
+        undoStack.append(UndoEntry(url: broken, label: "invalid-test")); refreshUndoFlags()
+        let revision = meshRevision
+        undo()
+        guard undoStack.count == 1, redoStack.isEmpty, hasModel, meshRevision == revision,
+              getOption("layer_height") == originalHeight, objectInstanceCounts == [originalCopies] else {
+            return "FAIL: failed restore changed the model/settings/history"
+        }
+        undoStack.removeAll(); refreshUndoFlags()
+        return "PASS: native instance deletion, empty-plate config Undo/Redo, first primitive history, no-op/invalid edits and failed restore"
+        #else
+        return "FAIL: engine not linked"
         #endif
     }
 

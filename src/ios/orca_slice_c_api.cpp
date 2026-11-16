@@ -4193,11 +4193,11 @@ bool paint_state_valid(int paint_kind, int state)
     return false;
 }
 
-Transform3d volume_world_matrix(const ModelObject *obj, const ModelVolume *vol)
+Transform3d volume_world_matrix(const ModelObject *obj, const ModelVolume *vol, size_t instance = 0)
 {
     Transform3d inst = Transform3d::Identity();
-    if (obj && !obj->instances.empty() && obj->instances[0])
-        inst = obj->instances[0]->get_transformation().get_matrix();
+    if (obj && instance < obj->instances.size() && obj->instances[instance])
+        inst = obj->instances[instance]->get_transformation().get_matrix();
     return inst * vol->get_matrix();
 }
 
@@ -4348,56 +4348,65 @@ int orca_session_paint_at(
         const EnforcerBlockerType ebt = EnforcerBlockerType(state);
         int total = 0;
 
-        auto paint_object = [&](ModelObject *obj) -> int {
+        auto paint_object = [&](ModelObject *obj, size_t instance) -> int {
             if (!obj)
                 return 0;
             int n = 0;
             for (ModelVolume *vol : obj->volumes) {
                 if (!vol || !vol->is_model_part())
                     continue;
-                const Transform3d world = volume_world_matrix(obj, vol);
+                const Transform3d world = volume_world_matrix(obj, vol, instance);
                 n += paint_volume_near_point(vol, world, hit, radius_mm, paint_kind, ebt);
             }
             return n;
         };
 
-        if (object_index >= 0) {
-            if (object_index >= int(s->model.objects.size())) {
-                s->set_error("paint_at: bad object index");
-                return -3;
-            }
-            total = paint_object(s->model.objects[size_t(object_index)]);
+        if (object_index >= int(s->model.objects.size())) {
+            s->set_error("paint_at: bad object index");
+            return -3;
+        }
+        ModelObject *selected = object_index >= 0 ? s->model.objects[size_t(object_index)] : nullptr;
+        if (selected && selected->instances.size() <= 1) {
+            total = paint_object(selected, 0);
         } else {
-            // Auto: paint only the object whose volume is closest to the hit
+            // Annotations are shared by instances. Resolve the touched copy in
+            // world space before applying the brush in its volume coordinates.
             int best_obj = -1;
+            size_t best_instance = 0;
             float best_d2 = std::numeric_limits<float>::max();
-            for (int oi = 0; oi < int(s->model.objects.size()); ++oi) {
+            const int first = object_index >= 0 ? object_index : 0;
+            const int end = object_index >= 0 ? object_index + 1 : int(s->model.objects.size());
+            for (int oi = first; oi < end; ++oi) {
                 ModelObject *obj = s->model.objects[size_t(oi)];
                 if (!obj)
                     continue;
                 for (ModelVolume *vol : obj->volumes) {
                     if (!vol || !vol->is_model_part())
                         continue;
-                    const Transform3d world = volume_world_matrix(obj, vol);
                     const indexed_triangle_set &its = vol->mesh().its;
-                    for (const auto &face : its.indices) {
-                        const Vec3f c =
-                            (its.vertices[size_t(face[0])]
-                             + its.vertices[size_t(face[1])]
-                             + its.vertices[size_t(face[2])])
-                            / 3.f;
-                        const Vec3f cw = (world * c.cast<double>()).cast<float>();
-                        const float d2 = (cw - hit).squaredNorm();
-                        if (d2 < best_d2) {
-                            best_d2 = d2;
-                            best_obj = oi;
+                    for (size_t instance = 0; instance < std::max(size_t(1), obj->instances.size()); ++instance) {
+                        const Transform3d world = volume_world_matrix(obj, vol, instance);
+                        for (const auto &face : its.indices) {
+                            const Vec3f c =
+                                (its.vertices[size_t(face[0])]
+                                 + its.vertices[size_t(face[1])]
+                                 + its.vertices[size_t(face[2])]) / 3.f;
+                            const Vec3f cw = (world * c.cast<double>()).cast<float>();
+                            const float d2 = (cw - hit).squaredNorm();
+                            if (d2 < best_d2) {
+                                best_d2 = d2;
+                                best_obj = oi;
+                                best_instance = instance;
+                            }
                         }
                     }
                 }
             }
             if (best_obj >= 0)
-                total = paint_object(s->model.objects[size_t(best_obj)]);
+                total = paint_object(s->model.objects[size_t(best_obj)], best_instance);
         }
+        if (total > 0)
+            invalidate_object_slice(s);
         return total;
     } catch (const std::exception &ex) {
         s->set_error(std::string("paint_at: ") + ex.what());
@@ -4429,6 +4438,8 @@ int orca_session_paint_fill(
                 continue;
             total += paint_volume_all(vol, paint_kind, ebt);
         }
+        if (total > 0)
+            invalidate_object_slice(s);
         return total;
     } catch (const std::exception &ex) {
         s->set_error(std::string("paint_fill: ") + ex.what());
@@ -4446,14 +4457,17 @@ int orca_session_paint_clear(
         return -2;
     }
     try {
-        auto clear_obj = [paint_kind](ModelObject *obj) {
+        bool changed = false;
+        auto clear_obj = [paint_kind, &changed](ModelObject *obj) {
             if (!obj)
                 return;
             for (ModelVolume *vol : obj->volumes) {
                 if (!vol)
                     continue;
-                if (FacetsAnnotation *ann = paint_annotation_for(vol, paint_kind))
+                if (FacetsAnnotation *ann = paint_annotation_for(vol, paint_kind); ann && !ann->empty()) {
                     ann->reset();
+                    changed = true;
+                }
             }
         };
         if (object_index < 0) {
@@ -4464,6 +4478,8 @@ int orca_session_paint_clear(
                 return -3;
             clear_obj(s->model.objects[size_t(object_index)]);
         }
+        if (changed)
+            invalidate_object_slice(s);
         return 0;
     } catch (const std::exception &ex) {
         s->set_error(std::string("paint_clear: ") + ex.what());
@@ -4540,12 +4556,17 @@ int orca_session_export_paint_mesh(
                 FacetsAnnotation *ann = paint_annotation_for(vol, paint_kind);
                 if (!ann || ann->empty())
                     continue;
-                const Transform3d world = volume_world_matrix(obj, vol);
+                // Extract shared annotations once, then render their geometry
+                // through every instance transform, as with the prepare mesh.
+                auto append_instances = [&](const indexed_triangle_set &its) {
+                    for (size_t instance = 0; instance < std::max(size_t(1), obj->instances.size()); ++instance)
+                        append_its_world(its, volume_world_matrix(obj, vol, instance), pos, idx);
+                };
                 if (state >= 0) {
                     indexed_triangle_set its =
                         ann->get_facets(*vol, EnforcerBlockerType(state));
                     if (!its.indices.empty())
-                        append_its_world(its, world, pos, idx);
+                        append_instances(its);
                 } else {
                     const int max_s = (paint_kind == 2)
                         ? int(EnforcerBlockerType::ExtruderMax)
@@ -4556,7 +4577,7 @@ int orca_session_export_paint_mesh(
                         indexed_triangle_set its =
                             ann->get_facets(*vol, EnforcerBlockerType(st));
                         if (!its.indices.empty())
-                            append_its_world(its, world, pos, idx);
+                            append_instances(its);
                     }
                 }
             }

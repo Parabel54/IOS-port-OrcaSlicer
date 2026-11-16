@@ -47,3 +47,8 @@ and preset ownership flag, and compares native bounds, settings, paint counts an
 host history state. Every blocked action must leave them intact; a valid edit
 must work when ownership is released. This deterministic fixture tests command
 guards without intentionally racing native code.
+
+A separate full-app history receipt exercises native instance deletion through
+Undo/Redo, empty-plate settings, first-primitive history and failed snapshot
+restoration. It uses real native serialization and public host commands; a
+source/SDK check alone does not execute this fixture.

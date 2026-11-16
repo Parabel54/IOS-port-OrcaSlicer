@@ -3615,10 +3615,10 @@ struct OrcaRootView: View {
     }
 
     private var processSheet: AnyView {
-        AnyView(ProcessSettingsBrowser(engine: engine) {
+        AnyView(ProcessSettingsBrowser(engine: engine, onChanged: {
             syncProcessFieldsFromEngine()
             status = engine.lastMessage
-        })
+        }))
     }
 
     private func syncProcessFieldsFromEngine() {
@@ -3853,6 +3853,11 @@ struct OrcaRootView: View {
             else { mainTab = .prepare }
             if ProcessInfo.processInfo.arguments.contains("--test-document-import"), success,
                engine.hasModel, engine.objectCount == 1 {
+                if ProcessInfo.processInfo.arguments.contains("--test-instance-history") {
+                    try? await engine.instanceHistorySmokeTest().write(
+                        to: FileManager.default.temporaryDirectory.appendingPathComponent("orca-instance-history-smoke.txt"),
+                        atomically: true, encoding: .utf8)
+                }
                 if ProcessInfo.processInfo.arguments.contains("--test-session-gate") {
                     try? engine.sessionGateSmokeTest().write(
                         to: FileManager.default.temporaryDirectory.appendingPathComponent("orca-session-gate-smoke.txt"),

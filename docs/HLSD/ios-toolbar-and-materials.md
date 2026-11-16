@@ -54,6 +54,20 @@ snapshot/undo dispatcher. Unchanged counts preserve preview and undo history.
 Counts and transforms persist in native 3MF; individual-instance tree selection
 and gizmos remain distinct from this object-level count editor.
 
+History stores populated plates as native 3MF and empty plates as native JSON
+configuration snapshots. This preserves Redo after deleting the final object,
+including settings edited on the empty plate, and makes the first primitive
+addition undoable. Undo/Redo capture the outgoing state before restoring the
+target and commit their stack changes only after both operations succeed.
+Failed captures/restores retain the previous history entries.
+
+Paint annotations belong to shared model volumes. Overlay export transforms each
+color/annotation through every instance, while annotation counts remain per
+volume. Brush hits on objects with several instances select the closest touched
+copy before mapping the world-space brush into its volumes. The one-instance
+selected-object path avoids that extra search. Accepted paint mutations clear
+derived native toolpaths and statistics; reads do not alter the model.
+
 Synchronous model, painting, plate, calibration and global-setting entry points
 also check import/slice/preset ownership themselves. Disabled controls alone do
 not serialize keyboard commands or notification handlers. Accepted global edits

@@ -89,7 +89,7 @@ ios_test_run 240 xcrun simctl install "$DEVICE" "$APP_BUNDLE"
 APP_DATA="$(xcrun simctl get_app_container "$DEVICE" com.orcaslicer.ios data)"
 mkdir -p "$APP_DATA/Documents"
 cp "$TEST_DIR/orca-project.3mf" "$APP_DATA/Documents/ios-import-smoke.3mf"
-ios_test_run 90 xcrun simctl launch "$DEVICE" com.orcaslicer.ios --test-view-metadata --test-document-import --test-session-gate \
+ios_test_run 90 xcrun simctl launch "$DEVICE" com.orcaslicer.ios --test-view-metadata --test-document-import --test-session-gate --test-instance-history \
   | tee "$TEST_DIR/app-launch.log"
 # Wait for the app's full profile startup, not just its initial process spawn.
 APP_DATA="$(xcrun simctl get_app_container "$DEVICE" com.orcaslicer.ios data)"
@@ -112,6 +112,10 @@ ownership = Path(sys.argv[1]) / 'tmp/orca-session-gate-smoke.txt'
 if not ownership.is_file() or not ownership.read_text().startswith('PASS:'):
     raise SystemExit('Public session ownership test failed or did not run')
 print(ownership.read_text())
+history = Path(sys.argv[1]) / 'tmp/orca-instance-history-smoke.txt'
+if not history.is_file() or not history.read_text().startswith('PASS:'):
+    raise SystemExit('Native instance/empty-plate Undo/Redo test failed or did not run')
+print(history.read_text())
 camera = Path(sys.argv[1]) / 'tmp/orca-camera-smoke.txt'
 if not camera.is_file() or not camera.read_text().startswith('PASS:'):
     raise SystemExit('Camera pan/orbit/zoom smoke test failed')

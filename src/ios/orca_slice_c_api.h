@@ -752,7 +752,8 @@ ORCA_API int orca_session_paint_stats(
     int *painted_count);
 
 /**
- * Export painted facets as world-space mesh for SceneKit overlay.
+ * Export shared painted facets through every instance's world transform for
+ * the SceneKit overlay. paint_stats counts annotations once per model volume.
  * state: specific EnforcerBlockerType value, or -1 for any non-NONE.
  * Free *out_positions / *out_indices with orca_free().
  * @return 0 on success (empty mesh is still 0 with counts 0)
