@@ -94,10 +94,21 @@ typedef struct orca_preview_segment {
  * Preview from the last successful slice's official GCodeProcessorResult.
  * Includes every physical move and preview event; no layer or path sampling.
  * count equals total_count. Free *segments with orca_free().
- * Returns an error if no successful slice is available.
+ * Returns an error if no successful slice is available or its buffers were transferred.
  */
 ORCA_API int orca_session_export_preview(
     orca_session_t *s, orca_preview_segment_t **segments, size_t *count, size_t *total_count);
+
+/** Owns the processed record vector independently of the originating session. */
+typedef struct orca_preview_buffer orca_preview_buffer_t;
+/** Transfer every processed record without copying. Null on failure; outputs are
+ * cleared. The returned data stays valid until buffer_destroy, including across
+ * later session edits, reloads or destruction. Never pass data to orca_free.
+ * Caller serializes session access. Stats/metadata stay in the session; another
+ * preview export/take requires reloading or slicing G-code again. */
+ORCA_API orca_preview_buffer_t *orca_session_take_preview(orca_session_t *s,
+    const orca_preview_segment_t **data, size_t *count, size_t *total_count);
+ORCA_API void orca_preview_buffer_destroy(orca_preview_buffer_t *buffer);
 
 /** Open a text G-code through the desktop GCodeProcessor without changing the
  * model or selected presets. Failure retains the prior preview. File bytes are
@@ -180,6 +191,9 @@ ORCA_API const char *orca_session_post_process_script(orca_session_t *s, int ind
 /** Desktop presentation: scope 0=process, 1=filament, 2=printer, -1=internal.
  * Returns the minimum ConfigOptionMode, or -1 for hidden/read-only options. */
 ORCA_API int orca_session_option_presentation(const char *key, int *scope_out);
+
+/** Native option explanation; borrowed process-lifetime text, null for missing/empty help. */
+ORCA_API const char *orca_option_tooltip(const char *key);
 
 /** Enum serialize keys / labels for coEnum options (from ConfigOptionDef). */
 ORCA_API int orca_session_option_enum_count(orca_session_t *s, const char *key);

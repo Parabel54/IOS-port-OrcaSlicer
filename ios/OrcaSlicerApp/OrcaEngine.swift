@@ -2016,6 +2016,15 @@ final class OrcaEngine: ObservableObject {
         #endif
     }
 
+    /// Read help lazily instead of retaining every desktop tooltip in the catalog.
+    func optionHelp(_ key: String) -> String? {
+        #if ORCA_LINKED
+        return key.withCString { orca_option_tooltip($0).map { String(cString: $0) } }
+        #else
+        return nil
+        #endif
+    }
+
     /// Load enum serialize keys for one option (call when user expands an enum row).
     func enumChoices(for key: String) -> [ProcessEnumChoice] {
         #if ORCA_LINKED
@@ -2436,12 +2445,12 @@ final class OrcaEngine: ObservableObject {
         }
         let fileDensities = metadata?.filament_densities ?? []
         let filamentDensities = fileDensities.isEmpty ? densities : fileDensities
-        var segments: UnsafeMutablePointer<orca_preview_segment_t>?
+        var segments: UnsafePointer<orca_preview_segment_t>?
         var count = 0
         var totalCount = 0
-        if orca_session_export_preview(session, &segments, &count, &totalCount) == 0,
-           let segments {
-            defer { orca_free(segments) }
+        if let owner = orca_session_take_preview(session, &segments, &count, &totalCount) {
+            defer { orca_preview_buffer_destroy(owner) }
+            guard let segments else { return nil }
             let defW = defaultWidth
             let records = UnsafeBufferPointer(start: segments, count: count)
             var paths: [GCodePathGeometry.Segment] = []

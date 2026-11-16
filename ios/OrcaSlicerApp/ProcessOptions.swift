@@ -241,6 +241,7 @@ private struct PresetSelectionList: View {
 }
 
 struct ProcessSettingsBrowser: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @ObservedObject var engine: OrcaEngine
     var onChanged: (() -> Void)?
     var onClose: (() -> Void)?
@@ -256,6 +257,7 @@ struct ProcessSettingsBrowser: View {
     @State private var categoryFilter = ""
     @State private var draftValues: [String: String] = [:]
     @State private var applyError: String?
+    @State private var helpEntry: ConfigOptionEntry?
     @State private var isLoading = true
 
     private let themeBg = Color(red: 0x2D / 255.0, green: 0x2D / 255.0, blue: 0x31 / 255.0)
@@ -417,6 +419,24 @@ struct ProcessSettingsBrowser: View {
             .onChange(of: engine.selectedPrinter) { _ in reload() }
             .onChange(of: engine.selectedFilament) { _ in reload() }
             .onChange(of: engine.selectedProcess) { _ in reload() }
+            .sheet(item: $helpEntry) { entry in
+                NavigationStack {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 16) {
+                            Text(entry.label).font(.title2.weight(.semibold))
+                            Text(engine.optionHelp(entry.key) ?? "This setting has no additional description.")
+                                .textSelection(.enabled)
+                            if objectScope {
+                                Text("Changes here apply only to the selected object.").font(.callout).foregroundStyle(.secondary)
+                            }
+                        }.frame(maxWidth: .infinity, alignment: .leading).padding()
+                    }
+                    .navigationTitle("Setting help").navigationBarTitleDisplayMode(.inline)
+                    .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { helpEntry = nil } } }
+                }
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+            }
             .alert("Save preset as", isPresented: $savePreset) {
                 TextField("Preset name", text: $saveName)
                 Button("Save") {
@@ -580,21 +600,32 @@ struct ProcessSettingsBrowser: View {
         .buttonStyle(.plain)
     }
 
-    @ViewBuilder
+    private func optionLabel(_ entry: ConfigOptionEntry) -> some View {
+        Text(entry.label).font(.system(size: 14, weight: .semibold))
+            .foregroundStyle(themeText).lineLimit(3)
+    }
+
+    private func helpButton(_ entry: ConfigOptionEntry) -> some View {
+        Button { helpEntry = entry } label: {
+            Image(systemName: "questionmark.circle").frame(width: 44, height: 44)
+        }.accessibilityLabel("Help for " + entry.label)
+    }
+
     private func optionRow(_ entry: ConfigOptionEntry) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(entry.label)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(themeText)
-                    .lineLimit(2)
-                Spacer()
-                if !entry.sidetext.isEmpty {
-                    Text(entry.sidetext)
-                        .font(.system(size: 11))
-                        .foregroundStyle(themeMuted)
+        let inline = !dynamicTypeSize.isAccessibilitySize &&
+            entry.type != .string && entry.type != .other && entry.value.count <= 24
+        return VStack(alignment: .leading, spacing: 4) {
+            if inline {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        optionLabel(entry).frame(minWidth: 80, alignment: .leading)
+                        Spacer(minLength: 0)
+                        optionValue(entry, inline: true).frame(width: 150)
+                        helpButton(entry)
+                    }
+                    stackedOption(entry)
                 }
-            }
+            } else { stackedOption(entry) }
             if objectScope {
                 let overridden = engine.getObjectOption(index: engine.selectedObjectIndex, key: entry.key) != nil
                 HStack {
@@ -615,79 +646,92 @@ struct ProcessSettingsBrowser: View {
                     .foregroundStyle(themeMuted)
                     .lineLimit(1)
             }
+        }
+        // Independent controls must not inherit List's row-wide button action.
+        .buttonStyle(.borderless)
+        .padding(.vertical, 2)
+        .listRowBackground(themePanel)
+    }
 
-            if entry.key == "default_filament_colour" {
-                ColorPicker("Default color", selection: Binding(get: {
-                    colorValue(draftValue(entry))
-                }, set: { color in
-                    let hex = colorHex(color)
-                    apply(entry.key, value: hex)
-                    _ = engine.setProjectFilamentColor(0, hex: hex)
-                }), supportsOpacity: false)
-            } else {
+    private func stackedOption(_ entry: ConfigOptionEntry) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                optionLabel(entry)
+                Spacer()
+                helpButton(entry)
+            }
+            optionValue(entry, inline: false)
+        }
+    }
+
+    @ViewBuilder
+    private func optionValue(_ entry: ConfigOptionEntry, inline: Bool) -> some View {
+        HStack(spacing: 4) {
+            valueControl(entry, inline: inline)
+            if !entry.sidetext.isEmpty {
+                Text(entry.sidetext).font(.system(size: 11)).foregroundStyle(themeMuted)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func valueControl(_ entry: ConfigOptionEntry, inline: Bool) -> some View {
+        if entry.key == "default_filament_colour" {
+            ColorPicker("Default color", selection: Binding(get: {
+                colorValue(draftValue(entry))
+            }, set: { color in
+                let hex = colorHex(color)
+                apply(entry.key, value: hex)
+                _ = engine.setProjectFilamentColor(0, hex: hex)
+            }), supportsOpacity: false)
+            .labelsHidden().accessibilityLabel(entry.label)
+        } else {
             switch entry.type {
             case .bool where entry.value.contains(",") || entry.value.contains(";") || entry.value == "nil":
                 // Vector and nullable values must not be collapsed by a single
                 // toggle: each entry can belong to a different extruder.
-                scalarEditor(entry)
+                scalarEditor(entry, inline: inline)
             case .bool:
                 Toggle(isOn: Binding(
                     get: {
-                        let v = (draftValue(entry)).lowercased()
+                        let v = draftValue(entry).lowercased()
                         return v == "1" || v == "true" || v == "yes" || v == "on"
                     },
-                    set: { on in
-                        apply(entry.key, value: on ? "1" : "0")
-                    }
+                    set: { apply(entry.key, value: $0 ? "1" : "0") }
                 )) { Text(entry.label) }
                 .labelsHidden()
                 .accessibilityLabel(Text(entry.label))
                 .tint(themeAccent)
-
             case .enum:
-                // Lazy enum lists: filled on first display via engine.enumChoices
-                let choices: [ProcessEnumChoice] = {
-                    if !entry.enumChoices.isEmpty { return entry.enumChoices }
-                    return engine.enumChoices(for: entry.key)
-                }()
+                // Defer native enum materialization until the row is displayed.
+                let choices = entry.enumChoices.isEmpty ? engine.enumChoices(for: entry.key) : entry.enumChoices
                 if !choices.isEmpty && !entry.value.contains(",") && !entry.value.contains(";") {
-                    let current = draftValue(entry)
-                    let matched = ProcessOptionCatalog.match(
-                        current, in: choices, fallback: choices[0].key
-                    )
+                    let matched = ProcessOptionCatalog.match(draftValue(entry), in: choices, fallback: choices[0].key)
                     Picker(entry.label, selection: Binding(
                         get: { matched },
                         set: { apply(entry.key, value: $0) }
                     )) {
-                        ForEach(choices) { c in
-                            Text(c.label).tag(c.key)
-                        }
+                        ForEach(choices) { choice in Text(choice.label).tag(choice.key) }
                     }
                     .pickerStyle(.menu)
                     .labelsHidden()
                     .accessibilityLabel(Text(entry.label))
                     .tint(themeAccent)
-                } else {
-                    scalarEditor(entry)
-                }
-
+                } else { scalarEditor(entry, inline: inline) }
             default:
-                scalarEditor(entry)
-            }
+                scalarEditor(entry, inline: inline)
             }
         }
-        .padding(.vertical, 4)
-        .listRowBackground(themePanel)
     }
 
-    private func scalarEditor(_ entry: ConfigOptionEntry) -> some View {
+    private func scalarEditor(_ entry: ConfigOptionEntry, inline: Bool) -> some View {
         let draft = Binding<String>(
             get: { draftValue(entry) },
             set: { setDraft(entry.key, value: $0) }
         )
         return HStack(spacing: 8) {
             TextField(entry.label, text: draft, axis: .vertical)
-                .lineLimit(1...8)
+                .lineLimit(inline ? 1...1 : 1...8)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .font(.system(size: 14, design: .monospaced))

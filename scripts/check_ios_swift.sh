@@ -40,6 +40,10 @@ if [[ "$SDK" == iphonesimulator ]]; then
     "$ROOT/ios/tests/WorkspaceUITests.swift"
 fi
 
+# The combined SDK workflow already runs these host-only fixtures once. Direct
+# calls and the full native target builds keep the complete validation default.
+if [[ "${ORCA_IOS_SKIP_HOST_FIXTURES:-0}" == 1 ]]; then exit 0; fi
+
 # Run storage and credential-isolation checks with injected secrets on the Mac host.
 TEST_DIR="$(mktemp -d)"
 trap 'rm -rf "$TEST_DIR"' EXIT

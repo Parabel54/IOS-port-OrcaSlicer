@@ -276,3 +276,48 @@ painting separately from camera math and logs failed camera assertion locations;
 full-app smoke coverage retains the combined checks by default. The receipt gate
 also independently requires every named test to be boolean true and the receipt
 source to equal the checked-out commit; a summary flag cannot override failures.
+
+
+Settings rows now open the native PrintConfig explanation in a scrollable help
+sheet with selectable text and a clear Done action. Help is fetched lazily, rather
+than retaining the entire tooltip catalog. Global and Objects share these help
+controls. Row buttons use borderless styling so tapping Apply, reset or help
+cannot trigger every button in a SwiftUI List row. The native metadata lookup has
+missing-key/null coverage; Apple SDK/UI execution remains pending.
+
+
+A fresh visual comparison used the official wiki's `images/GUI/full-sidebar.png`
+and `process-preset-full.png` (static documentation images, not a live desktop
+session). The desktop places common labels, values and units on one row. Mobile
+now uses that compact arrangement for simple controls when it fits, with a stacked
+fallback for narrow widths, long/vector/string values and accessibility text.
+The same value editor is reused in both arrangements; no extra settings/control
+instances are shown. Long explanations stay in help sheets. Apple layout/touch
+acceptance remains pending.
+
+
+The host now consumes processed records through an explicit owned-buffer transfer.
+The native vector moves into a small opaque handle and is freed after conversion;
+Swift no longer requests a full C-array copy while the original native vector
+remains cached. Every original record is retained during conversion, and session
+statistics/metadata remain available. A consumed cache reports an error instead
+of an empty successful export; reload/slice repopulates it. The existing copying
+API remains available to other callers. Native ownership cases cover second-take
+failure, cleared outputs, retained stats/metadata, reload and buffer lifetime past
+session mutation/destruction. Native execution and physical peak-memory profiling
+remain pending; no measured memory reduction is claimed yet.
+
+
+SDK61 never obtained a hosted runner: both SDK jobs were cancelled after fifteen
+minutes with the annotation “The job was not acquired by Runner of type hosted
+even after multiple attempts.” Its renderer was skipped. This is not source or
+runtime validation, and the camera diagnosis still requires a runnable job.
+
+
+The fast validation workflow now keeps device type checking, simulator/UI-test
+source checking and the standalone graphics step on one acquired Mac, instead of
+requesting three separate runners. They remain separate reported steps; SDK
+failures fail the job and prevent graphics acceptance. Mac-only fixtures run
+once; direct script/native-build invocations keep their full default checks.
+This addresses the observed runner-acquisition failures without changing slicer
+code, lowering assertions or promoting queued/cancelled jobs to passes.

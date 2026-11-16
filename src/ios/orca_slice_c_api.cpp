@@ -74,6 +74,10 @@
 using namespace Slic3r;
 namespace fs = boost::filesystem;
 
+struct orca_preview_buffer {
+    std::vector<orca_preview_segment_t> segments;
+};
+
 struct orca_session {
     std::string resources_path;
     std::string data_dir_path;
@@ -787,7 +791,7 @@ int orca_session_export_preview(orca_session_t *s, orca_preview_segment_t **segm
     if (!s->has_slice_stats)
         return -2;
     if (s->preview_segments.empty())
-        return 0;
+        return s->preview_total_segments > 0 ? -4 : 0; // Explicitly transferred, not an empty job.
     const size_t bytes = s->preview_segments.size() * sizeof(orca_preview_segment_t);
     auto *copy = static_cast<orca_preview_segment_t *>(std::malloc(bytes));
     if (!copy)
@@ -797,6 +801,31 @@ int orca_session_export_preview(orca_session_t *s, orca_preview_segment_t **segm
     *count = s->preview_segments.size();
     *total_count = s->preview_total_segments;
     return 0;
+}
+
+orca_preview_buffer_t *orca_session_take_preview(orca_session_t *s,
+    const orca_preview_segment_t **data, size_t *count, size_t *total_count)
+{
+    if (data) *data = nullptr;
+    if (count) *count = 0;
+    if (total_count) *total_count = 0;
+    if (!s || !data || !count || !total_count || !s->has_slice_stats || s->preview_segments.empty())
+        return nullptr;
+    try {
+        // Allocate the small owner before touching the session. Moving its
+        // vector avoids both a full export copy and a retained native cache.
+        auto buffer = std::make_unique<orca_preview_buffer>();
+        buffer->segments.swap(s->preview_segments);
+        *data = buffer->segments.data();
+        *count = buffer->segments.size();
+        *total_count = s->preview_total_segments;
+        return buffer.release();
+    } catch (...) { return nullptr; }
+}
+
+void orca_preview_buffer_destroy(orca_preview_buffer_t *buffer)
+{
+    delete buffer;
 }
 
 const char *orca_preview_role_name(int role)
@@ -1112,6 +1141,12 @@ int orca_session_option_info(
         s->set_error("option_info: unknown error");
         return -2;
     }
+}
+
+const char *orca_option_tooltip(const char *key)
+{
+    const ConfigOptionDef *def = lookup_option_def(key);
+    return def && !def->tooltip.empty() ? def->tooltip.c_str() : nullptr;
 }
 
 int orca_session_post_process_count(orca_session_t *s)

@@ -107,6 +107,9 @@ int main(int argc, char **argv)
                      std::string(value) == "1", "3MF snapshot retains object overrides")) return 4;
         std::printf("PASS: native object setting ownership, isolation, strict edits, reset and 3MF persistence\n");
     }
+    if (!require(orca_option_tooltip("layer_height") && std::string(orca_option_tooltip("layer_height")).size() > 20 &&
+                 !orca_option_tooltip("not_a_setting") && !orca_option_tooltip(nullptr),
+                 "settings help comes from native definitions with explicit missing-key results")) return 4;
     // All desktop primitives must be real, bed-placed engine objects.
     for (int kind = 0; kind < 6; ++kind) {
         std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
@@ -558,6 +561,36 @@ int main(int argc, char **argv)
         std::ifstream after_open(output);
         const std::string untouched((std::istreambuf_iterator<char>(after_open)), std::istreambuf_iterator<char>());
         if (!require(untouched == gcode, "G-code viewer never rewrites the opened file")) return 11;
+        const orca_preview_segment_t *taken = nullptr;
+        size_t taken_count = 0, taken_total = 0;
+        if (!require(!orca_session_take_preview(nullptr, &taken, &taken_count, &taken_total) &&
+                     !taken && taken_count == 0 && taken_total == 0 &&
+                     !orca_session_take_preview(viewer.get(), nullptr, &taken_count, &taken_total),
+                     "invalid transfer arguments leave the valid session cache untouched")) return 11;
+        std::unique_ptr<orca_preview_buffer_t, decltype(&orca_preview_buffer_destroy)> owner(
+            orca_session_take_preview(viewer.get(), &taken, &taken_count, &taken_total), orca_preview_buffer_destroy);
+        if (!require(owner && taken && taken_count == retained_count && taken_total == retained_total,
+                     "ownership transfer retains every processed move without sampling")) return 11;
+        const float first_endpoint = taken[0].end_x, last_endpoint = taken[taken_count - 1].end_z;
+        const auto *owned_records = taken;
+        const size_t owned_count = taken_count;
+        opened = nullptr; opened_count = 0; opened_total = 0;
+        float taken_seconds = 0, taken_volume = 0; int taken_layers = 0;
+        if (!require(orca_session_export_preview(viewer.get(), &opened, &opened_count, &opened_total) != 0 &&
+                     !opened && opened_count == 0 && opened_total == 0,
+                     "transferred records cannot be exported again as an empty success") ||
+            !require(orca_session_last_slice_stats(viewer.get(), &taken_seconds, &taken_volume, &taken_layers) == 0 &&
+                     taken_seconds > 0 && orca_session_preview_metadata_json(viewer.get()),
+                     "ownership transfer preserves statistics and file metadata") ||
+            !require(!orca_session_take_preview(viewer.get(), &taken, &opened_count, &opened_total) &&
+                     !taken && opened_count == 0 && opened_total == 0,
+                     "second transfer fails with cleared outputs")) return 11;
+        if (!require(orca_session_load_gcode(viewer.get(), output.c_str()) == 0,
+                     "reload repopulates session records after transfer") ||
+            !require(orca_session_export_preview(viewer.get(), &opened, &opened_count, &opened_total) == 0 &&
+                     opened && opened_count == taken_count && opened_total == taken_total,
+                     "copying export remains available after reload")) return 11;
+        orca_free(opened);
         for (int action = 0; action < 2; ++action) {
             if (!require(orca_session_load_gcode(viewer.get(), output.c_str()) == 0,
                          "reload preview before object setting edit/reset")) return 11;
@@ -572,7 +605,13 @@ int main(int argc, char **argv)
             orca_free(opened);
             if (!require(cleared, "object setting edit and reset invalidate previous toolpaths and statistics")) return 11;
         }
+        diagnostic_session = session.get();
+        viewer.reset();
+        if (!require(owned_records[0].end_x == first_endpoint && owned_records[owned_count - 1].end_z == last_endpoint,
+                     "owned records survive later session edits, reloads and destruction")) return 11;
+        orca_preview_buffer_destroy(nullptr);
         std::printf("PASS: standalone G-code preview, file metadata, preserved model/presets/source and failed-open recovery\n");
+        std::printf("PASS: independent processed-preview buffer ownership and retained metadata/statistics\n");
     }
     diagnostic_session = session.get();
     // A reader failure must leave the existing model/config/preview usable.
