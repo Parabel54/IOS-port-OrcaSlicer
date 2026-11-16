@@ -623,6 +623,42 @@ int main(int argc, char **argv)
                  std::string(restored_value) == imported_ratios, "untouched precise ratios remain byte-identical") ||
         !require(orca_session_update_mixed_filament(reopened.get(), 2, mix_ratios, 2, 1, 1) == 0,
                  "restore initial mix for subsequent profile regression cases")) return 17;
+    {
+        double gradient_min = 0, gradient_max = 1;
+        orca_mixed_gradient_limits(&gradient_min, &gradient_max);
+        if (!require(gradient_min > 0 && gradient_max < 1 && gradient_min < gradient_max,
+                     "native gradient editor bounds keep both filaments flowing") ||
+            !require(orca_session_set_option(reopened.get(), "filament_mixed_gradient_curve", "\"\";\"\";\"0,0.2|0.5,0.6|1,0.8\"") == 0,
+                     "gradient control curve fixture")) return 17;
+        orca_session_get_option(reopened.get(), "filament_mixed_gradient_curve", restored_value, sizeof(restored_value));
+        const std::string gradient_curve_before = restored_value;
+        if (!require(orca_session_edit_mixed_gradient(reopened.get(), 2, nullptr, 0, nullptr, 0, 0,
+                         "0.2345,0.7654", "0,0.2|0.5,0.6|1,0.8", 0) == 0,
+                     "disable custom gradient while retaining exact range and curve") ||
+            !require(orca_session_get_option(reopened.get(), "filament_mixed_gradient_curve", restored_value, sizeof(restored_value)) == 0 &&
+                     std::string(restored_value) == gradient_curve_before, "disabled gradient retains curve bytes") ||
+            !require(orca_session_edit_mixed_gradient(reopened.get(), 2, nullptr, 0, nullptr, 0, 1,
+                         "0.2345,0.7654", "0,0.2|0.5,0.6|1,0.8", 1) == 0,
+                     "re-enable imported gradient and per-part mode")) return 17;
+        const char *gradient_info = orca_session_mixed_filament_json(reopened.get(), 2);
+        if (!require(gradient_info != nullptr, "read updated gradient")) return 17;
+        const std::string gradient_info_before = gradient_info;
+        if (!require(orca_session_edit_mixed_gradient(reopened.get(), 2, nullptr, 0, nullptr, 0, 1,
+                         "0,1", "", 0) != 0 &&
+                     orca_session_edit_mixed_gradient(reopened.get(), 2, nullptr, 0, nullptr, 0, 1,
+                         "nan,0.8", "", 0) != 0, "reject degenerate and non-finite endpoint edits")) return 17;
+        gradient_info = orca_session_mixed_filament_json(reopened.get(), 2);
+        if (!require(gradient_info && std::string(gradient_info) == gradient_info_before,
+                     "invalid gradient edits preserve previous metadata") ||
+            !require(orca_session_edit_mixed_gradient(reopened.get(), 2, nullptr, 0, nullptr, 0, 1,
+                         "0.25,0.75", "", 0) == 0,
+                     "explicit linear selection clears imported curve") ||
+            !require(orca_session_get_option(reopened.get(), "filament_mixed_gradient_range", restored_value, sizeof(restored_value)) == 0 &&
+                     std::string(restored_value).find("0.25,0.75") != std::string::npos,
+                     "custom linear endpoints reach native project metadata") ||
+            !require(orca_session_update_mixed_filament(reopened.get(), 2, mix_ratios, 2, 1, 1) == 0,
+                     "restore legacy default gradient fixture")) return 17;
+    }
     std::printf("PASS: existing mix edits, invalid-edit isolation, preset/process identity and imported curve preservation\n");
     std::printf("PASS: native mixed filament ratios, validation and gradient metadata\n");
     diagnostic_session = reopened.get();
@@ -717,6 +753,21 @@ int main(int argc, char **argv)
             !require(orca_session_paint_stats(session.get(), 0, 2, 6, &mixed_paint_after) == 0 && mixed_paint_after == mixed_paint_before,
                      "component replacement keeps painted facet IDs")) return 17;
     }
+    {
+        const int gradient_components[] = {1, 2}, gradient_weights[] = {40, 60};
+        if (!require(orca_session_add_mixed_gradient(session.get(), gradient_components, gradient_weights, 2,
+                         1, "0.2,0.8", "", 1) == 0, "create mix with custom linear endpoints")) return 17;
+        const char *created_gradient = orca_session_mixed_filament_json(session.get(), 6);
+        if (!require(created_gradient && std::string(created_gradient).find("\"range\":\"0.2,0.8\"") != std::string::npos,
+                     "new mix preserves chosen gradient range")) return 17;
+        orca_session_get_option(session.get(), "filament_is_mixed", restored_value, sizeof(restored_value));
+        const std::string flags_before_invalid = restored_value;
+        if (!require(orca_session_add_mixed_gradient(session.get(), gradient_components, gradient_weights, 2,
+                         1, "0,1", "", 0) != 0, "invalid gradient rejected before adding a slot") ||
+            !require(orca_session_get_option(session.get(), "filament_is_mixed", restored_value, sizeof(restored_value)) == 0 &&
+                     std::string(restored_value) == flags_before_invalid, "failed gradient creation preserves slot count")) return 17;
+    }
+    std::printf("PASS: custom gradient endpoints, retained curves, mode transitions and invalid-creation isolation\n");
     std::printf("PASS: component replacement, virtual variants, rejected references, count transitions and painting identity\n");
     std::printf("PASS: independent process/filament persistence, canonical names and native filament addition\n");
     std::printf("PASS: primitives, centered axis scaling, flush matrix repair and processed preview height\n");

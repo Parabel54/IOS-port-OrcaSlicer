@@ -1,6 +1,7 @@
 """Generator checks without Xcode, SDKs, or real engine archives."""
 import importlib.util
 import plistlib
+import shlex
 import shutil
 import subprocess
 import sys
@@ -151,6 +152,35 @@ class ProjectGenerationTests(unittest.TestCase):
 
 
 class ToolchainArchitectureTests(unittest.TestCase):
+    def test_mpfr_uses_the_same_target_as_gmp(self):
+        deps = SOURCE.parents[1] / 'deps'
+        with tempfile.TemporaryDirectory() as directory:
+            check = Path(directory) / 'dependencies.cmake'
+            output = Path(directory) / 'flags.txt'
+            check.write_text('set(APPLE TRUE)\nset(CMAKE_SYSTEM_NAME iOS)\n'
+                             'set(CMAKE_SYSTEM_PROCESSOR x86_64)\nset(DEP_OSX_TARGET 16.0)\n'
+                             'function(ExternalProject_Add)\nendfunction()\n'
+                             f'include("{deps}/GMP/GMP.cmake")\n'
+                             f'include("{deps}/MPFR/MPFR.cmake")\n'
+                             'file(WRITE "${OUT}" "${_gmp_ccflags}\\n${_mpfr_cflags}\\n'
+                             '${_gmp_ldflags}\\n${_mpfr_ldflags}\\n")\n')
+            for sdk, arch, minimum in (('iPhoneOS', 'arm64', '-miphoneos-version-min=16.0'),
+                                        ('iPhoneSimulator', 'arm64', '-mios-simulator-version-min=16.0'),
+                                        ('iPhoneSimulator', 'x86_64', '-mios-simulator-version-min=16.0')):
+                with self.subTest(sdk=sdk, arch=arch):
+                    sysroot = f'/SDKs/{sdk}.sdk'
+                    result = subprocess.run(['cmake', f'-DCMAKE_OSX_SYSROOT={sysroot}',
+                                             f'-DCMAKE_OSX_ARCHITECTURES={arch}', f'-DOUT={output}',
+                                             '-P', str(check)], capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    flags = [shlex.split(line) for line in output.read_text().splitlines()]
+                    for options in flags:
+                        self.assertEqual(options.count('-arch'), 1)
+                        self.assertEqual(options[options.index('-arch') + 1], arch)
+                        self.assertEqual(options[options.index('-isysroot') + 1], sysroot)
+                        self.assertIn(minimum, options)
+                        self.assertFalse(any(option.startswith('-mmacosx') for option in options))
+
     def test_device_and_both_simulator_architectures(self):
         toolchain = SOURCE.parents[1] / 'cmake/ios.toolchain.cmake'
         with tempfile.TemporaryDirectory() as directory:

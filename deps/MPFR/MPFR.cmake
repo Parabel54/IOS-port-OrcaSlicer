@@ -27,19 +27,16 @@ else ()
     # Tarball already includes ./configure — do not require autoreconf.
     set(_mpfr_cflags "${_gmp_ccflags}")
     set(_mpfr_ldflags "${CMAKE_EXE_LINKER_FLAGS}")
-    if (APPLE AND CMAKE_OSX_SYSROOT)
+    if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
+        # GMP already selects the SDK, architecture and deployment target.
+        # Adding arm64 here made MPFR's link probe incompatible with Intel
+        # simulator libgmp.a (and passed two different -arch values to clang).
+        set(_mpfr_ldflags "${_mpfr_ldflags} ${_gmp_ldflags}")
+    elseif (APPLE AND CMAKE_OSX_SYSROOT)
         set(_mpfr_cflags "${_mpfr_cflags} -isysroot ${CMAKE_OSX_SYSROOT}")
         set(_mpfr_ldflags "${_mpfr_ldflags} -isysroot ${CMAKE_OSX_SYSROOT}")
     endif ()
-    if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
-        if (CMAKE_OSX_SYSROOT MATCHES "[Ii][Pp]hone[Ss]imulator")
-            set(_mpfr_cflags "${_mpfr_cflags} -arch arm64 -mios-simulator-version-min=${DEP_OSX_TARGET}")
-            set(_mpfr_ldflags "${_mpfr_ldflags} -arch arm64 -mios-simulator-version-min=${DEP_OSX_TARGET}")
-        else ()
-            set(_mpfr_cflags "${_mpfr_cflags} -arch arm64 -miphoneos-version-min=${DEP_OSX_TARGET}")
-            set(_mpfr_ldflags "${_mpfr_ldflags} -arch arm64 -miphoneos-version-min=${DEP_OSX_TARGET}")
-        endif ()
-    elseif (APPLE AND DEP_OSX_TARGET)
+    if (APPLE AND DEP_OSX_TARGET AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
         set(_mpfr_cflags "${_mpfr_cflags} -mmacosx-version-min=${DEP_OSX_TARGET}")
     endif ()
 

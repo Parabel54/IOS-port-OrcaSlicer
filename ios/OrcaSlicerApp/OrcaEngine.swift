@@ -1669,13 +1669,37 @@ final class OrcaEngine: ObservableObject {
         return projectFilamentColors.indices.filter { $0 >= flags.count || flags[$0] != "1" }
     }
 
-    func addMixedFilament(components: [Int], ratios: [Int], gradient: Bool, reverse: Bool, perPart: Bool) -> Bool {
+    struct MixedGradientEdit {
+        let enabled: Bool
+        let range: String
+        let curve: String
+        let perPart: Bool
+    }
+
+    var mixedGradientBounds: ClosedRange<Double> {
+        #if ORCA_LINKED
+        var lower = 0.1, upper = 0.9
+        orca_mixed_gradient_limits(&lower, &upper)
+        return lower...upper
+        #else
+        return 0.1...0.9
+        #endif
+    }
+
+    func addMixedFilament(components: [Int], ratios: [Int], gradient: Bool, reverse: Bool, perPart: Bool,
+                          gradientEdit: MixedGradientEdit? = nil) -> Bool {
         #if ORCA_LINKED
         guard let session, !sessionBusy, !sliceRunning, !presetsLoading, components.count == ratios.count else { return false }
         let ids = components.map { Int32($0 + 1) }, weights = ratios.map(Int32.init)
         let result = ids.withUnsafeBufferPointer { ids in
             weights.withUnsafeBufferPointer { weights in
-                orca_session_add_mixed_filament(session, ids.baseAddress, weights.baseAddress, ids.count,
+                if let gradientEdit {
+                    return gradientEdit.range.withCString { range in gradientEdit.curve.withCString { curve in
+                        orca_session_add_mixed_gradient(session, ids.baseAddress, weights.baseAddress, ids.count,
+                            gradientEdit.enabled ? 1 : 0, range, curve, gradientEdit.perPart ? 1 : 0)
+                    } }
+                }
+                return orca_session_add_mixed_filament(session, ids.baseAddress, weights.baseAddress, ids.count,
                     gradient ? 1 : 0, reverse ? 1 : 0, perPart ? 1 : 0)
             }
         }
@@ -1695,14 +1719,6 @@ final class OrcaEngine: ObservableObject {
         let range: String
         let curve: String
         let perPart: Bool
-        var customGradient: Bool {
-            guard gradient else { return false }
-            let ends = range.split(separator: ",").compactMap { Double($0) }
-            return !curve.isEmpty || ends.count != 2 ||
-                !(abs(ends[0] - 0.9) < 0.00001 && abs(ends[1] - 0.1) < 0.00001 ||
-                  abs(ends[0] - 0.1) < 0.00001 && abs(ends[1] - 0.9) < 0.00001)
-        }
-        var reversed: Bool { (range.split(separator: ",").first.flatMap { Double($0) } ?? 0.9) < 0.5 }
     }
 
     func mixedFilamentInfo(_ slot: Int) -> MixedFilamentInfo? {
@@ -1719,11 +1735,22 @@ final class OrcaEngine: ObservableObject {
         #endif
     }
 
-    func updateMixedFilament(_ slot: Int, components: [Int]? = nil, ratios: [Int], gradientMode: Int, perPart: Bool) -> Bool {
+    func updateMixedFilament(_ slot: Int, components: [Int]? = nil, ratios: [Int], gradientMode: Int, perPart: Bool,
+                             gradientEdit: MixedGradientEdit? = nil) -> Bool {
         #if ORCA_LINKED
         guard let session, !sessionBusy, !sliceRunning, !presetsLoading else { return false }
         let weights = ratios.map(Int32.init)
         let result = weights.withUnsafeBufferPointer { weights in
+            if let gradientEdit {
+                let ids = (components ?? []).map { Int32($0 + 1) }
+                return ids.withUnsafeBufferPointer { ids in
+                    gradientEdit.range.withCString { range in gradientEdit.curve.withCString { curve in
+                        orca_session_edit_mixed_gradient(session, Int32(slot), components == nil ? nil : ids.baseAddress,
+                            ids.count, weights.baseAddress, weights.count, gradientEdit.enabled ? 1 : 0,
+                            range, curve, gradientEdit.perPart ? 1 : 0)
+                    } }
+                }
+            }
             if let components {
                 let ids = components.map { Int32($0 + 1) }
                 return ids.withUnsafeBufferPointer {

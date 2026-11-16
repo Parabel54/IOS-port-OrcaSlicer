@@ -272,6 +272,19 @@ ORCA_API int orca_session_replace_mixed_components(orca_session_t *s, int slot,
     const int *components, size_t component_count, const int *ratios, size_t ratio_count,
     int gradient_mode, int per_part);
 
+/** Native editor limits for gradient shares (both components keep flowing). */
+ORCA_API void orca_mixed_gradient_limits(double *minimum, double *maximum);
+/** Add/edit gradient fields using the existing native range/curve encodings.
+ * Empty curve selects a linear gradient. Edit can atomically include component
+ * and ratio changes; null components/count=0 and ratio_count=0 preserve them.
+ * Disabling a gradient keeps its range/curve for later re-enabling. */
+ORCA_API int orca_session_add_mixed_gradient(orca_session_t *s,
+    const int *components, const int *ratios, size_t count, int enabled,
+    const char *range, const char *curve, int per_part);
+ORCA_API int orca_session_edit_mixed_gradient(orca_session_t *s, int slot,
+    const int *components, size_t component_count, const int *ratios, size_t ratio_count,
+    int enabled, const char *range, const char *curve, int per_part);
+
 ORCA_API int orca_session_extruder_count(orca_session_t *s);
 
 /**

@@ -1545,8 +1545,30 @@ int orca_session_add_project_filament(orca_session_t *s)
     return append_project_filament(s, "#FFFFFF", false);
 }
 
-int orca_session_add_mixed_filament(orca_session_t *s, const int *components, const int *ratios,
-                                    size_t count, int gradient, int reverse, int per_part)
+struct MixedGradientEdit {
+    bool enabled;
+    const char *range;
+    const char *curve;
+    bool per_part;
+};
+
+static void write_mixed_gradient(DynamicPrintConfig &config, size_t index, const MixedGradientEdit &edit)
+{
+    config.option<ConfigOptionBools>("filament_mixed_gradient")->values.at(index) = edit.enabled;
+    config.option<ConfigOptionStrings>("filament_mixed_gradient_range")->values.at(index) = edit.range;
+    config.option<ConfigOptionStrings>("filament_mixed_gradient_curve")->values.at(index) = edit.curve;
+    config.option<ConfigOptionBools>("filament_mixed_gradient_per_part")->values.at(index) = edit.enabled && edit.per_part;
+}
+
+void orca_mixed_gradient_limits(double *minimum, double *maximum)
+{
+    if (minimum) *minimum = kGradientMinRatio;
+    if (maximum) *maximum = kGradientMaxRatio;
+}
+
+static int add_mixed_filament(orca_session_t *s, const int *components, const int *ratios,
+                             size_t count, int gradient, int reverse, int per_part,
+                             const MixedGradientEdit *gradient_edit)
 {
     if (!s || !s->preset_bundle || !components || !ratios) return -1;
     s->clear_error();
@@ -1574,6 +1596,18 @@ int orca_session_add_mixed_filament(orca_session_t *s, const int *components, co
             hex.push_back(colors[slot]); sum += ratios[i];
         }
         if (sum != 100) throw std::runtime_error("Mixed filament ratios must total 100 percent");
+        if (gradient_edit) {
+            // Validate supplied gradient data before append_project_filament
+            // changes the slot count. Component references were checked above.
+            std::vector<unsigned char> mixed_flags(count + 1, 0), gradient_flags(count + 1, 0);
+            std::vector<std::string> comp_fields(count + 1), ratio_fields(count + 1), ranges(count + 1), curves(count + 1);
+            mixed_flags.back() = 1; gradient_flags.back() = gradient_edit->enabled;
+            comp_fields.back() = count == 2 ? "1,2" : "1,2,3";
+            ratio_fields.back() = format_mixed_ratios(weights);
+            ranges.back() = gradient_edit->range; curves.back() = gradient_edit->curve;
+            const auto errors = validate_mixed_filament_params(mixed_flags, comp_fields, ratio_fields, gradient_flags, ranges, curves);
+            if (!errors.empty()) throw std::runtime_error(errors.begin()->second);
+        }
         const size_t index = colors.size();
         const std::string blended = blend_color_multi(hex, weights);
         const int result = append_project_filament(s, blended, true, ids.front() - 1);
@@ -1583,17 +1617,28 @@ int orca_session_add_mixed_filament(orca_session_t *s, const int *components, co
         project.option<ConfigOptionBools>("filament_is_mixed")->values[index] = true;
         project.option<ConfigOptionStrings>("filament_mixed_components")->values[index] = format_mixed_components(ids);
         project.option<ConfigOptionStrings>("filament_mixed_sublayer_ratios")->values[index] = format_mixed_ratios(weights);
-        project.option<ConfigOptionBools>("filament_mixed_gradient")->values[index] = gradient != 0;
-        project.option<ConfigOptionStrings>("filament_mixed_gradient_range")->values[index] =
-            gradient ? (reverse ? "0.1000,0.9000" : "0.9000,0.1000") : "";
-        project.option<ConfigOptionStrings>("filament_mixed_gradient_curve")->values[index] = "";
-        project.option<ConfigOptionBools>("filament_mixed_gradient_per_part")->values[index] = gradient && per_part;
+        const MixedGradientEdit legacy{gradient != 0, gradient ? (reverse ? "0.1000,0.9000" : "0.9000,0.1000") : "", "", gradient && per_part};
+        write_mixed_gradient(project, index, gradient_edit ? *gradient_edit : legacy);
         s->config.apply_only(project, project.keys(), true);
         return 0;
     } catch (const std::exception &ex) {
         s->set_error(std::string("mixed filament: ") + ex.what());
         return -3;
     }
+}
+
+int orca_session_add_mixed_filament(orca_session_t *s, const int *components, const int *ratios,
+                                    size_t count, int gradient, int reverse, int per_part)
+{
+    return add_mixed_filament(s, components, ratios, count, gradient, reverse, per_part, nullptr);
+}
+
+int orca_session_add_mixed_gradient(orca_session_t *s, const int *components, const int *ratios,
+                                   size_t count, int enabled, const char *range, const char *curve, int per_part)
+{
+    if (!range || !curve) return -1;
+    const MixedGradientEdit edit{enabled != 0, range, curve, per_part != 0};
+    return add_mixed_filament(s, components, ratios, count, enabled, 0, per_part, &edit);
 }
 
 static void validate_mobile_mixes(const DynamicPrintConfig &config)
@@ -1645,7 +1690,8 @@ static int assign_project_filament_material(orca_session_t *s, int slot, const c
                                            const DynamicPrintConfig *project_override, bool allow_mixed);
 
 static int edit_mixed_filament(orca_session_t *s, int slot, const int *components, size_t component_count,
-                              const int *ratios, size_t count, int gradient_mode, int per_part)
+                              const int *ratios, size_t count, int gradient_mode, int per_part,
+                              const MixedGradientEdit *gradient_edit = nullptr)
 {
     if (!s || !s->preset_bundle || (count != 0 && !ratios)) return -1;
     s->clear_error();
@@ -1671,7 +1717,7 @@ static int edit_mixed_filament(orca_session_t *s, int slot, const int *component
         if (ids.size() != previous_ids.size() && count == 0)
             throw std::runtime_error("Choose proportions for every component");
         if ((ids.size() != 2 && ids.size() != 3) || (count != 0 && count != ids.size()) ||
-            gradient_mode < -1 || gradient_mode > 2 || (gradient_mode > 0 && ids.size() != 2))
+            gradient_mode < -1 || gradient_mode > 2 || ((gradient_mode > 0 || (gradient_edit && gradient_edit->enabled)) && ids.size() != 2))
             throw std::runtime_error("Unsupported mixed filament components or gradient mode");
         DynamicPrintConfig updated = old;
         std::vector<std::string> colors;
@@ -1696,12 +1742,11 @@ static int edit_mixed_filament(orca_session_t *s, int slot, const int *component
             if (sum != 100) throw std::runtime_error("Mixed filament ratios must total 100 percent");
             updated.option<ConfigOptionStrings>("filament_mixed_sublayer_ratios")->values.at(index) = format_mixed_ratios(weights);
         }
-        if (gradient_mode >= 0) {
-            updated.option<ConfigOptionBools>("filament_mixed_gradient")->values.at(index) = gradient_mode != 0;
-            updated.option<ConfigOptionStrings>("filament_mixed_gradient_range")->values.at(index) =
-                gradient_mode == 0 ? "" : gradient_mode == 2 ? "0.1000,0.9000" : "0.9000,0.1000";
-            updated.option<ConfigOptionStrings>("filament_mixed_gradient_curve")->values.at(index).clear();
-            updated.option<ConfigOptionBools>("filament_mixed_gradient_per_part")->values.at(index) = gradient_mode > 0 && per_part;
+        if (gradient_edit) { write_mixed_gradient(updated, index, *gradient_edit); }
+        else if (gradient_mode >= 0) {
+            const MixedGradientEdit legacy{gradient_mode != 0,
+                gradient_mode == 0 ? "" : gradient_mode == 2 ? "0.1000,0.9000" : "0.9000,0.1000", "", gradient_mode > 0 && per_part};
+            write_mixed_gradient(updated, index, legacy);
         }
         validate_mobile_mixes(updated);
         if (count != 0 || ids != previous_ids) {
@@ -1745,6 +1790,15 @@ int orca_session_replace_mixed_components(orca_session_t *s, int slot, const int
 {
     if (!components) return -1;
     return edit_mixed_filament(s, slot, components, component_count, ratios, ratio_count, gradient_mode, per_part);
+}
+
+int orca_session_edit_mixed_gradient(orca_session_t *s, int slot, const int *components, size_t component_count,
+                                    const int *ratios, size_t ratio_count, int enabled,
+                                    const char *range, const char *curve, int per_part)
+{
+    if (!range || !curve || (!components && component_count != 0)) return -1;
+    const MixedGradientEdit edit{enabled != 0, range, curve, per_part != 0};
+    return edit_mixed_filament(s, slot, components, component_count, ratios, ratio_count, -1, per_part, &edit);
 }
 
 static void normalize_first_filament(DynamicPrintConfig &config, const DynamicPrintConfig &source)

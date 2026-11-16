@@ -169,3 +169,15 @@ two components so changing the count cannot silently discard their curve.
 Regression cases cover virtual nozzle-variant inheritance, physical/process
 isolation, rejected replacements, two/three transitions and retained object/facet
 assignments. Native execution remains pending.
+
+Linear gradient endpoints are now editable when creating or editing a mix, with
+bounds queried from native FilamentMixer constants. Bottom/top shares can be
+reversed. Imported ranges retain their exact text when not changed. Imported
+custom curves take precedence in desktop GCode/ToolOrdering, so their linear
+endpoint controls stay hidden while the curve is retained. Users can explicitly
+choose linear mode; disabling/re-enabling a gradient otherwise preserves its
+curve/range. Gradient and component/proportion edits share a staged transaction.
+New mix gradient metadata is validated before appending a slot. Native regression
+cases cover nondefault ranges, curve retention, explicit linear selection,
+invalid endpoint isolation and unchanged slot count on failed creation. Custom
+anchor/tangent editing remains unfinished; native execution is pending.
