@@ -35,7 +35,9 @@ final class OrcaEngine: ObservableObject {
     @Published private(set) var paintedFilaments: [PaintedFilamentRegion] = []
     @Published private(set) var filamentPaintRevision = 0
     @Published var gcodePathNode: SCNNode?
-    @Published var gcodeGeometry: GCodePathGeometry?
+    @Published var gcodeGeometry: GCodePathGeometry? {
+        didSet { resetPreviewSequence() }
+    }
     @Published var previewIsReduced = false
     @Published private(set) var previewFromFile = false
     @Published private(set) var previewBedSize: SIMD2<Float>?
@@ -65,7 +67,9 @@ final class OrcaEngine: ObservableObject {
     /// Assembly explode factor (0 = collapsed layout)
     @Published var explodeFactor: Float = 0
     @Published var previewShowShell = false
-    @Published var previewShowToolMarker = false
+    @Published var previewShowToolMarker = false {
+        didSet { if !previewShowToolMarker { pauseToolheadPlayback(refresh: false) } }
+    }
     @Published var previewShowCenterOfGravity = false
     @Published var previewHiddenTools: Set<Int> = []
     @Published var previewHiddenFilaments: Set<Int> = []
@@ -240,6 +244,7 @@ final class OrcaEngine: ObservableObject {
     /// A memory warning must not turn a successful slice into an unsliced plate.
     /// Retain paths/file/statistics; rebuild compact lines with every move intact.
     func handleMemoryWarning() {
+        pauseToolheadPlayback(refresh: false)
         #if ORCA_LINKED
         if let s = session, !presetsLoading, !sliceRunning, !sessionBusy {
             orca_session_purge_option_caches(s)
@@ -826,6 +831,7 @@ final class OrcaEngine: ObservableObject {
     }
 
     deinit {
+        previewPlaybackTask?.cancel()
         #if ORCA_LINKED
         if let s = session { orca_session_destroy(s) }
         #endif
@@ -1076,12 +1082,77 @@ final class OrcaEngine: ObservableObject {
 
     @Published var previewToolheadPosition: SCNVector3?
     @Published var smoothToolheadMovement = true
+    @Published private(set) var previewToolheadMove: Double?
+    @Published private(set) var previewPlaybackRunning = false
+    @Published var previewPlaybackRate = 1.0
+    private var previewPlaybackTask: Task<Void, Never>?
+
+    func resetPreviewSequence() {
+        pauseToolheadPlayback(refresh: false)
+        previewThroughMove = .max
+        previewToolheadMove = nil
+        previewToolheadPosition = nil
+    }
+
+    func pauseToolheadPlayback(refresh: Bool = true) {
+        previewPlaybackTask?.cancel()
+        previewPlaybackTask = nil
+        let wasPlaying = previewPlaybackRunning
+        previewPlaybackRunning = false
+        if refresh && wasPlaying { requestPreviewLayer() }
+    }
+
+    func playToolhead() {
+        guard let geometry = gcodeGeometry, geometry.moveCount > 0 else { return }
+        pauseToolheadPlayback(refresh: false)
+        // Restrict playback to the selected layer range; feature filters affect
+        // visibility, while physical nozzle travel still belongs to the route.
+        var first: Int?, last: Int?
+        for segment in geometry.segments {
+            guard let a = segment.points.first, let b = segment.points.last,
+                  max(a.z, b.z) >= previewMinZ - 0.001,
+                  min(a.z, b.z) <= previewMaxZ + 0.001 else { continue }
+            first = first ?? segment.firstMove
+            last = segment.lastMove
+        }
+        guard let first, let last else { return }
+        let start = Double(first - 1), end = Double(last)
+        let cursor = previewToolheadMove ?? start
+        updateToolhead(to: cursor < start || cursor >= end ? start : cursor)
+        // Show the selected range during motion; rebuild the clipped beads
+        // once paused, rather than rebuilding a large mesh on every tick.
+        previewThroughMove = .max
+        applyPreviewLayer()
+        previewPlaybackRunning = true
+        previewPlaybackTask = Task { @MainActor [weak self] in
+            var timestamp = ProcessInfo.processInfo.systemUptime
+            while !Task.isCancelled {
+                do { try await Task.sleep(nanoseconds: 50_000_000) } catch { return }
+                guard let self, self.previewPlaybackRunning, let geometry = self.gcodeGeometry else { return }
+                let now = ProcessInfo.processInfo.systemUptime
+                if self.previewBuilding { timestamp = now; continue }
+                let elapsed = min(0.25, max(0, now - timestamp))
+                timestamp = now
+                let next = min(end, geometry.advanceToolhead(from: self.previewToolheadMove ?? start,
+                    seconds: elapsed * self.previewPlaybackRate))
+                self.updateToolhead(to: next)
+                if next >= end { self.pauseToolheadPlayback(); return }
+            }
+        }
+    }
+
+    private func updateToolhead(to value: Double) {
+        guard let geometry = gcodeGeometry, value.isFinite else { return }
+        let cursor = max(-1, min(value, Double(max(0, geometry.moveCount - 1))))
+        previewThroughMove = max(0, Int(cursor))
+        previewToolheadMove = cursor
+        previewShowToolMarker = true
+        previewToolheadPosition = geometry.position(atMove: cursor)
+    }
 
     func scrubToolhead(to value: Double) {
-        guard let geometry = gcodeGeometry else { return }
-        previewThroughMove = Int(value)
-        previewShowToolMarker = true
-        previewToolheadPosition = geometry.position(atMove: value)
+        pauseToolheadPlayback(refresh: false)
+        updateToolhead(to: value)
     }
 
     private var previewRefreshTask: Task<Void, Never>?

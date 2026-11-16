@@ -62,6 +62,7 @@ private enum OrcaTheme {
 
 struct OrcaRootView: View {
     @StateObject private var engine: OrcaEngine
+    @Environment(\.scenePhase) private var scenePhase
 
     @ObservedObject private var documents: DocumentInbox
 
@@ -455,6 +456,13 @@ struct OrcaRootView: View {
                 try? result.write(to: FileManager.default.temporaryDirectory.appendingPathComponent("orca-camera-smoke.txt"), atomically: true, encoding: .utf8)
             }
         }
+        .onChange(of: mainTab) { tab in
+            if tab != .preview { engine.pauseToolheadPlayback(refresh: false) }
+        }
+        .onChange(of: scenePhase) { phase in
+            if phase != .active { engine.pauseToolheadPlayback(refresh: false) }
+        }
+        .onDisappear { engine.pauseToolheadPlayback(refresh: false) }
         .onChange(of: cloudAccount.busy) { busy in if !busy { importCloudPresetsIfReady() } }
         .onChange(of: cloudAccount.profileRevision) { _ in importCloudPresetsIfReady() }
         .onChange(of: engine.sessionBusy) { importing in if !importing { importPendingDocuments(); importCloudPresetsIfReady() } }
@@ -2403,6 +2411,8 @@ struct OrcaRootView: View {
                 gcodeNode: engine.gcodePathNode,
                 showGCode: mainTab == .preview,
                 toolheadPosition: engine.previewToolheadPosition,
+                toolheadMove: engine.previewToolheadMove,
+                toolpathGeometry: engine.gcodeGeometry,
                 showToolhead: engine.previewShowToolMarker,
                 smoothToolhead: engine.smoothToolheadMovement,
                 showShell: engine.previewShowShell,
@@ -3039,8 +3049,7 @@ struct OrcaRootView: View {
             guard z != engine.previewMaxZ else { return }
             engine.previewMaxZ = z
             engine.previewMinZ = min(engine.previewMinZ, z)
-            engine.previewThroughMove = .max
-            engine.previewToolheadPosition = nil
+            engine.resetPreviewSequence()
             engine.requestPreviewLayer()
         })
     }
@@ -3070,7 +3079,7 @@ struct OrcaRootView: View {
             }.padding(.horizontal, 16)
                 .contentShape(Rectangle())
                 .gesture(DragGesture().onEnded { if $0.translation.height > 35 { showPreviewControls = false } })
-            ScrollView { layerScrubber }
+            ScrollView { layerScrubber }.accessibilityIdentifier("preview-controls-content")
         }.background(OrcaTheme.panel))
     }
 
@@ -3078,15 +3087,31 @@ struct OrcaRootView: View {
         VStack(alignment: .leading, spacing: 8) {
             if let geometry = engine.gcodeGeometry {
                 Text("Toolhead position").font(.subheadline.weight(.semibold))
-                Slider(value: Binding(get: { Double(min(engine.previewThroughMove, max(0, geometry.moveCount - 1))) },
+                Slider(value: Binding(get: { max(0, engine.previewToolheadMove ?? Double(min(engine.previewThroughMove, max(0, geometry.moveCount - 1)))) },
                     set: { engine.scrubToolhead(to: $0) }),
                     in: 0...Double(max(1, geometry.moveCount - 1)), onEditingChanged: { editing in
                         if !editing { engine.requestPreviewLayer() }
                     }).accessibilityLabel("Toolpath move")
+                HStack {
+                    Button {
+                        if engine.previewPlaybackRunning { engine.pauseToolheadPlayback() }
+                        else { engine.playToolhead() }
+                    } label: {
+                        Label(engine.previewPlaybackRunning ? "Pause" : "Play",
+                              systemImage: engine.previewPlaybackRunning ? "pause.fill" : "play.fill")
+                    }.accessibilityIdentifier("toolhead-playback")
+                    Spacer()
+                    Picker("Playback speed", selection: $engine.previewPlaybackRate) {
+                        Text("1×").tag(1.0)
+                        Text("10×").tag(10.0)
+                        Text("100×").tag(100.0)
+                    }.pickerStyle(.menu)
+                }
+                Text("Uses G-code feedrates. Pause to inspect this position.")
+                    .font(.caption).foregroundStyle(.secondary)
                 Toggle("Smooth toolhead movement", isOn: $engine.smoothToolheadMovement)
                 Button("Show complete toolpath") {
-                    engine.previewThroughMove = .max
-                    engine.previewToolheadPosition = nil
+                    engine.resetPreviewSequence()
                     engine.requestPreviewLayer()
                 }
             }
@@ -3122,16 +3147,14 @@ struct OrcaRootView: View {
                     guard z != engine.previewMinZ else { return }
                     engine.previewMinZ = z
                     engine.previewMaxZ = max(engine.previewMaxZ, z)
-                    engine.previewThroughMove = .max
-                    engine.previewToolheadPosition = nil
+                    engine.resetPreviewSequence()
                     engine.requestPreviewLayer()
                 }), in: 0...Double(max(1, engine.previewLayerHeights.count - 1)), step: 1)
                     .disabled(engine.previewLayerHeights.count < 2)
                 Button("Show all layers") {
                     engine.previewMinZ = engine.gcodeZMin
                     engine.previewMaxZ = engine.gcodeZMax
-                    engine.previewThroughMove = .max
-                    engine.previewToolheadPosition = nil
+                    engine.resetPreviewSequence()
                     engine.requestPreviewLayer()
                 }
             }
@@ -3144,8 +3167,7 @@ struct OrcaRootView: View {
             if let geometry = engine.gcodeGeometry {
                 Button("Show current layer only") {
                     engine.previewMinZ = engine.previewMaxZ
-                    engine.previewThroughMove = .max
-                    engine.previewToolheadPosition = nil
+                    engine.resetPreviewSequence()
                     engine.requestPreviewLayer()
                 }
                 DisclosureGroup("Line types") {

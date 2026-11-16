@@ -118,3 +118,18 @@ the requested CPU and SDK independently; project/toolchain tests reject bundle
 selection mismatches and Intel device targets. Host and target architecture
 remain part of dependency/compiler/engine cache keys. GPU and UI assertions are
 retained; successful SDK type checks are not native runtime acceptance.
+
+Preview motion now samples the actual G-code polyline while interpolating a
+fractional move cursor; a Cartesian SceneKit tween no longer cuts corners.
+The coordinator updates only the marker at up to 60 Hz and cancels its timer on
+scene replacement/dismantle. Play/Pause supports 1/10/100x commanded-feedrate
+playback within the selected layer range. It omits dwell and acceleration; this
+is a toolhead-motion preview, not a print-time simulator. The selected range
+stays visible during playback and is clipped to the cursor when paused. No bead
+mesh rebuild is requested for each motion tick. Layer changes, file replacement,
+backgrounding, leaving Preview and memory warnings stop playback. Fractional
+slider state is retained. Regression cases cover right-angle paths, different
+feedrates across segment boundaries, zero-length/unknown-feed moves, end clamps
+and invalid cursor input; the phone UI test checks Play/Pause, cursor progress
+and layer-change cancellation. Apple SDK/runtime checks for this batch are
+pending until recorded in the build evidence.

@@ -127,6 +127,8 @@ struct PlateSceneView: UIViewRepresentable {
     var gcodeNode: SCNNode? = nil
     var showGCode: Bool = false
     var toolheadPosition: SCNVector3?
+    var toolheadMove: Double? = nil
+    var toolpathGeometry: GCodePathGeometry? = nil
     var showToolhead = false
     var smoothToolhead = true
     var showShell: Bool = false
@@ -333,6 +335,7 @@ struct PlateSceneView: UIViewRepresentable {
     }
 
     static func dismantleUIView(_ view: SCNView, coordinator: Coordinator) {
+        coordinator.stopToolheadMotion()
         view.isPlaying = false
         view.scene?.isPaused = true
         view.delegate = nil
@@ -462,6 +465,7 @@ struct PlateSceneView: UIViewRepresentable {
         // Reuse the existing scene subtree for camera/selection UI updates.
         let previewID = gcodeNode.map { ObjectIdentifier($0) }
         if context.coordinator.lastPreviewID != previewID || context.coordinator.lastShowGCode != showGCode {
+            context.coordinator.stopToolheadMotion()
             content.childNode(withName: "gcode", recursively: false)?.removeFromParentNode()
             if showGCode, let gcodeNode {
                 let clone = gcodeNode.clone()
@@ -488,13 +492,11 @@ struct PlateSceneView: UIViewRepresentable {
                 preview.addChildNode(node)
             }
             marker?.isHidden = !showToolhead
-            if let marker, let position = toolheadPosition {
-                SCNTransaction.begin()
-                SCNTransaction.animationDuration = smoothToolhead ? 0.08 : 0
-                marker.position = position
-                SCNTransaction.commit()
-            }
-        }
+            if showToolhead, let marker, let position = toolheadPosition {
+                context.coordinator.moveToolhead(marker, position: position, move: toolheadMove,
+                    geometry: toolpathGeometry, smooth: smoothToolhead)
+            } else { context.coordinator.stopToolheadMotion() }
+        } else { context.coordinator.stopToolheadMotion() }
         if let model = content.childNode(withName: "model", recursively: false) {
             model.isHidden = showGCode && !showShell
             model.opacity = showGCode ? 0.15 : 1
@@ -780,6 +782,45 @@ struct PlateSceneView: UIViewRepresentable {
         var parent: PlateSceneView?
         var lastMeshKey: String = ""
         var lastFilamentPaintRevision = -1
+        private var toolheadTimer: Timer?
+        private var displayedToolheadMove: Double?
+        private var requestedToolheadMove: Double?
+
+        func stopToolheadMotion() {
+            toolheadTimer?.invalidate()
+            toolheadTimer = nil
+            displayedToolheadMove = nil
+            requestedToolheadMove = nil
+        }
+
+        func moveToolhead(_ marker: SCNNode, position: SCNVector3, move: Double?,
+                          geometry: GCodePathGeometry?, smooth: Bool) {
+            guard let move, move.isFinite, let geometry, smooth,
+                  let start = displayedToolheadMove else {
+                stopToolheadMotion()
+                marker.position = position
+                displayedToolheadMove = move
+                requestedToolheadMove = move
+                return
+            }
+            guard requestedToolheadMove != move else { return }
+            toolheadTimer?.invalidate()
+            requestedToolheadMove = move
+            let began = ProcessInfo.processInfo.systemUptime
+            // Interpolate the move cursor, then sample the real polyline. A
+            // position tween would cut across corners and disconnected paths.
+            let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self, weak marker] timer in
+                guard let self, let marker else { timer.invalidate(); return }
+                let t = min(1, (ProcessInfo.processInfo.systemUptime - began) / 0.08)
+                let cursor = start + (move - start) * t
+                if let point = geometry.position(atMove: cursor) { marker.position = point }
+                self.displayedToolheadMove = cursor
+                if t >= 1 { timer.invalidate(); self.toolheadTimer = nil }
+            }
+            toolheadTimer = timer
+            RunLoop.main.add(timer, forMode: .common)
+        }
+
         var lastPreviewID: ObjectIdentifier?
         var lastShowGCode = false
         var lastBed: SIMD2<Float> = SIMD2(0, 0)
@@ -1575,7 +1616,7 @@ struct GCodePathGeometry {
     }
 
     func position(atMove value: Double) -> SCNVector3? {
-        guard !segments.isEmpty else { return nil }
+        guard !segments.isEmpty, value.isFinite else { return nil }
         var low = 0, high = segments.count
         while low < high {
             let mid = (low + high) / 2
@@ -1588,6 +1629,45 @@ struct GCodePathGeometry {
         guard index + 1 < segment.points.count else { return last }
         let a = segment.points[index], b = segment.points[index + 1], t = Float(offset - Double(index))
         return SCNVector3(a.x + (b.x-a.x)*t, a.y + (b.y-a.y)*t, a.z + (b.z-a.z)*t)
+    }
+
+    /// Advance along commanded feedrates without building a second per-move
+    /// timeline. Cursor -1 is the start of the first move; integers are ends.
+    /// Dwell/acceleration are not simulated. Bound zero-length marker work.
+    func advanceToolhead(from value: Double, seconds: Double) -> Double {
+        guard value.isFinite, seconds.isFinite, seconds > 0, !segments.isEmpty else { return value }
+        let end = Double(moveCount - 1)
+        var cursor = max(-1, min(value, end)), remaining = seconds
+        var low = 0, high = segments.count
+        while low < high {
+            let mid = (low + high) / 2
+            if Double(segments[mid].lastMove) <= cursor { low = mid + 1 } else { high = mid }
+        }
+        var steps = 0
+        for segment in segments.dropFirst(low) {
+            guard segment.points.count > 1 else { continue }
+            cursor = max(cursor, Double(segment.firstMove - 1))
+            let offset = max(0, cursor - Double(segment.firstMove) + 1)
+            let edge = min(segment.points.count - 1, Int(offset))
+            for index in edge..<(segment.points.count - 1) {
+                if steps >= 4096 { return cursor }
+                steps += 1
+                let a = segment.points[index], b = segment.points[index + 1]
+                let dx = Double(b.x - a.x), dy = Double(b.y - a.y), dz = Double(b.z - a.z)
+                let speed = Double(segment.feedrate) / 60
+                let duration = speed.isFinite && speed > 0 ? sqrt(dx*dx + dy*dy + dz*dz) / speed : 0
+                let move = Double(segment.firstMove + index)
+                let fraction = max(0, min(1, cursor - move + 1))
+                let needed = duration * (1 - fraction)
+                if needed > remaining {
+                    return min(end, move - 1 + fraction + remaining / duration)
+                }
+                remaining -= needed
+                cursor = move
+                if remaining <= 0 { return min(end, cursor) }
+            }
+        }
+        return end
     }
 
     func filtered(minZ: Float = -.greatestFiniteMagnitude, maxZ: Float, enabledGroups: Set<FeatureGroup>? = nil, hiddenFeatures: Set<String> = [],
@@ -1682,6 +1762,24 @@ struct GCodePathGeometry {
                              feature: "Outer wall", width: 0.4, feedrate: 600, firstMove: 0, lastMove: 1)
         guard let halfway = GCodePathGeometry(segments: [motion]).position(atMove: 0.5),
               abs(halfway.x - 15) < 0.001 else { return false }
+
+        let corner = Segment(points: [SCNVector3(0,0,0), SCNVector3(10,0,0), SCNVector3(10,10,0)],
+                             feature: "Outer wall", width: 0.4, feedrate: 600, firstMove: 0, lastMove: 1)
+        let travel = Segment(points: [SCNVector3(20,10,0), SCNVector3(40,10,0)],
+                             feature: "Travel", width: 0, feedrate: 1200, firstMove: 2, lastMove: 2)
+        let timeline = GCodePathGeometry(segments: [corner, travel])
+        let cursor = timeline.advanceToolhead(from: -1, seconds: 1.5)
+        guard abs(cursor - 0.5) < 0.0001, let point = timeline.position(atMove: cursor),
+              abs(point.x - 10) < 0.001, abs(point.y - 5) < 0.001,
+              abs(timeline.advanceToolhead(from: cursor, seconds: 1) - 1.5) < 0.0001,
+              timeline.advanceToolhead(from: 2, seconds: 1) == 2,
+              timeline.advanceToolhead(from: -1, seconds: 100) == 2,
+              timeline.advanceToolhead(from: cursor, seconds: 0) == cursor,
+              timeline.position(atMove: .nan) == nil else { return false }
+        var zero = travel
+        zero.points = [SCNVector3Zero, SCNVector3Zero]
+        zero.firstMove = 0; zero.lastMove = 0; zero.feedrate = 0
+        guard GCodePathGeometry(segments: [zero]).advanceToolhead(from: -1, seconds: 1) == 0 else { return false }
 
         let path = Segment(points: [SCNVector3(0, 0, 0), SCNVector3(1, 0, 2), SCNVector3(2, 0, 0)],
                            feature: "Outer wall", width: 0.45, feedrate: 1200, height: 0.3)

@@ -38,6 +38,27 @@ final class WorkspaceUITests: XCTestCase {
         XCTAssertEqual(app.sliders.matching(identifier: "Upper preview layer").count, 1,
                        "Preview controls must not duplicate the upper-layer slider")
         XCTAssertTrue(app.sliders["Toolpath move"].exists)
+        let playback = app.buttons["toolhead-playback"]
+        let controls = app.scrollViews["preview-controls-content"]
+        for _ in 0..<3 where !playback.isHittable { controls.swipeUp() }
+        XCTAssertTrue(playback.isHittable)
+        playback.tap()
+        let playing = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            playback.label == "Pause"
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [playing], timeout: 5), .completed)
+        let toolpath = app.sliders["Toolpath move"]
+        let initialPosition = toolpath.value as? String
+        let advanced = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            toolpath.value as? String != initialPosition
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [advanced], timeout: 10), .completed,
+                       "Playback must advance the real toolpath cursor")
+        playback.tap()
+        XCTAssertEqual(playback.label, "Play")
+        playback.tap()
+        app.sliders["Upper preview layer"].adjust(toNormalizedSliderPosition: 0.5)
+        XCTAssertEqual(playback.label, "Play", "Changing layer bounds must stop playback")
         let information = app.buttons["Model and slice information"]
         XCTAssertTrue(information.isHittable)
         XCTAssertFalse(information.frame.intersects(app.otherElements["Navigation cube"].frame),
