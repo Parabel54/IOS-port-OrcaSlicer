@@ -1763,14 +1763,14 @@ struct GCodePathGeometry {
         guard let halfway = GCodePathGeometry(segments: [motion]).position(atMove: 0.5),
               abs(halfway.x - 15) < 0.001 else { return false }
 
-        let corner = Segment(points: [SCNVector3(0,0,0), SCNVector3(10,0,0), SCNVector3(10,10,0)],
+        let motionCorner = Segment(points: [SCNVector3(0,0,0), SCNVector3(10,0,0), SCNVector3(10,10,0)],
                              feature: "Outer wall", width: 0.4, feedrate: 600, firstMove: 0, lastMove: 1)
         let travel = Segment(points: [SCNVector3(20,10,0), SCNVector3(40,10,0)],
                              feature: "Travel", width: 0, feedrate: 1200, firstMove: 2, lastMove: 2)
-        let timeline = GCodePathGeometry(segments: [corner, travel])
+        let timeline = GCodePathGeometry(segments: [motionCorner, travel])
         let cursor = timeline.advanceToolhead(from: -1, seconds: 1.5)
-        guard abs(cursor - 0.5) < 0.0001, let point = timeline.position(atMove: cursor),
-              abs(point.x - 10) < 0.001, abs(point.y - 5) < 0.001,
+        guard abs(cursor - 0.5) < 0.0001, let motionPoint = timeline.position(atMove: cursor),
+              abs(motionPoint.x - 10) < 0.001, abs(motionPoint.y - 5) < 0.001,
               abs(timeline.advanceToolhead(from: cursor, seconds: 1) - 1.5) < 0.0001,
               timeline.advanceToolhead(from: 2, seconds: 1) == 2,
               timeline.advanceToolhead(from: -1, seconds: 100) == 2,
