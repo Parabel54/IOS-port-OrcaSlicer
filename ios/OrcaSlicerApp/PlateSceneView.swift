@@ -675,7 +675,7 @@ struct PlateSceneView: UIViewRepresentable {
             let camera = SCNNode()
             camera.camera = SCNCamera()
             camera.camera?.usesOrthographicProjection = true
-            camera.camera?.orthographicScale = 1.8
+            camera.camera?.orthographicScale = 0.9
             cube.scene?.rootNode.addChildNode(camera)
             cube.pointOfView = camera
             cube.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(cubeTapped(_:))))
@@ -1404,6 +1404,13 @@ struct GCodePathGeometry {
         guard supportPaths.segments.count == 1,
               !supportPaths.makeNode(color: .white).childNodes.isEmpty,
               !supportPaths.makeNode(color: .white, lightweight: true).childNodes.isEmpty else { return false }
+        let compact = GCodePathGeometry(segments: [bead]).makeNode(color: .white, lightweight: true)
+        guard let compactMesh = compact.childNodes.first?.geometry,
+              compactMesh.elements.first?.primitiveType == .triangles,
+              compactMesh.elements.first?.bytesPerIndex == 2,
+              compactMesh.sources(for: .normal).isEmpty,
+              compactMesh.sources(for: .color).first?.bytesPerComponent == 1,
+              compactMesh.sources(for: .vertex).first?.vectorCount == 8 else { return false }
         let node = GCodePathGeometry(segments: [bead]).makeNode(color: .white)
         guard let geometry = node.childNodes.first else { return false }
         let bounds = geometry.boundingBox
@@ -1411,7 +1418,7 @@ struct GCodePathGeometry {
         guard let mesh = geometry.geometry, let source = mesh.sources(for: .vertex).first,
               let element = mesh.elements.first else { return false }
         let topIndices = element.data.withUnsafeBytes { bytes in
-            (0..<3).map { Int(bytes.loadUnaligned(fromByteOffset: $0 * 4, as: UInt32.self)) }
+            (0..<3).map { Int(bytes.loadUnaligned(fromByteOffset: $0 * element.bytesPerIndex, as: UInt16.self)) }
         }
         func point(_ index: Int) -> SIMD3<Float> {
             source.data.withUnsafeBytes { bytes in
@@ -1607,18 +1614,18 @@ struct GCodePathGeometry {
         root.name = "gcode"
         let solid = SCNMaterial()
         solid.diffuse.contents = UIColor.white
-        solid.lightingModel = .lambert
+        solid.lightingModel = lightweight ? .constant : .lambert
         solid.isDoubleSided = true
         let lines = SCNMaterial()
         lines.diffuse.contents = UIColor.white
         lines.lightingModel = .constant
-        var beads = Batch(material: solid, primitive: .triangles)
-        var travels = Batch(material: lines, primitive: .line)
+        var beads = Batch(material: solid, primitive: .triangles, includeNormals: !lightweight)
+        var travels = Batch(material: lines, primitive: .line, includeNormals: false)
         for seg in segments {
             if cancelled() { return SCNNode() }
             guard seg.points.count > 1 else { continue }
             let rgba = self.color(for: seg, mode: colorMode)
-            if lightweight || seg.kind != .extrude || seg.width <= 0.01 {
+            if seg.kind != .extrude || seg.width <= 0.01 {
                 if seg.kind.isMarker, let p = seg.points.last {
                     // Batched cross markers, never one sphere/material per event.
                     let r: Float = seg.kind == .seam ? 0.35 : 0.65
@@ -1660,18 +1667,19 @@ struct GCodePathGeometry {
     private struct Batch {
         let material: SCNMaterial
         let primitive: SCNGeometryPrimitiveType
+        let includeNormals: Bool
         var positions: [Float] = []
         var normals: [Float] = []
-        var colors: [Float] = []
-        var indices: [UInt32] = []
+        var colors: [UInt8] = []
+        var indices: [UInt16] = []
         var vertexCount: Int { positions.count / 3 }
 
         mutating func vertex(_ p: SCNVector3, normal: SCNVector3, color: UIColor) {
             positions.append(contentsOf: [p.x, p.y, p.z])
-            normals.append(contentsOf: [normal.x, normal.y, normal.z])
+            if includeNormals { normals.append(contentsOf: [normal.x, normal.y, normal.z]) }
             var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 1
             color.getRed(&r, green: &g, blue: &b, alpha: &a)
-            colors.append(contentsOf: [Float(r), Float(g), Float(b), Float(a)])
+            colors.append(contentsOf: [r, g, b, a].map { UInt8((min(max($0, 0), 1) * 255).rounded()) })
         }
 
         mutating func appendMarker(_ p: SCNVector3, radius r: Float, color: UIColor) {
@@ -1682,13 +1690,13 @@ struct GCodePathGeometry {
 
         mutating func appendLines(_ points: [SCNVector3], color: UIColor) {
             for p in points {
-                indices.append(UInt32(vertexCount))
+                indices.append(UInt16(vertexCount))
                 vertex(p, normal: SCNVector3(0, 0, 1), color: color)
             }
         }
 
         mutating func appendBead(_ points: [SCNVector3], width: Float, height: Float, color: UIColor) {
-            let base = UInt32(vertexCount)
+            let base = UInt16(vertexCount)
             let half = max(0.01, width) * 0.5
             for j in points.indices {
                 let p = points[j], prev = points[max(0,j-1)], next = points[min(points.count-1,j+1)]
@@ -1702,13 +1710,13 @@ struct GCodePathGeometry {
                 vertex(SCNVector3(p.x-nx*half,p.y-ny*half,bottom), normal: SCNVector3(-nx,-ny,-1), color: color)
             }
             for j in 0..<(points.count-1) {
-                let a = base+UInt32(j*4), b = a+4
+                let a = base+UInt16(j*4), b = a+4
                 // Outward winding matters now that beads use lit materials.
                 indices.append(contentsOf: [a,a+1,b,a+1,b+1,b,
                     a,b,a+2,b,b+2,a+2, a+1,a+3,b+1,a+3,b+3,b+1,
                     a+2,b+2,a+3,b+2,b+3,a+3])
             }
-            let last = base+UInt32((points.count-1)*4)
+            let last = base+UInt16((points.count-1)*4)
             indices.append(contentsOf: [base,base+2,base+1,base+2,base+3,base+1,
                 last,last+1,last+2,last+1,last+3,last+2])
         }
@@ -1724,8 +1732,15 @@ struct GCodePathGeometry {
             }
             let element = SCNGeometryElement(data: indices.withUnsafeBytes { Data($0) },
                 primitiveType: primitive, primitiveCount: indices.count / (primitive == .line ? 2 : 3),
-                bytesPerIndex: MemoryLayout<UInt32>.size)
-            let geometry = SCNGeometry(sources: [source(positions,.vertex,3), source(normals,.normal,3), source(colors,.color,4)], elements: [element])
+                bytesPerIndex: MemoryLayout<UInt16>.size)
+            // Color components are normalized bytes; chunks remain below 65,536
+            // vertices so 16-bit indices retain every corner without sampling.
+            let colorSource = SCNGeometrySource(data: colors.withUnsafeBytes { Data($0) }, semantic: .color,
+                vectorCount: vertexCount, usesFloatComponents: false, componentsPerVector: 4,
+                bytesPerComponent: 1, dataOffset: 0, dataStride: 4)
+            var sources = [source(positions, .vertex, 3), colorSource]
+            if includeNormals { sources.append(source(normals, .normal, 3)) }
+            let geometry = SCNGeometry(sources: sources, elements: [element])
             geometry.materials = [material]
             root.addChildNode(SCNNode(geometry: geometry))
             positions.removeAll(keepingCapacity: true)
