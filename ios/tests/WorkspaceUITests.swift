@@ -45,7 +45,10 @@ final class WorkspaceUITests: XCTestCase {
         let files = app.buttons["File and project actions"]
         XCTAssertTrue(files.isHittable, "Preview controls must leave the Files action reachable")
         XCTAssertTrue(app.buttons["Export G-code"].isHittable, "Preview controls must leave Export reachable")
-        files.tap()
+        // XCTest's AXScrollToVisible action fails for this visible SwiftUI
+        // Menu after a sibling ScrollView appears. Require a real hit target
+        // above, then exercise the same finger tap used on the device.
+        files.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         XCTAssertTrue(app.buttons["Open model…"].waitForExistence(timeout: 10))
         app.buttons["Open model…"].tap()
         openSlicedPreview(app)
