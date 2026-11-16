@@ -112,6 +112,153 @@ struct CameraViewPolicy {
     mutating func reset() { automaticallyAligned = false }
 }
 
+/// Incremental deltas keep the cursor fixed when changing scrubbing precision.
+struct ToolpathScrubGesture {
+    enum Precision {
+        case normal, fine, veryFine, moveByMove
+        var label: String {
+            switch self {
+            case .normal: return "Drag up/down for finer control"
+            case .fine: return "Fine scrubbing"
+            case .veryFine: return "Very fine scrubbing"
+            case .moveByMove: return "Move by move"
+            }
+        }
+    }
+    var value: Double
+    let origin: CGPoint
+    var previous: CGPoint
+    private(set) var precision: Precision = .normal
+
+    mutating func update(to point: CGPoint, width: CGFloat, range: ClosedRange<Double>) -> Double {
+        guard point.x.isFinite, point.y.isFinite, width > 0 else { return value }
+        let distance = abs(point.y - origin.y)
+        precision = distance < 36 ? .normal : distance < 72 ? .fine : distance < 108 ? .veryFine : .moveByMove
+        let scale: Double
+        switch precision {
+        case .normal: scale = (range.upperBound - range.lowerBound) / Double(width)
+        case .fine: scale = (range.upperBound - range.lowerBound) / Double(width) * 0.1
+        case .veryFine: scale = (range.upperBound - range.lowerBound) / Double(width) * 0.01
+        case .moveByMove: scale = 0.125
+        }
+        value = max(range.lowerBound, min(range.upperBound, value + Double(point.x - previous.x) * scale))
+        previous = point
+        return value
+    }
+}
+
+struct ManualToolpathScrubber: View {
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    var onEditingChanged: (Bool) -> Void
+    @State private var precision: ToolpathScrubGesture.Precision = .normal
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            NativeSlider(value: $value, range: range, onEditingChanged: onEditingChanged,
+                         onPrecision: { precision = $0 }).frame(height: 44)
+            Text(precision.label).font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private struct NativeSlider: UIViewRepresentable {
+        @Binding var value: Double
+        let range: ClosedRange<Double>
+        var onEditingChanged: (Bool) -> Void
+        var onPrecision: (ToolpathScrubGesture.Precision) -> Void
+
+        func makeUIView(context: Context) -> PrecisionSlider {
+            let slider = PrecisionSlider()
+            slider.minimumValue = 0; slider.maximumValue = 1
+            slider.minimumTrackTintColor = UIColor(red: 0, green: 150/255, blue: 136/255, alpha: 1)
+            slider.accessibilityLabel = "Toolpath move"
+            slider.accessibilityHint = "Drag sideways. Move your finger above or below the slider for finer control. Adjust by one move with VoiceOver."
+            return slider
+        }
+        func updateUIView(_ slider: PrecisionSlider, context: Context) {
+            slider.range = range
+            slider.cursor = value
+            slider.changed = { value = $0 }
+            slider.editing = onEditingChanged
+            slider.precisionChanged = onPrecision
+            slider.refresh()
+        }
+        static func dismantleUIView(_ slider: PrecisionSlider, coordinator: ()) {
+            slider.changed = nil; slider.editing = nil; slider.precisionChanged = nil
+        }
+    }
+
+    final class PrecisionSlider: UISlider {
+        var range: ClosedRange<Double> = 0...1
+        var cursor = 0.0
+        var changed: ((Double) -> Void)?
+        var editing: ((Bool) -> Void)?
+        var precisionChanged: ((ToolpathScrubGesture.Precision) -> Void)?
+        private var gesture: ToolpathScrubGesture?
+
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+            addTarget(self, action: #selector(nativeValueChanged), for: .valueChanged)
+        }
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+        func refresh() {
+            let span = range.upperBound - range.lowerBound
+            isEnabled = span > 0
+            setValue(span > 0 ? Float((cursor - range.lowerBound) / span) : 0, animated: false)
+            accessibilityValue = "Move \(Int(max(0, cursor)) + 1) of \(Int(range.upperBound) + 1)"
+        }
+        private func report(_ next: Double) {
+            cursor = max(range.lowerBound, min(range.upperBound, next))
+            refresh()
+            changed?(cursor)
+        }
+        override func beginTracking(_ touch: UITouch, with event: UIEvent?) -> Bool {
+            let point = touch.location(in: self)
+            gesture = ToolpathScrubGesture(value: cursor, origin: point, previous: point)
+            guard super.beginTracking(touch, with: event) else { gesture = nil; return false }
+            refresh()
+            editing?(true)
+            return true
+        }
+        override func continueTracking(_ touch: UITouch, with event: UIEvent?) -> Bool {
+            guard var state = gesture else { return false }
+            let width = trackRect(forBounds: bounds).width - thumbRect(forBounds: bounds,
+                trackRect: trackRect(forBounds: bounds), value: value).width
+            let next = state.update(to: touch.location(in: self), width: max(1, width), range: range)
+            gesture = state
+            precisionChanged?(state.precision)
+            report(next)
+            return true
+        }
+        override func endTracking(_ touch: UITouch?, with event: UIEvent?) {
+            super.endTracking(touch, with: event)
+            finish()
+        }
+        override func cancelTracking(with event: UIEvent?) {
+            super.cancelTracking(with: event)
+            finish()
+        }
+        private func finish() {
+            gesture = nil
+            precisionChanged?(.normal)
+            editing?(false)
+        }
+        @objc private func nativeValueChanged() {
+            // Retain native accessibility/test adjustments as well as touches.
+            guard gesture == nil else { return }
+            report(range.lowerBound + Double(value) * (range.upperBound - range.lowerBound))
+            editing?(false)
+        }
+        override func accessibilityIncrement() {
+            report(floor(cursor) + 1); editing?(false)
+        }
+        override func accessibilityDecrement() {
+            report(ceil(cursor) - 1); editing?(false)
+        }
+    }
+}
+
 /// Interactive build plate with official-engine mesh geometry + optional G-code paths.
 struct PlateSceneView: UIViewRepresentable {
     var mesh: MeshGeometry?
@@ -1671,18 +1818,26 @@ struct GCodePathGeometry {
     }
 
     func filtered(minZ: Float = -.greatestFiniteMagnitude, maxZ: Float, enabledGroups: Set<FeatureGroup>? = nil, hiddenFeatures: Set<String> = [],
-                  enabledMoves: Set<MoveKind>? = nil, hiddenTools: Set<Int> = [], hiddenFilaments: Set<Int> = [], throughMove: Int = .max, cancelled: () -> Bool = { false }) -> GCodePathGeometry {
+                  enabledMoves: Set<MoveKind>? = nil, hiddenTools: Set<Int> = [], hiddenFilaments: Set<Int> = [], throughMove: Int = .max, throughPosition: Double? = nil, cancelled: () -> Bool = { false }) -> GCodePathGeometry {
         var out: [Segment] = []
+        let limit = throughPosition.map { $0.isFinite ? min($0, Double(throughMove)) : Double(throughMove) } ?? Double(throughMove)
         for source in segments {
             if cancelled() { break }
-            if source.firstMove > throughMove { break }
+            if Double(source.firstMove) - 1 >= limit { break }
             if source.kind == .extrude && (hiddenFeatures.contains(source.feature) ||
                 hiddenTools.contains(source.metrics.tool) || hiddenFilaments.contains(source.metrics.colorID)) { continue }
             if let enabledMoves, !enabledMoves.contains(source.kind) { continue }
             var seg = source
-            if source.lastMove > throughMove {
-                seg.points = Array(source.points.prefix(max(0, throughMove - source.firstMove + 2)))
-                seg.lastMove = throughMove
+            if Double(source.lastMove) > limit, !source.points.isEmpty {
+                let offset = max(0, min(Double(source.points.count - 1), limit - Double(source.firstMove) + 1))
+                let whole = Int(offset), fraction = Float(offset - Double(whole))
+                seg.points = Array(source.points.prefix(whole + 1))
+                if fraction > 0, whole + 1 < source.points.count {
+                    let a = source.points[whole], b = source.points[whole + 1]
+                    seg.points.append(SCNVector3(a.x + (b.x-a.x)*fraction,
+                        a.y + (b.y-a.y)*fraction, a.z + (b.z-a.z)*fraction))
+                }
+                seg.lastMove = Int(ceil(limit))
             }
             if let enabled = enabledGroups {
                 let g = Self.group(for: seg.feature)
@@ -1780,6 +1935,27 @@ struct GCodePathGeometry {
         zero.points = [SCNVector3Zero, SCNVector3Zero]
         zero.firstMove = 0; zero.lastMove = 0; zero.feedrate = 0
         guard GCodePathGeometry(segments: [zero]).advanceToolhead(from: -1, seconds: 1) == 0 else { return false }
+
+        let partial = timeline.filtered(maxZ: 1, throughPosition: cursor)
+        guard let tip = partial.segments.last?.points.last,
+              abs(tip.x - 10) < 0.001, abs(tip.y - 5) < 0.001,
+              timeline.filtered(maxZ: 1, throughPosition: -1).segments.isEmpty,
+              timeline.filtered(maxZ: 1, throughMove: 0).segments.last?.points.count == 2 else { return false }
+        let gestureOrigin = CGPoint(x: 150, y: 20)
+        var scrub = ToolpathScrubGesture(value: 500_000, origin: gestureOrigin, previous: gestureOrigin)
+        let fullRange = 0.0...1_000_000.0
+        guard abs(scrub.update(to: CGPoint(x: 180, y: 20), width: 300, range: fullRange) - 600_000) < 0.001,
+              scrub.update(to: CGPoint(x: 180, y: 140), width: 300, range: fullRange) == 600_000,
+              scrub.update(to: CGPoint(x: 188, y: 140), width: 300, range: fullRange) == 600_001,
+              scrub.update(to: CGPoint(x: 180, y: 140), width: 300, range: fullRange) == 600_000,
+              scrub.update(to: CGPoint(x: 180, y: 20), width: 300, range: fullRange) == 600_000,
+              scrub.update(to: CGPoint(x: 900, y: 20), width: 300, range: fullRange) == 1_000_000 else { return false }
+        let accessibleScrubber = ManualToolpathScrubber.PrecisionSlider()
+        accessibleScrubber.range = fullRange; accessibleScrubber.cursor = 600_000
+        accessibleScrubber.accessibilityIncrement()
+        guard accessibleScrubber.cursor == 600_001 else { return false }
+        accessibleScrubber.accessibilityDecrement()
+        guard accessibleScrubber.cursor == 600_000 else { return false }
 
         let path = Segment(points: [SCNVector3(0, 0, 0), SCNVector3(1, 0, 2), SCNVector3(2, 0, 0)],
                            feature: "Outer wall", width: 0.45, feedrate: 1200, height: 0.3)

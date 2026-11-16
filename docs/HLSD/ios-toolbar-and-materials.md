@@ -133,3 +133,17 @@ feedrates across segment boundaries, zero-length/unknown-feed moves, end clamps
 and invalid cursor input; the phone UI test checks Play/Pause, cursor progress
 and layer-change cancellation. Apple SDK/runtime checks for this batch are
 pending until recorded in the build evidence.
+
+Manual toolpath scrubbing now uses a native slider with incremental precision:
+drag horizontally for the whole file, or move the finger above/below the track
+for 1/10, 1/100 and move-by-move sensitivity. Switching precision does not jump
+the cursor. Previous/Next and VoiceOver adjustments step to the adjacent move.
+The move readout and marker retain fractional positions; releasing the control
+clips the path to that same fractional endpoint rather than the preceding
+integer move. Existing integer clipping remains compatible. The selected layer
+range stays visible while the finger is tracking; geometry is rebuilt on release,
+with no full bead-mesh rebuild on each touch event. Regression cases cover a
+million-move range, precision transitions/reversal/clamps, accessibility stepping,
+partial corner endpoints and integer/start clipping; phone tests exercise direct
+manual adjustment and adjacent-move buttons. SDK/native validation for this batch
+is pending until recorded separately.

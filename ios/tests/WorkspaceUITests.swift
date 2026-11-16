@@ -42,6 +42,16 @@ final class WorkspaceUITests: XCTestCase {
         let controls = app.scrollViews["preview-controls-content"]
         for _ in 0..<3 where !playback.isHittable { controls.swipeUp() }
         XCTAssertTrue(playback.isHittable)
+        let manual = app.sliders["Toolpath move"]
+        for _ in 0..<3 where !manual.isHittable { controls.swipeDown() }
+        XCTAssertTrue(manual.isHittable)
+        manual.adjust(toNormalizedSliderPosition: 0.5)
+        let beforeStep = manual.value as? String
+        app.buttons["Next toolpath move"].tap()
+        XCTAssertNotEqual(manual.value as? String, beforeStep, "Manual controls must advance exactly one move")
+        app.buttons["Previous toolpath move"].tap()
+        XCTAssertEqual(playback.label, "Play", "Manual scrubbing must not start automatic playback")
+        for _ in 0..<3 where !playback.isHittable { controls.swipeUp() }
         playback.tap()
         let playing = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             playback.label == "Pause"

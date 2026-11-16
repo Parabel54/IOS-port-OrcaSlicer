@@ -1084,11 +1084,13 @@ final class OrcaEngine: ObservableObject {
     @Published var smoothToolheadMovement = true
     @Published private(set) var previewToolheadMove: Double?
     @Published private(set) var previewPlaybackRunning = false
+    private var previewManualScrubbing = false
     @Published var previewPlaybackRate = 1.0
     private var previewPlaybackTask: Task<Void, Never>?
 
     func resetPreviewSequence() {
         pauseToolheadPlayback(refresh: false)
+        previewManualScrubbing = false
         previewThroughMove = .max
         previewToolheadMove = nil
         previewToolheadPosition = nil
@@ -1156,6 +1158,23 @@ final class OrcaEngine: ObservableObject {
         updateToolhead(to: value)
     }
 
+    func setToolheadScrubbing(_ editing: Bool) {
+        pauseToolheadPlayback(refresh: false)
+        let needsFullPath = previewThroughMove != .max
+        previewManualScrubbing = editing
+        if editing {
+            if needsFullPath { applyPreviewLayer() }
+        } else { requestPreviewLayer() }
+    }
+
+    func stepToolhead(_ direction: Int) {
+        guard let geometry = gcodeGeometry, geometry.moveCount > 0 else { return }
+        previewManualScrubbing = false
+        let cursor = previewToolheadMove ?? Double(min(previewThroughMove, geometry.moveCount - 1))
+        scrubToolhead(to: max(0, direction > 0 ? floor(cursor) + 1 : ceil(cursor) - 1))
+        requestPreviewLayer()
+    }
+
     private var previewRefreshTask: Task<Void, Never>?
 
     func requestPreviewLayer() {
@@ -1184,13 +1203,15 @@ final class OrcaEngine: ObservableObject {
         let lo = min(previewMinZ, previewMaxZ), hi = max(previewMinZ, previewMaxZ)
         let hidden = previewHiddenFeatures, moves = previewEnabledMoves
         let tools = previewHiddenTools, filaments = previewHiddenFilaments
-        let through = previewPlaybackRunning ? Int.max : previewThroughMove, mode = previewColorMode
+        let moving = previewPlaybackRunning || previewManualScrubbing
+        let through = moving || previewToolheadMove != nil ? Int.max : previewThroughMove
+        let fractionalThrough = moving ? nil : previewToolheadMove, mode = previewColorMode
         let toolMarker = previewShowToolMarker, cog = previewShowCenterOfGravity
         let lightweight = previewLightweight || geo.moveCount > 250_000
         previewBuilding = true
         let work = Task.detached(priority: .userInitiated) {
             let filtered = geo.filtered(minZ: lo, maxZ: hi, hiddenFeatures: hidden,
-                enabledMoves: moves, hiddenTools: tools, hiddenFilaments: filaments, throughMove: through, cancelled: { Task.isCancelled })
+                enabledMoves: moves, hiddenTools: tools, hiddenFilaments: filaments, throughMove: through, throughPosition: fractionalThrough, cancelled: { Task.isCancelled })
             return filtered.makeNode(color: .white, colorMode: mode, showToolMarker: toolMarker, showCenterOfGravity: cog, lightweight: lightweight, cancelled: { Task.isCancelled })
         }
         previewBuildTask = work

@@ -3086,12 +3086,23 @@ struct OrcaRootView: View {
     private var toolpathScrubber: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let geometry = engine.gcodeGeometry {
-                Text("Toolhead position").font(.subheadline.weight(.semibold))
-                Slider(value: Binding(get: { max(0, engine.previewToolheadMove ?? Double(min(engine.previewThroughMove, max(0, geometry.moveCount - 1)))) },
-                    set: { engine.scrubToolhead(to: $0) }),
-                    in: 0...Double(max(1, geometry.moveCount - 1)), onEditingChanged: { editing in
-                        if !editing { engine.requestPreviewLayer() }
-                    }).accessibilityLabel("Toolpath move")
+                let cursor = max(0, engine.previewToolheadMove ?? Double(min(engine.previewThroughMove, max(0, geometry.moveCount - 1))))
+                HStack {
+                    Text("Toolhead position").font(.subheadline.weight(.semibold))
+                    Spacer()
+                    Text("Move \((cursor + 1).formatted(.number.precision(.fractionLength(0...2)))) / \(geometry.moveCount)")
+                        .font(.caption.monospacedDigit()).lineLimit(1).minimumScaleFactor(0.7)
+                }
+                HStack(spacing: 8) {
+                    Button { engine.stepToolhead(-1) } label: { Image(systemName: "backward.end.fill").frame(width: 44, height: 44) }
+                        .accessibilityLabel("Previous toolpath move").disabled(cursor <= 0)
+                    ManualToolpathScrubber(value: Binding(
+                        get: { cursor },
+                        set: { engine.scrubToolhead(to: $0) }), range: 0...Double(max(0, geometry.moveCount - 1)),
+                        onEditingChanged: { engine.setToolheadScrubbing($0) })
+                    Button { engine.stepToolhead(1) } label: { Image(systemName: "forward.end.fill").frame(width: 44, height: 44) }
+                        .accessibilityLabel("Next toolpath move").disabled(cursor >= Double(geometry.moveCount - 1))
+                }
                 HStack {
                     Button {
                         if engine.previewPlaybackRunning { engine.pauseToolheadPlayback() }
