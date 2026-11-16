@@ -7,6 +7,7 @@
 
 import SwiftUI
 import SceneKit
+import ObjectiveC
 import Metal
 import UIKit
 
@@ -207,7 +208,7 @@ struct ManualToolpathScrubber: View {
             let span = range.upperBound - range.lowerBound
             isEnabled = span > 0
             setValue(span > 0 ? Float((cursor - range.lowerBound) / span) : 0, animated: false)
-            accessibilityValue = "Move \(Int(max(0, cursor)) + 1) of \(Int(range.upperBound) + 1)"
+            accessibilityValue = "Move \((max(0, cursor + 1)).formatted(.number.precision(.fractionLength(0...2)))) of \(Int(range.upperBound) + 1)"
         }
         private func report(_ next: Double) {
             cursor = max(range.lowerBound, min(range.upperBound, next))
@@ -619,7 +620,7 @@ struct PlateSceneView: UIViewRepresentable {
             if showGCode, let gcodeNode {
                 let clone = gcodeNode.clone()
                 clone.name = "gcode"
-                clone.userData = gcodeNode.userData
+                GCodePathGeometry.copyCursorRenderer(from: gcodeNode, to: clone)
                 clone.eulerAngles = SCNVector3Zero
                 content.addChildNode(clone)
             }
@@ -1964,7 +1965,7 @@ struct GCodePathGeometry {
             feature: "Travel", width: 0, feedrate: 1200, kind: .travel, firstMove: 2, lastMove: 2)
         let source = GCodePathGeometry(segments: [wall, travel]).filtered(maxZ: 1)
         let node = source.makeNode(color: .white, trackCursor: true)
-        guard let renderer = node.userData?["orca-cursor-renderer"] as? CursorRenderer,
+        guard let renderer = cursorRenderer(for: node),
               renderer.batches.count == 2,
               let partial = node.childNode(withName: "partial-toolpath", recursively: false) else { return false }
         let original = node.childNodes.compactMap(\.geometry).map { ObjectIdentifier($0) }
@@ -2004,7 +2005,7 @@ struct GCodePathGeometry {
         let path = Segment(points: [SCNVector3(-1,0,0), SCNVector3(1,0,0)],
             feature: "Outer wall", width: 1, feedrate: 1200)
         let source = GCodePathGeometry(segments: [path]).makeNode(color: .white, lightweight: true, trackCursor: true)
-        let node = source.clone(); node.userData = source.userData
+        let node = source.clone(); copyCursorRenderer(from: source, to: node)
         scene.rootNode.addChildNode(node)
         let camera = SCNNode(); camera.camera = SCNCamera()
         camera.camera?.usesOrthographicProjection = true; camera.camera?.orthographicScale = 1
@@ -2075,6 +2076,11 @@ struct GCodePathGeometry {
         guard accessibleScrubber.cursor == 600_001 else { return false }
         accessibleScrubber.accessibilityDecrement()
         guard accessibleScrubber.cursor == 600_000 else { return false }
+        accessibleScrubber.range = -1...1; accessibleScrubber.cursor = 0
+        accessibleScrubber.accessibilityDecrement()
+        guard accessibleScrubber.cursor == -1 else { return false }
+        accessibleScrubber.accessibilityIncrement()
+        guard accessibleScrubber.cursor == 0 else { return false }
 
         let path = Segment(points: [SCNVector3(0, 0, 0), SCNVector3(1, 0, 2), SCNVector3(2, 0, 0)],
                            feature: "Outer wall", width: 0.45, feedrate: 1200, height: 0.3)
@@ -2360,7 +2366,7 @@ struct GCodePathGeometry {
             travels.flush(into: root) // Job annotation, independent of move cursor.
         }
         if let cursorRenderer {
-            root.userData = ["orca-cursor-renderer": cursorRenderer]
+            objc_setAssociatedObject(root, &cursorRendererKey, cursorRenderer, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
             let partial = SCNNode(); partial.name = "partial-toolpath"
             root.addChildNode(partial)
         }
@@ -2368,11 +2374,21 @@ struct GCodePathGeometry {
     }
 
     static func updateCursor(on root: SCNNode, through position: Double?) {
-        (root.userData?["orca-cursor-renderer"] as? CursorRenderer)?.update(root, through: position)
+        cursorRenderer(for: root)?.update(root, through: position)
     }
 
     static func endPoint(in root: SCNNode) -> SCNVector3? {
-        (root.userData?["orca-cursor-renderer"] as? CursorRenderer)?.geometry.segments.last?.points.last
+        cursorRenderer(for: root)?.geometry.segments.last?.points.last
+    }
+
+    private static var cursorRendererKey: UInt8 = 0
+
+    private static func cursorRenderer(for root: SCNNode) -> CursorRenderer? {
+        objc_getAssociatedObject(root, &cursorRendererKey) as? CursorRenderer
+    }
+
+    static func copyCursorRenderer(from source: SCNNode, to destination: SCNNode) {
+        objc_setAssociatedObject(destination, &cursorRendererKey, cursorRenderer(for: source), .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
     }
 
     /// Cached batches keep their GPU buffers. Each frame changes only primitive

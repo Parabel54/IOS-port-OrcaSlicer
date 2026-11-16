@@ -3101,7 +3101,7 @@ struct OrcaRootView: View {
     private var toolpathScrubber: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let geometry = engine.gcodeGeometry {
-                let cursor = max(0, engine.previewToolheadMove ?? Double(min(engine.previewThroughMove, max(0, geometry.moveCount - 1))))
+                let cursor = max(-1, engine.previewToolheadMove ?? Double(min(engine.previewThroughMove, max(0, geometry.moveCount - 1))))
                 HStack {
                     Text("Toolhead position").font(.subheadline.weight(.semibold))
                     Spacer()
@@ -3110,10 +3110,10 @@ struct OrcaRootView: View {
                 }
                 HStack(spacing: 8) {
                     Button { engine.stepToolhead(-1) } label: { Image(systemName: "backward.end.fill").frame(width: 44, height: 44) }
-                        .accessibilityLabel("Previous toolpath move").disabled(cursor <= 0)
+                        .accessibilityLabel("Previous toolpath move").disabled(cursor <= -1)
                     ManualToolpathScrubber(value: Binding(
                         get: { cursor },
-                        set: { engine.scrubToolhead(to: $0) }), range: 0...Double(max(0, geometry.moveCount - 1)),
+                        set: { engine.scrubToolhead(to: $0) }), range: -1...Double(max(0, geometry.moveCount - 1)),
                         onEditingChanged: { engine.setToolheadScrubbing($0) })
                     Button { engine.stepToolhead(1) } label: { Image(systemName: "forward.end.fill").frame(width: 44, height: 44) }
                         .accessibilityLabel("Next toolpath move").disabled(cursor >= Double(geometry.moveCount - 1))

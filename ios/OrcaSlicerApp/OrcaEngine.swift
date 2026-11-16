@@ -1156,7 +1156,7 @@ final class OrcaEngine: ObservableObject {
     func stepToolhead(_ direction: Int) {
         guard let geometry = gcodeGeometry, geometry.moveCount > 0 else { return }
         let cursor = previewToolheadMove ?? Double(min(previewThroughMove, geometry.moveCount - 1))
-        scrubToolhead(to: max(0, direction > 0 ? floor(cursor) + 1 : ceil(cursor) - 1))
+        scrubToolhead(to: max(-1, direction > 0 ? floor(cursor) + 1 : ceil(cursor) - 1))
     }
 
     private var previewRefreshTask: Task<Void, Never>?
