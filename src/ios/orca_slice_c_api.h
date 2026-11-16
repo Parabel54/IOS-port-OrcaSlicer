@@ -689,6 +689,7 @@ ORCA_API int orca_session_export_brim_ear_mesh(
 /**
  * Mesh boolean between two objects (desktop GLGizmoMeshBoolean).
  * op: 0=union, 1=difference (A − B), 2=intersection.
+ * All world-space instances are included and flattened into one instance of A.
  * Result replaces object A volumes; object B is deleted when delete_b != 0.
  * @return 0 on success
  */

@@ -155,9 +155,19 @@ int main(int argc, char **argv)
         if (!require(orca_session_add_primitive(edited.get(), 0, 20, 20, 20) == 0, "boolean A") ||
             !require(orca_session_add_primitive(edited.get(), 0, 20, 20, 20) == 1, "boolean B") ||
             !require(orca_session_rotate_object_z(edited.get(), 1, 15) == 0, "boolean rotated operand") ||
-            !require(orca_session_translate_object(edited.get(), 1, 8, 0, 4) == 0, "boolean overlapping operand") ||
+            !require(orca_session_translate_object(edited.get(), 1, 8, 0, 4) == 0, "boolean overlapping operand")) return 4;
+        float before_bounds[6] = {}, after_bounds[6] = {};
+        if (!require(orca_session_model_bounds(edited.get(), &before_bounds[0], &before_bounds[1], &before_bounds[2],
+                                              &before_bounds[3], &before_bounds[4], &before_bounds[5]) == 0,
+                     "boolean world bounds before union") ||
             !require(orca_session_mesh_boolean(edited.get(), 0, 1, 0, 1) == 0, "native mesh union") ||
-            !require(orca_session_object_count(edited.get()) == 1, "boolean removes the chosen operand")) return 4;
+            !require(orca_session_object_count(edited.get()) == 1, "boolean removes the chosen operand") ||
+            !require(orca_session_model_bounds(edited.get(), &after_bounds[0], &after_bounds[1], &after_bounds[2],
+                                              &after_bounds[3], &after_bounds[4], &after_bounds[5]) == 0,
+                     "boolean world bounds after union")) return 4;
+        for (int axis = 0; axis < 6; ++axis)
+            if (!require(std::fabs(before_bounds[axis] - after_bounds[axis]) < 0.001f,
+                         "union preserves the operands' world bounds")) return 4;
     }
     std::printf("PASS: native simplify, plane cut and overlapping mesh union\n");
     diagnostic_session = session.get();
@@ -341,6 +351,10 @@ int main(int argc, char **argv)
             dense(orca_session_create(argv[2]), orca_session_destroy);
         diagnostic_session = dense.get();
         if (!require(orca_session_add_primitive(dense.get(), 1, 20, 20, 20) == 0, "dense preview cylinder") ||
+            !require(orca_session_set_option(dense.get(), "use_relative_e_distances", "1") == 0, "dense fixture extrusion mode") ||
+            !require(orca_session_set_option(dense.get(), "layer_change_gcode", "G92 E0") == 0, "dense fixture layer reset") ||
+            !require(orca_session_set_option(dense.get(), "min_layer_height", "0.04") == 0, "dense fixture layer limit") ||
+            !require(orca_session_set_option(dense.get(), "resolution", "0.001") == 0, "retain dense fixture curve detail") ||
             !require(orca_session_set_option(dense.get(), "layer_height", "0.05") == 0, "fine preview layers") ||
             !require(orca_session_slice_to_gcode(dense.get(), (directory + "/dense-preview.gcode").c_str()) == 0,
                      "slice complete dense preview")) return 16;

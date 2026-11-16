@@ -4045,14 +4045,12 @@ int orca_session_mesh_boolean(
             return -4;
         }
         const char *op_str = (op == 0) ? "UNION" : (op == 1) ? "A_NOT_B" : "INTERSECTION";
-        // Transform B mesh into A's instance frame so booleans align in world space.
+        // ModelObject::mesh already includes every instance in world space.
+        // Applying its first-instance matrix again shifts/rotates the operands
+        // twice and can turn an overlapping union into disjoint geometry.
         TriangleMesh mesh_a = A->mesh();
         TriangleMesh mesh_b = B->mesh();
         const Transform3d ta = object_instance_matrix(A);
-        const Transform3d tb = object_instance_matrix(B);
-        // Bring both to world, boolean, then back into A local (identity after replace).
-        mesh_a.transform(ta);
-        mesh_b.transform(tb);
 
         std::vector<TriangleMesh> results;
         MeshBoolean::mcut::make_boolean(mesh_a, mesh_b, results, op_str);
@@ -4070,6 +4068,10 @@ int orca_session_mesh_boolean(
             if (vol)
                 vol->name = A->name + "_" + std::to_string(i++);
         }
+        // The result already contains all world-space instances. Keep A's
+        // first frame/metadata and avoid rendering that result once per copy.
+        while (A->instances.size() > 1)
+            A->delete_last_instance();
         A->invalidate_bounding_box();
         A->ensure_on_bed();
 
