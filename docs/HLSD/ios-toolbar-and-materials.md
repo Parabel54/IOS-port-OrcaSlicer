@@ -15,13 +15,13 @@ session was unavailable. A matching label is not evidence of interaction parity.
 | Move, rotate, scale | Native transforms and camera gestures; desktop gizmo handles/constraints are partial |
 | Lay on face | Auto-orient is available; explicit desktop face picking is not equivalent and remains incomplete |
 | Plane cut, mesh boolean, simplify | Native algorithms with numeric mobile controls and existing geometry tests; gizmo UI parity partial |
-| Support/seam/MMU/fuzzy/brim-ear paint | Native facet annotations; full desktop brush modes and per-facet Prepare color display remain incomplete |
+| Support/seam/MMU/fuzzy/brim-ear paint | Native facet annotations; persistent per-filament Prepare regions; full desktop brush modes remain incomplete |
 | Emboss, SVG, texture displacement | Full desktop workflows missing; a text plate is not general emboss |
 | Variable layer height | Interactive desktop profile editor missing |
 | Assembly view/tools | Explode/assembly-related operations are partial; full desktop assembly workflow missing |
 | Views / Home | Six-face camera cube, Home, orbit/pan/zoom; orthographic/perspective and additional desktop view preferences remain incomplete |
 | Global / Objects | Explicit target tabs; initial object layer height, walls, infill and filament overrides with reset to Global |
-| Filament colors | Native color pickers, project slots, object display colors and Filament preview default; selection no longer replaces body color with teal; full per-slot preset editor remains incomplete |
+| Filament colors | Native color pickers, project slots, object display colors and Filament preview default; persistent painted facet colors remain attached during live transforms; full per-slot preset editor remains incomplete |
 | Mixed Filament | Native FilamentMixer color blending, 2/3 physical components, positive percentages totaling 100, linear height gradient/direction/per-object option |
 | Mixed custom curves | Existing core data retained on import; desktop custom curve and existing-slot editing/deletion are not exposed on mobile yet |
 | Plugin manager | General desktop plugin runtime remains missing. Native Zmod processing is not compatibility with the 18 reported plugins |
@@ -50,3 +50,14 @@ interpolation, and a UI assertion against duplicate upper-layer sliders. Apple
 SDK/runtime results must be recorded separately; local catalog tests alone do not
 prove these workflows work on device. This document is a parity audit and working
 implementation record, not a claim that the entire desktop toolbar is ported.
+
+Prepare color follow-up: world-space MMU facets are exported separately for each
+native painting state and attached beneath their object node. Color changes
+refresh materials without flattening all painted states into a single mask. The
+cache is refreshed on model import/edit/undo and MMU paint changes, not camera
+frames. Paint changes invalidate old slicing results. Support/seam/fuzzy diagnostic
+overlays remain separate. Mixed regions use their derived swatch; matching a
+height-gradient swatch in the Prepare surface is still separate from sliced
+filament preview. Native tests isolate the first and highest paint states; a GPU
+test checks distinct red/green regions and object attachment. Runtime validation
+is tracked in CI, not implied by the source change.

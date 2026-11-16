@@ -64,6 +64,39 @@ int main(int argc, char **argv)
             !require(std::fabs(b[3]-b[0]-0.2f) < 0.001f && std::fabs(b[4]-b[1]-0.3f) < 0.001f &&
                      std::fabs(b[5]-b[2]-0.4f) < 0.001f, "primitive dimensions are not clamped by legacy text plate limits")) return 4;
     }
+    {
+        std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+            painted(orca_session_create(argv[2]), orca_session_destroy);
+        diagnostic_session = painted.get();
+        if (!require(orca_session_add_primitive(painted.get(), 0, 20, 20, 20) == 0 &&
+                     orca_session_paint_fill(painted.get(), 0, 2, 1) > 0, "two-color Prepare fixture")) return 4;
+        float *positions = nullptr;
+        uint32_t *indices = nullptr;
+        size_t vertices = 0, count = 0;
+        if (!require(orca_session_export_object_mesh(painted.get(), 0, &positions, &vertices, &indices, &count) == 0 &&
+                     count >= 3, "export paint hit location")) return 4;
+        float hit[3]{};
+        for (int axis = 0; axis < 3; ++axis)
+            for (int vertex = 0; vertex < 3; ++vertex)
+                hit[axis] += positions[3 * indices[vertex] + axis] / 3.f;
+        orca_free(positions); orca_free(indices);
+        if (!require(orca_session_paint_at(painted.get(), 0, hit[0], hit[1], hit[2], 2,
+                     orca_max_paint_filaments(), 0.1f) > 0, "paint highest native filament state")) return 4;
+        size_t total = 0;
+        for (int state : {1, orca_max_paint_filaments(), -1, 2}) {
+            positions = nullptr; indices = nullptr; vertices = 0; count = 0;
+            const int result = orca_session_export_paint_mesh(painted.get(), 0, 2, state, &positions, &vertices, &indices, &count);
+            orca_free(positions); orca_free(indices);
+            if (!require(result == 0, "export individual filament regions")) return 4;
+            if (state > 0 && state != 2) {
+                if (!require(count > 0, "both painted colors survive independently")) return 4;
+                total += count;
+            } else if (state == -1) {
+                if (!require(count == total, "individual colors partition combined paint topology")) return 4;
+            } else if (!require(count == 0, "unused filament has no painted faces")) return 4;
+        }
+        std::printf("PASS: separate Prepare filament regions through highest native paint state\n");
+    }
     for (const char *file : {"3DBenchy.drc", "calicat.drc", "OrcaCube_v2.drc", "OrcaPlug_v2.drc",
              "OrcaSliced.3mf", "OrcaBadge.3mf", "OrcaToleranceTest.drc", "ksr_fdmtest_v4.drc",
              "Voron_Design_Cube_v7.drc", "Stanford_Bunny.drc", "Orca_stringhell.drc"}) {

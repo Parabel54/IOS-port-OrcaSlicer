@@ -32,6 +32,8 @@ final class OrcaEngine: ObservableObject {
     @Published var mesh: MeshGeometry?
     /// Per-object meshes for plate hit-test / selection (same order as objectNames)
     @Published var objectMeshes: [MeshGeometry] = []
+    @Published private(set) var paintedFilaments: [PaintedFilamentRegion] = []
+    @Published private(set) var filamentPaintRevision = 0
     @Published var gcodePathNode: SCNNode?
     @Published var gcodeGeometry: GCodePathGeometry?
     @Published var previewIsReduced = false
@@ -1132,6 +1134,9 @@ final class OrcaEngine: ObservableObject {
     func refreshMesh() {
         meshRevision += 1
         invalidateSlice()
+        // Imported projects, undo, mesh edits and instance transforms can all
+        // change the world-space annotation geometry.
+        defer { refreshFilamentPaint() }
         #if ORCA_LINKED
         guard let s = session, hasModel else {
             mesh = nil
@@ -1553,9 +1558,12 @@ final class OrcaEngine: ObservableObject {
     }
 
     @Published private(set) var objectFilamentColors: [UIColor] = []
+    @Published private(set) var projectDisplayColors: [UIColor] = []
 
     private func refreshObjectFilamentColors() {
         let colors = projectFilamentColors
+        projectDisplayColors = colors.map(FilamentColor.uiColor)
+        filamentPaintRevision += 1
         objectFilamentColors = objectNames.indices.map { index in
             let slot = max(0, (Int(getObjectOption(index: index, key: "extruder") ?? "1") ?? 1) - 1)
             return FilamentColor.uiColor(colors[min(slot, colors.count - 1)])
@@ -2651,6 +2659,7 @@ final class OrcaEngine: ObservableObject {
         )
         lastPaintCount = max(0, Int(n))
         if n >= 0 {
+            invalidateSlice()
             refreshPaintOverlay(kind: kind)
             refreshPaintStats(kind: kind)
             lastMessage = n > 0
@@ -2674,6 +2683,7 @@ final class OrcaEngine: ObservableObject {
         let n = orca_session_paint_fill(s, Int32(idx), Int32(kind.rawValue), Int32(state))
         lastPaintCount = max(0, Int(n))
         if n >= 0 {
+            invalidateSlice()
             refreshPaintOverlay(kind: kind)
             refreshPaintStats(kind: kind)
             lastMessage = "Fill \(kind.label) · \(n) facets"
@@ -2696,7 +2706,11 @@ final class OrcaEngine: ObservableObject {
             : Int32(selectedObjectIndex >= 0 ? selectedObjectIndex : 0)
         let rc = orca_session_paint_clear(s, idx, Int32(kind.rawValue))
         if rc == 0 {
-            refreshPaintOverlay(kind: kind)
+            invalidateSlice()
+            if kind == .mmu && allObjects {
+                refreshFilamentPaint()
+                paintOverlayMesh = nil
+            } else { refreshPaintOverlay(kind: kind) }
             refreshPaintStats(kind: kind)
             lastMessage = "Cleared \(kind.label) paint"
             return true
@@ -2727,18 +2741,41 @@ final class OrcaEngine: ObservableObject {
 
     /// Load world-space painted facets for SceneKit overlay (any non-NONE state).
     func refreshPaintOverlay(kind: PaintKind?) {
-        #if ORCA_LINKED
-        guard let s = session, hasModel, let kind else {
+        if kind == .mmu {
+            // MMU paint is persistent material coloring, not a single brush mask.
+            refreshFilamentPaint(objectIndex: selectedObjectIndex >= 0 ? selectedObjectIndex : nil)
             paintOverlayMesh = nil
             return
         }
-        let idx = selectedObjectIndex >= 0 ? Int32(selectedObjectIndex) : Int32(-1)
+        guard let kind else { paintOverlayMesh = nil; return }
+        paintOverlayMesh = exportedPaintMesh(objectIndex: selectedObjectIndex, kind: kind, state: -1)
+    }
+
+    private func refreshFilamentPaint(objectIndex: Int? = nil) {
+        var regions = objectIndex.map { index in paintedFilaments.filter { $0.objectIndex != index } } ?? []
+        if hasModel {
+            let objects = objectIndex.map { [$0] } ?? Array(objectMeshes.indices)
+            for index in objects {
+                for state in 1...maximumPaintFilaments {
+                    if let mesh = exportedPaintMesh(objectIndex: index, kind: .mmu, state: state) {
+                        regions.append(PaintedFilamentRegion(objectIndex: index, filamentIndex: state - 1, mesh: mesh))
+                    }
+                }
+            }
+        }
+        paintedFilaments = regions
+        filamentPaintRevision += 1
+    }
+
+    private func exportedPaintMesh(objectIndex: Int, kind: PaintKind, state: Int) -> MeshGeometry? {
+        #if ORCA_LINKED
+        guard let s = session, hasModel else { return nil }
         var posPtr: UnsafeMutablePointer<Float>?
         var idxPtr: UnsafeMutablePointer<UInt32>?
         var vcount: Int = 0
         var icount: Int = 0
         let rc = orca_session_export_paint_mesh(
-            s, idx, Int32(kind.rawValue), -1,
+            s, Int32(objectIndex), Int32(kind.rawValue), Int32(state),
             &posPtr, &vcount, &idxPtr, &icount
         )
         defer {
@@ -2746,13 +2783,10 @@ final class OrcaEngine: ObservableObject {
             if let i = idxPtr { orca_free(i) }
         }
         guard rc == 0, let posPtr, let idxPtr, vcount > 0, icount > 0 else {
-            paintOverlayMesh = nil
-            return
+            return nil
         }
-        var positions = [Float](repeating: 0, count: vcount * 3)
-        var indices = [UInt32](repeating: 0, count: icount)
-        for i in 0..<(vcount * 3) { positions[i] = posPtr[i] }
-        for i in 0..<icount { indices[i] = idxPtr[i] }
+        let positions = Array(UnsafeBufferPointer(start: posPtr, count: vcount * 3))
+        let indices = Array(UnsafeBufferPointer(start: idxPtr, count: icount))
         var bmin = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
         var bmax = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
         for i in 0..<vcount {
@@ -2760,9 +2794,9 @@ final class OrcaEngine: ObservableObject {
             bmin = min(bmin, p)
             bmax = max(bmax, p)
         }
-        paintOverlayMesh = MeshGeometry(positions: positions, indices: indices, min: bmin, max: bmax)
+        return MeshGeometry(positions: positions, indices: indices, min: bmin, max: bmax)
         #else
-        paintOverlayMesh = nil
+        return nil
         #endif
     }
 

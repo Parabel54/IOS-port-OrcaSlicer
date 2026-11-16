@@ -19,6 +19,14 @@ enum FilamentColor {
     }
 }
 
+/// Native MMU annotations retain their own subdivided topology and filament ID.
+/// Keep them under the corresponding object so live transforms move both.
+struct PaintedFilamentRegion {
+    var objectIndex: Int
+    var filamentIndex: Int
+    var mesh: MeshGeometry
+}
+
 
 /// Pause display work without tearing down GPU resources during background/exit.
 /// The scene is released only when the representable is actually dismantled.
@@ -88,6 +96,9 @@ struct PlateSceneView: UIViewRepresentable {
     /// Per-object meshes for tap-to-select (same order as engine.objectNames).
     var objectMeshes: [MeshGeometry] = []
     var objectColors: [UIColor] = []
+    var paintedFilaments: [PaintedFilamentRegion] = []
+    var filamentColors: [UIColor] = []
+    var filamentPaintRevision: Int = 0
     var selectedObjectIndex: Int = -1
     var gcodeNode: SCNNode? = nil
     var showGCode: Bool = false
@@ -205,7 +216,7 @@ struct PlateSceneView: UIViewRepresentable {
             guard simd_dot(direction, preset.direction) > 0.999,
                   camera.simdOrientation.vector.x.isFinite else { return false }
         }
-        return GCodePathGeometry.previewSmokeTest()
+        return filamentPaintSmokeTest() && GCodePathGeometry.previewSmokeTest()
 
     }
 
@@ -292,7 +303,8 @@ struct PlateSceneView: UIViewRepresentable {
             String(format: "c:%d:%.3f,%.3f,%.3f,%.3f",
                    $0.vertexCount, $0.min.x, $0.min.y, $0.max.x, $0.max.y)
         } ?? "nil") + "|objs=\(perKey)|revision=\(meshRevision)"
-        if !context.coordinator.isDragging, context.coordinator.lastMeshKey != meshKey {
+        let rebuildModel = !context.coordinator.isDragging && context.coordinator.lastMeshKey != meshKey
+        if rebuildModel {
             content.childNode(withName: "model", recursively: false)?.removeFromParentNode()
             let root = SCNNode()
             root.name = "model"
@@ -331,6 +343,21 @@ struct PlateSceneView: UIViewRepresentable {
                         ? UIColor(red: 0.10, green: 0.10, blue: 0.10, alpha: 1)
                         : UIColor.black
                 }
+            }
+        }
+
+        if rebuildModel || context.coordinator.lastFilamentPaintRevision != filamentPaintRevision {
+            if let model = content.childNode(withName: "model", recursively: false) {
+                let grouped = Dictionary(grouping: paintedFilaments, by: \.objectIndex)
+                for object in model.childNodes {
+                    guard let name = object.name, name.hasPrefix("object_"),
+                          let index = Int(name.dropFirst("object_".count)) else { continue }
+                    object.childNode(withName: "filamentPaint", recursively: false)?.removeFromParentNode()
+                    let colors = Self.makeFilamentPaintNode(regions: grouped[index] ?? [], colors: filamentColors,
+                        fallback: objectColors.indices.contains(index) ? objectColors[index] : accent)
+                    object.addChildNode(colors)
+                }
+                context.coordinator.lastFilamentPaintRevision = filamentPaintRevision
             }
         }
 
@@ -401,6 +428,66 @@ struct PlateSceneView: UIViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
+
+    private static func makeFilamentPaintNode(regions: [PaintedFilamentRegion], colors: [UIColor], fallback: UIColor) -> SCNNode {
+        let root = SCNNode()
+        root.name = "filamentPaint"
+        for region in regions {
+            let color = colors.indices.contains(region.filamentIndex) ? colors[region.filamentIndex] : fallback
+            let node = region.mesh.makeNode(color: color)
+            node.name = "filament_\(region.filamentIndex)"
+            node.renderingOrder = 1
+            // A small normal offset avoids coplanar flicker while retaining depth
+            // testing; rear painted faces must not show through the model.
+            node.geometry?.shaderModifiers = [.geometry: "_geometry.position.xyz += _geometry.normal * 0.01;"]
+            root.addChildNode(node)
+        }
+        return root
+    }
+
+    private static func filamentPaintSmokeTest() -> Bool {
+        guard let device = MTLCreateSystemDefaultDevice() else { return false }
+        let scene = SCNScene()
+        scene.background.contents = UIColor.black
+        let left = MeshGeometry(positions: [-1.8,-1,0, -0.2,-1,0, -1,1,0], indices: [0,1,2],
+            min: SIMD3(-1.8,-1,0), max: SIMD3(-0.2,1,0))
+        let right = MeshGeometry(positions: [0.2,-1,0, 1.8,-1,0, 1,1,0], indices: [0,1,2],
+            min: SIMD3(0.2,-1,0), max: SIMD3(1.8,1,0))
+        var colors = [UIColor](repeating: .blue, count: 32)
+        colors[0] = .red; colors[31] = .green
+        let object = SCNNode()
+        let paint = makeFilamentPaintNode(regions: [
+            PaintedFilamentRegion(objectIndex: 0, filamentIndex: 0, mesh: left),
+            PaintedFilamentRegion(objectIndex: 0, filamentIndex: 31, mesh: right)
+        ], colors: colors, fallback: .white)
+        object.addChildNode(paint)
+        scene.rootNode.addChildNode(object)
+        object.position.x = 7
+        guard abs(paint.convertPosition(SCNVector3Zero, to: nil).x - 7) < 0.001 else { return false }
+        object.position.x = 0
+        // Isolate material/color mapping from lighting; the production geometry
+        // and normal-offset shader still run through the real GPU.
+        for node in paint.childNodes { node.geometry?.firstMaterial?.lightingModel = .constant }
+        let camera = SCNNode()
+        camera.camera = SCNCamera()
+        camera.camera?.usesOrthographicProjection = true
+        camera.camera?.orthographicScale = 2
+        camera.position.z = 10
+        scene.rootNode.addChildNode(camera)
+        let renderer = SCNRenderer(device: device, options: nil)
+        renderer.scene = scene; renderer.pointOfView = camera
+        guard let image = renderer.snapshot(atTime: 0, with: CGSize(width: 64, height: 64), antialiasingMode: .none).cgImage else { return false }
+        var pixels = [UInt8](repeating: 0, count: 64 * 64 * 4)
+        return pixels.withUnsafeMutableBytes { bytes in
+            guard let context = CGContext(data: bytes.baseAddress, width: 64, height: 64, bitsPerComponent: 8,
+                bytesPerRow: 256, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue) else { return false }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: 64, height: 64))
+            let a = (32 * 64 + 16) * 4, b = (32 * 64 + 48) * 4
+            return bytes[a] > 180 && bytes[a+1] < 50 && bytes[a+2] < 50 &&
+                bytes[b] < 50 && bytes[b+1] > 180 && bytes[b+2] < 50
+        }
+    }
 
     private func makeScene() -> SCNScene {
         let scene = SCNScene()
@@ -601,6 +688,7 @@ struct PlateSceneView: UIViewRepresentable {
         weak var navigationCube: SCNView?
         var parent: PlateSceneView?
         var lastMeshKey: String = ""
+        var lastFilamentPaintRevision = -1
         var lastPreviewID: ObjectIdentifier?
         var lastShowGCode = false
         var lastBed: SIMD2<Float> = SIMD2(0, 0)
@@ -860,7 +948,7 @@ struct PlateSceneView: UIViewRepresentable {
             if let h = hits.first(where: {
                 let n = $0.node.name
                 let p = $0.node.parent?.name
-                return n == "model" || p == "model" || n == "paintOverlay" || p == "paintOverlay"
+                return n == "model" || p == "model" || n == "paintOverlay" || p == "paintOverlay" || p == "filamentPaint"
             }) {
                 return slic3rFromWorld(h.worldCoordinates)
             }
