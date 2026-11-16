@@ -83,9 +83,8 @@ PYDIAG
 trap cleanup EXIT
 ios_test_run 120 xcrun simctl boot "$DEVICE"
 ios_test_run 240 xcrun simctl bootstatus "$DEVICE" -b
-# bootstatus can finish while SpringBoard's launch service is still warming up.
-# A system app proves that service responds before installing the slicer.
-ios_test_run 90 xcrun simctl launch "$DEVICE" com.apple.Preferences
+# The bounded Orca launches and startup markers below validate the launcher.
+# Launching Settings adds an unrelated cold-start failure to each fresh device.
 APP_BUNDLE="$ROOT/build-ios-app/Build/Products/Release-iphonesimulator/OrcaSlicer.app"
 ios_test_run 360 xcodebuild build-for-testing -project "$ROOT/ios/OrcaSlicer.xcodeproj" \
   -scheme OrcaSlicerUITests -configuration Release -sdk iphonesimulator \
@@ -152,8 +151,6 @@ for variant in compact tablet; do
   DEVICE="$(ios_test_run 120 xcrun simctl create "OrcaWorkspace-$variant" "$device_type" "$RUNTIME")"
   ios_test_run 120 xcrun simctl boot "$DEVICE"
   ios_test_run 240 xcrun simctl bootstatus "$DEVICE" -b
-  # Check the system launcher before exercising the slicer on a fresh device.
-  ios_test_run 90 xcrun simctl launch "$DEVICE" com.apple.Preferences
   ios_test_run 120 xcrun simctl install "$DEVICE" "$APP_BUNDLE"
   APP_DATA="$(xcrun simctl get_app_container "$DEVICE" com.orcaslicer.ios data)"
   mkdir -p "$APP_DATA/Documents"
