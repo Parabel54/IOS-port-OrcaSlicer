@@ -28,14 +28,18 @@
 #include <unordered_map>
 #include <atomic>
 #include <string>
+#include <utility>
 
 #include "libslic3r/Config.hpp"
 #include "libslic3r/FilamentMixer.hpp"
 #include "libslic3r/LayOnFace.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/ObjectID.hpp"
+#include "libslic3r/I18N.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintBase.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Slicing.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -3912,6 +3916,93 @@ int orca_session_erase_object_option(
     } catch (const std::exception &ex) {
         s->set_error(std::string("erase_object_option: ") + ex.what());
         return -3;
+    }
+}
+
+static SlicingParameters layer_profile_parameters(orca_session_t *s, int index)
+{
+    ensure_default_config(s);
+    DynamicPrintConfig config = s->config;
+    normalize_flush_config(config);
+    // Applying without processing obtains the actual printer/nozzle variants,
+    // shrinkage and object transforms used by slicing, without altering the
+    // session or recomputing extrusion paths.
+    Print print;
+    print.apply(s->model, std::move(config));
+    const auto validation = print.validate();
+    if (!validation.string.empty()) throw std::runtime_error(validation.string);
+    const ObjectID id = s->model.objects[size_t(index)]->id();
+    for (const PrintObject *object : print.objects()) {
+        if (object->model_object()->id() != id) continue;
+        const auto params = object->slicing_parameters();
+        if (!params.valid || !std::isfinite(params.min_layer_height) || !std::isfinite(params.max_layer_height) ||
+            !std::isfinite(params.object_print_z_uncompensated_height()) ||
+            !std::isfinite(params.first_object_layer_height) || params.first_object_layer_height <= 0 || params.min_layer_height <= 0 ||
+            params.max_layer_height < params.min_layer_height || params.object_print_z_uncompensated_height() <= 0)
+            throw std::runtime_error(_u8L("The printer has invalid layer-height limits"));
+        return params;
+    }
+    throw std::runtime_error(_u8L("Select a printable object to edit its layer heights"));
+}
+
+int orca_session_export_layer_profile(orca_session_t *s, int index,
+    orca_layer_profile_info_t *info, orca_layer_height_point_t **points)
+{
+    if (info) *info = {};
+    if (points) *points = nullptr;
+    if (!s || !info || !points || !s->has_model || index < 0 || index >= int(s->model.objects.size())) return -1;
+    s->clear_error();
+    try {
+        const ModelObject *object = s->model.objects[size_t(index)];
+        if (!object) return -1;
+        const auto params = layer_profile_parameters(s, index);
+        std::vector<coordf_t> profile;
+        PrintObject::update_layer_height_profile(*object, params, profile);
+        if (profile.empty() || profile.size() % 2 != 0 ||
+            std::any_of(profile.begin(), profile.end(), [](double value) { return !std::isfinite(value); }))
+            throw std::runtime_error(_u8L("Invalid layer-height profile"));
+        const size_t count = profile.size() / 2;
+        auto *data = static_cast<orca_layer_height_point_t *>(std::malloc(count * sizeof(orca_layer_height_point_t)));
+        if (!data) return -3;
+        for (size_t i = 0; i < count; ++i) data[i] = {profile[2 * i], profile[2 * i + 1]};
+        *info = {params.min_layer_height, params.max_layer_height, params.object_print_z_uncompensated_height(),
+                 count, !object->layer_height_profile.empty() && profile == object->layer_height_profile.get() ? 1 : 0};
+        *points = data;
+        return 0;
+    } catch (const std::exception &ex) {
+        s->set_error(std::string("layer heights: ") + ex.what()); return -2;
+    }
+}
+
+int orca_session_edit_layer_profile(orca_session_t *s, int index, int mode, float quality, int radius, int keep_min)
+{
+    if (!s || !s->has_model || index < 0 || index >= int(s->model.objects.size())) return -1;
+    s->clear_error();
+    try {
+        ModelObject *object = s->model.objects[size_t(index)];
+        if (!object) return -1;
+        if (mode < 0 || mode > 2 ||
+            (mode == 0 && (!std::isfinite(quality) || quality < 0 || quality > 1)) ||
+            (mode == 1 && (radius < 1 || radius > 10 || (keep_min != 0 && keep_min != 1))))
+            throw std::runtime_error(_u8L("Choose a valid adaptive quality or smoothing radius"));
+        if (mode == 2) object->layer_height_profile.clear();
+        else {
+            const auto params = layer_profile_parameters(s, index);
+            std::vector<coordf_t> profile;
+            if (mode == 0) profile = layer_height_profile_adaptive(params, *object, quality);
+            else {
+                PrintObject::update_layer_height_profile(*object, params, profile);
+                profile = smooth_height_profile(profile, params, HeightProfileSmoothingParams(unsigned(radius), keep_min != 0));
+            }
+            if (profile.empty() || profile.size() % 2 != 0 ||
+                std::any_of(profile.begin(), profile.end(), [](double value) { return !std::isfinite(value); }))
+                throw std::runtime_error(_u8L("The native layer-height operation produced an invalid profile"));
+            object->layer_height_profile.set(std::move(profile));
+        }
+        invalidate_object_slice(s);
+        return 0;
+    } catch (const std::exception &ex) {
+        s->set_error(std::string("layer heights: ") + ex.what()); return -2;
     }
 }
 

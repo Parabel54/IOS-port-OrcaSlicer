@@ -658,6 +658,23 @@ ORCA_API int orca_session_get_object_option(
 ORCA_API int orca_session_erase_object_option(
     orca_session_t *s, int index, const char *key);
 
+/** Native variable-layer profile, with Z referenced to the object's print base. */
+typedef struct orca_layer_height_point { double z, height; } orca_layer_height_point_t;
+typedef struct orca_layer_profile_info {
+    double min_height, max_height, object_height;
+    size_t point_count;
+    int is_custom;
+} orca_layer_profile_info_t;
+/** Export the effective profile from native PrintObject slicing parameters.
+ * Free *points with orca_free. Failure clears outputs and leaves the model intact. */
+ORCA_API int orca_session_export_layer_profile(orca_session_t *s, int object_index,
+    orca_layer_profile_info_t *info, orca_layer_height_point_t **points);
+/** mode: 0=adaptive (quality 0..1), 1=smooth (radius 1..10, keep_min 0/1),
+ * 2=reset. Stages native adaptive/smoothing output before changing the object's
+ * existing 3MF layer_height_profile. Successful edits invalidate prior slicing. */
+ORCA_API int orca_session_edit_layer_profile(orca_session_t *s, int object_index,
+    int mode, float quality, int radius, int keep_min);
+
 /**
  * Assign extruder (1-based desktop convention; 0 = default) on object config.
  */

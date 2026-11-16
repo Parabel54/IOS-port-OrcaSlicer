@@ -1,29 +1,40 @@
-# Standalone iOS renderer validation
+# iOS renderer validation
 
-The UIKit harness compiles production SceneKit code without the slicing engine.
-It checks camera transforms/projection, painted-filament GPU colors, progressive
-cursor ranges, actual progressive GPU pixels and static preview geometry.
-A complete passing receipt must match the checked-out commit, name every
-required check and contain literal boolean true results. The app must still be
-running when the script terminates it. This is separate from native slicing,
-full-app UI tests and physical-device acceptance.
+The fast validation workflow runs device SDK checks, simulator/UI-test source
+checks, Mac host fixtures and a standalone graphics harness on one acquired Mac.
+Host fixtures exercise storage, document coordination, protocol requests and
+post-processing with injected test data. They do not authenticate a real account
+or connect to a physical printer.
 
-SDK63/source ae676 passed both Apple SDK steps and Mac fixtures. Its receipt
-records painted-filament GPU, progressive GPU/ranges and static geometry passes,
-but camera fails. Unified-log collection then timed out, losing the assertion
-message; the original receipt/artifact remains a failed overall result.
+## Graphics harness
 
-Camera failures now report the assertion location and measured values directly
-into the durable JSON receipt. An atomic progress receipt is written after every
-check and marked incomplete until all checks finish. If execution stalls, the
-script preserves any partial receipt and fails. The validator independently
-requires completion, source identity and all checks, so neither a green summary
-nor a partial file can pass. Unified logs remain supplementary diagnostics.
+`PreviewSmokeApp` is a test-only UIKit application compiled with the production
+`PlateSceneView.swift`. It uses the selected iOS SDK's simulator runtime and does
+not link the slicing engine. Its independent checks cover camera transforms and
+projection, painted-filament GPU colors, progressive primitive ranges, actual
+progressive GPU pixels and static preview geometry.
 
-The earlier SDK59 green job was invalid because the timeout wrapper consumed
-stdin meant for its child receipt check. Caller stdin now uses a separate file
-descriptor; local regressions require real execution and failure propagation.
-SDK60's independent artifact has real progressive GPU/range/static passes and a
-failed camera aggregate. SDK61 never acquired a hosted runner. SDK62 exposed a
-private slicing-state access error. These observations must remain distinct from
-successful interface checks, native engine execution or package validation.
+The app writes an atomic JSON receipt after each check. Progress receipts remain
+incomplete until the complete suite finishes. A receipt contains the checkout
+commit, named boolean results, completion/summary flags and camera assertion
+locations with measured values. The script preserves a partial receipt on a
+stalled run. Unified logs and failure screenshots supplement this durable data.
+
+Acceptance requires explicit completion, the exact checked-out commit, every
+required check and literal true results. A green summary or an incomplete file
+cannot pass. The app must still be running when the script terminates it; a later
+crash therefore fails the gate as well.
+
+## Execution boundaries
+
+The shared timeout helper forwards caller stdin separately from its own Python
+source. Each simulator phase is bounded, including a 240-second cold app-install
+phase. Runtime selection stays within the chosen SDK's iOS version family.
+Fresh devices isolate test state and are shut down/deleted during cleanup.
+
+SDK/interface checks, focused graphics, C++ implementation builds, native engine
+execution, full-app UI tests and physical-device/printer acceptance are separate
+evidence. Native integration builds the bridge against real dependencies before
+bundling the engine and exercising simulator slicing/UI flows. Comparing a PR
+checkout's tree with its source tree pins results to exact code. Job status alone
+is insufficient evidence for a successful graphics or native-runtime result.

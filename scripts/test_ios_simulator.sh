@@ -85,7 +85,7 @@ PYRUNFILE
 ios_test_run 180 xcrun simctl spawn "$DEVICE" "$TEST_DIR/engine_smoke" "$TEST_DIR" "$APP_BUNDLE" \
   2>&1 | tee "$TEST_DIR/result.log"
 python3 "$ROOT/scripts/audit_ios_app.py" "$APP_BUNDLE" iphonesimulator --arch "$ARCH"
-ios_test_run 120 xcrun simctl install "$DEVICE" "$APP_BUNDLE"
+ios_test_run 240 xcrun simctl install "$DEVICE" "$APP_BUNDLE"
 APP_DATA="$(xcrun simctl get_app_container "$DEVICE" com.orcaslicer.ios data)"
 mkdir -p "$APP_DATA/Documents"
 cp "$TEST_DIR/orca-project.3mf" "$APP_DATA/Documents/ios-import-smoke.3mf"
@@ -132,7 +132,7 @@ for variant in compact tablet; do
   DEVICE="$(ios_test_run 120 xcrun simctl create "OrcaWorkspace-$variant" "$device_type" "$RUNTIME")"
   ios_test_run 120 xcrun simctl boot "$DEVICE"
   ios_test_run 240 xcrun simctl bootstatus "$DEVICE" -b
-  ios_test_run 120 xcrun simctl install "$DEVICE" "$APP_BUNDLE"
+  ios_test_run 240 xcrun simctl install "$DEVICE" "$APP_BUNDLE"
   APP_DATA="$(xcrun simctl get_app_container "$DEVICE" com.orcaslicer.ios data)"
   mkdir -p "$APP_DATA/Documents"
   cp "$TEST_DIR/orca-project.3mf" "$APP_DATA/Documents/ios-import-smoke.3mf"

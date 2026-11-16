@@ -1,328 +1,131 @@
-# iOS desktop toolbar and materials parity
+# iOS workspace, materials and preview
 
-Desktop references: `GLCanvas3D::_init_main_toolbar`, `GLGizmosManager::EType`,
-`Sidebar::create_mixed_filament_from_result`/`MixedFilamentDialog`, and `Tab.cpp`.
-The comparison is against source and official reference screenshots. A live desktop
-session was unavailable. A matching label is not evidence of interaction parity.
+The iOS host uses SwiftUI/UIKit and a C ABI over the shared OrcaSlicer engine.
+Desktop wxWidgets code supplies the reference layout and setting ownership;
+portable core algorithms perform model operations and slicing. The host does
+not load desktop executables or claim compatibility with wx/Python plugins.
 
-| Desktop action | Mobile implementation / remaining work |
-|---|---|
-| Open, add, primitives/handy models | Native header File menu and document picker/model library |
-| Add/select plate | Snapshot-backed plate selector; desktop multi-plate layout remains different |
-| Auto orient, arrange | Native orient/libnest handlers; interactive desktop arrangement controls need comparison |
-| More/fewer copies, delete | Native duplicate/delete and undo; inspect selection behavior on devices |
-| Split objects / parts | Native ModelObject/ModelVolume split exposed in Mesh tools, selected solid-part picker, optional object auto-drop and undo; full desktop part-tree selection/editing remains incomplete |
-| Move, rotate, scale | Native transforms and camera gestures; desktop gizmo handles/constraints are partial |
-| Lay on face | Explicit world-space face pick calls the shared native hull-face picker and lay_on_face, including scale/mirror/rotation and instance auto-drop. One-finger drag still orbits and pinch zooms. Desktop hull highlights/plane handles remain incomplete |
-| Plane cut, mesh boolean, simplify | Native algorithms with numeric mobile controls and existing geometry tests; gizmo UI parity partial |
-| Support/seam/MMU/fuzzy/brim-ear paint | Native facet annotations; persistent per-filament Prepare regions; full desktop brush modes remain incomplete |
-| Emboss, SVG, texture displacement | Full desktop workflows missing; a text plate is not general emboss |
-| Variable layer height | Interactive desktop profile editor missing |
-| Assembly view/tools | Explode/assembly-related operations are partial; full desktop assembly workflow missing |
-| Views / Home | Six-face camera cube, Home, direct View menu, orbit/pan/zoom, persistent perspective/orthographic choice; optional Auto Perspective with manual overrides; additional desktop preferences remain incomplete |
-| Global / Objects | Explicit target tabs; initial object layer height, walls, infill and filament overrides with reset to Global |
-| Filament colors | Native color pickers, project slots, object display colors and Filament preview default; persistent painted facet colors remain attached during live transforms; each physical slot has a grouped material preset picker; full per-slot parameter editing remains incomplete |
-| Mixed Filament | Native FilamentMixer color blending, 2/3 physical components, positive percentages totaling 100, linear height gradient/direction/per-part option |
-| Mixed editing / custom curves | Stable-ID component/proportion/gradient editing, native-sampled curve graph, anchor drag/add/remove, two component views, automatic or explicit tangents, reverse/reset. Untouched imported data stays exact. Desktop line-body gestures, gradient swatches and deletion remain incomplete |
-| Plugin manager | General desktop plugin runtime remains missing. Native Zmod processing is not compatibility with the 18 reported plugins |
+## Workspace and settings
 
-The mobile painting selector no longer cycles over only four filaments. Project
-slots use desktop PresetBundle sizing; the native painting representation has a
-32-state painting limit and 64 project slots in this source. Mixed slots are virtual sublayer combinations, not a mixing-nozzle
-ratio command. Components must be distinct physical slots with matching material
-types. New physical slots currently must be added before mixed slots.
+Prepare, Preview and Device navigation sits outside the viewport's controls.
+Compact layouts use dismissible sheets and a short tool strip; wider layouts can
+show an inspector beside the viewport. Common setting labels, values and units
+share a row when they fit, with stacked layouts for narrow widths, long values
+and accessibility text. Native setting explanations load lazily in help sheets.
+Independent row buttons prevent Apply, reset and help from sharing a List action.
 
-Persistence corrections capture saved selections before printer restoration,
-include personal presets in restore lookup, retain canonical sanitized names,
-keep active personal names while refreshing catalogs, and scope saved/loaded
-filament and process JSON independently. Scoped loading also handles older full
-snapshots without letting filament settings overwrite process settings. Applying
-changes to an existing personal preset persists them; Save preset creates a copy.
+The setting catalog uses native preset ownership and visibility metadata.
+Generated page/group ordering follows desktop `Tab.cpp`, with drift tests for
+the generated catalog. Printer, Filament and Process share typed boolean, enum
+and serialized-value editors. Vector/nullable values retain their native shape.
 
-Preview has one upper-layer slider. Toolhead scrubbing appears above the lower
-layer control. Cached primitive ranges and a small partial edge reveal extrusion
-and travel in sync with the interpolated marker during dragging/playback, without
-rebuilding the job on each frame or release. An explicit smooth-motion toggle
-controls interpolation. These controls do not modify G-code.
+Objects settings use the union of `PrintObjectConfig` and `PrintRegionConfig`.
+The toolbar and settings tab open the same browser. Inherited and overridden
+values remain distinct, with per-key reset. The bridge rejects global/printer
+keys as object overrides and stages strict deserialization before committing.
+Object edits do not save into a global preset; native 3MF preserves them.
+Per-part/height-range editors and desktop dependent-control rules require
+separate UI support.
 
-Validation added: cold-session preset restoration and scope isolation, canonical
-names, native filament growth, mixed-ratio rejection and gradient metadata, marker
-interpolation, and a UI assertion against duplicate upper-layer sliders. Apple
-SDK/runtime results must be recorded separately; local catalog tests alone do not
-prove these workflows work on device. This document is a parity audit and working
-implementation record, not a claim that the entire desktop toolbar is ported.
+## Model tools and ownership
 
-Prepare color follow-up: world-space MMU facets are exported separately for each
-native painting state and attached beneath their object node. Color changes
-refresh materials without flattening all painted states into a single mask. The
-cache is refreshed on model import/edit/undo and MMU paint changes, not camera
-frames. Paint changes invalidate old slicing results. Support/seam/fuzzy diagnostic
-overlays remain separate. Mixed regions use their derived swatch; matching a
-height-gradient swatch in the Prepare surface is still separate from sliced
-filament preview. Native tests isolate the first and highest paint states; a GPU
-test checks distinct red/green regions and object attachment. Runtime validation
-is tracked in CI, not implied by the source change.
+The host exposes core primitives/handy models, selection, translation, axis
+rotation/scaling, mirror, fit/drop, arrange/orient, point measurement, painting
+and mesh repair/simplify/cut/boolean/split operations. Split to objects/parts uses
+the shared model routines and retains native transforms, overrides and painting.
+Lay on Face maps the tapped world point into the touched instance, uses native
+hull-plane picking and invokes the shared lay-on-face algorithm. Candidate-plane
+highlighting, full part-tree/gizmo interactions, advanced assembly/CAD, emboss,
+SVG and texture-displacement interfaces are separate from these tools.
 
-View menu follow-up: desktop MainFrame View/Camera selection was compared to the
-mobile camera. The header menu now exposes six face views and Home, plus a saved
-perspective/orthographic choice shared with Preferences. Switching projection
-keeps the target/orientation and matches the target-plane visible span. Pinch
-changes orthographic scale while preserving the point under the fingers; it does
-not merely move a parallel camera. Fit uses projection/aspect-aware bounds for
-models, G-code and an empty bed. Camera regression cases cover both projections,
-anchor preservation, pan and all face views in phone/tablet bounds. The following batch adds the desktop Auto Perspective policy.
+A session gate serializes native imports, slicing, preset mutation and model
+algorithms. Heavy model/profile operations prepare a 3MF undo snapshot and run
+outside the UI thread. Staged failures preserve the original model/preview.
+Successful edits invalidate derived slicing. Undo, Redo and public project saving
+honor the same gate, including keyboard-triggered actions.
 
-Auto Perspective is now optional in View and Preferences. Selecting a face through
-the menu or cube uses orthographic projection, and orbit/Home returns to
-perspective after automatic alignment. An explicit manual projection selection
-cancels that automatic return; pan/zoom keep the projection. The existing manual
-behavior remains the default. Policy regression cases cover disabled mode, face
-selection, orbit/Home transitions and explicit manual orthographic selection.
+## Variable layer height
 
-Runtime checkpoint: source 39167d7016f2/build b94f7b395389 passes native paint
-state isolation, material/profile persistence, GPU color/camera checks and both
-phone plus all three tablet UI tests (run 43839633585). Phone/tablet portrait
-preview screenshots were reviewed. The landscape capture shows clipped header
-content despite the old rotation predicate passing. The UI test now waits for
-both header edges, all main tabs and Home/Slice to fit stable landscape bounds
-before capturing. That stronger landscape check is pending. This runtime pass
-predates the manual/automatic projection controls and last-object cache cleanup.
+An object-level panel exposes adaptive heights, native smoothing with radius
+and Keep min, reset and the effective height/thickness graph. `Print::apply` and
+validation resolve printer/nozzle variants, shrinkage and object slicing
+parameters. The shared adaptive/smoothing algorithms write the existing
+`ModelObject::layer_height_profile`; no new project schema or defaults are added.
+Quality/Speed balance follows native direction: finer detail at the low end,
+faster printing at the high end.
 
-Split operations now call the same ModelObject::split and ModelVolume::split
-routines as desktop Plater/ObjectList, with painting remapping enabled. The
-bridge stages a Model copy and commits only a real split; invalid targets and
-connected single pieces leave model/config/preview intact. Objects can preserve
-Z or drop to the bed. Parts remain volumes within the same object. Native
-modifier-removal behavior for Split to objects is explained in the mobile panel.
-The existing async model-edit gate and snapshot undo are reused; a direct Mesh
-tools chip reaches the panel without expanding the workspace. Per-part transform
-selection is still separate work. Regression coverage uses disconnected solids,
-nonuniform scale/rotation/translation, bounds, overrides, paint, snapshot restore
-and failed-split preview retention. Native compile/runtime results remain pending.
+Profile reads and edits own the session gate. Edits use asynchronous snapshot
+undo and invalidate slicing without exporting unchanged model meshes. The panel
+reloads after its edits and after mesh revisions from Undo/Redo. Reset can clear
+a malformed stored curve even when an effective profile cannot be read. Native
+3MF stores the profile for later slicing. Surface brushing and 3D layer-band
+editing are not represented by the graph-only interface.
 
-Physical filament slots now select system/cloud/personal profiles through the
-shared grouped picker. Native construct_full_config and map_variant_indices
-compose nozzle variants while retaining other slots' edited values; process,
-printer, project colors and mixing metadata are reapplied independently. Mixed
-slots derived from a changed first component follow its profile; incompatible
-component material types are rejected before applying configuration. Legacy
-project-wide filament saves are scoped to their first material and variants on
-read; new saves use that scope. Ambiguous device/variant layouts return errors
-instead of guessing. Full per-slot parameter editing remains separate work.
+## Materials and mixing
 
-CI runner annotations for source 9bf56cfefec7 report hosted ARM capacity failures
-without executed steps. SDK checks and device cross-builds now use the standard
-macos-15-intel image. Simulator builds now support an explicit x86_64 bundle
-and execute on the Intel host, with ARM simulator support retained for local
-Apple Silicon builds. Device artifacts still target arm64. The audit verifies
-the requested CPU and SDK independently; project/toolchain tests reject bundle
-selection mismatches and Intel device targets. Host and target architecture
-remain part of dependency/compiler/engine cache keys. GPU and UI assertions are
-retained; successful SDK type checks are not native runtime acceptance.
+Physical slots retain their assigned preset and nozzle variants. Assignment uses
+native preset composition/mapping while preserving other slots and unsaved
+physical edits. Local process/filament saves use canonical names and independent
+scopes. Cloud origin metadata allows personal presets to be presented before
+system presets. File persistence and credential storage are independent.
 
-Preview motion now samples the actual G-code polyline while interpolating a
-fractional move cursor; a Cartesian SceneKit tween no longer cuts corners.
-The coordinator updates only the marker at up to 60 Hz and cancels its timer on
-scene replacement/dismantle. Play/Pause supports 1/10/100x commanded-feedrate
-playback within the selected layer range. It omits dwell and acceleration; this
-is a toolhead-motion preview, not a print-time simulator. The selected range
-stays visible during playback and is clipped to the cursor when paused. No bead
-mesh rebuild is requested for each motion tick. Layer changes, file replacement,
-backgrounding, leaving Preview and memory warnings stop playback. Fractional
-slider state is retained. Regression cases cover right-angle paths, different
-feedrates across segment boundaries, zero-length/unknown-feed moves, end clamps
-and invalid cursor input; the phone UI test checks Play/Pause, cursor progress
-and layer-change cancellation. Apple SDK/runtime checks for this batch are
-pending until recorded in the build evidence.
+Mixed slots use native component, ratio and gradient metadata. Two/three physical
+components share a material type, with native positive proportions and pigment
+color blending. Existing-slot edits preserve slot IDs and painted assignments.
+A changed first component supplies its material/nozzle variants without replacing
+that physical source. Imported ratios and untouched curve text retain precision.
+Physical/project and painted/mixed slot limits come from the native ABI; available
+printing colors still depend on printer hardware or manual changes.
 
-Manual toolpath scrubbing now uses a native slider with incremental precision:
-drag horizontally for the whole file, or move the finger above/below the track
-for 1/10, 1/100 and move-by-move sensitivity. Switching precision does not jump
-the cursor. Previous/Next and VoiceOver adjustments step to the adjacent move.
-The move readout and marker retain fractional positions; releasing the control
-clips the path to that same fractional endpoint rather than the preceding
-integer move. Existing integer clipping remains compatible. The selected layer
-range stays visible while the finger is tracking; geometry is rebuilt on release,
-with no full bead-mesh rebuild on each touch event. Regression cases cover a
-million-move range, precision transitions/reversal/clamps, accessibility stepping,
-partial corner endpoints and integer/start clipping; phone tests exercise direct
-manual adjustment and adjacent-move buttons. SDK/native validation for this batch
-is pending until recorded separately.
+The curve editor uses native parsing, serialization and Hermite/PCHIP sampling.
+Anchor insertion/removal/dragging, automatic or numeric tangents, component views,
+reverse and reset edit a draft. Automatic tangents use null values at the ABI;
+invalid/overlapping points are rejected. Linear endpoints and retained custom
+curves follow the native precedence rules. Desktop line-body/tangent-handle
+interactions and pigment-ramp swatches are not provided. Mixed deletion, physical
+insertion after mixed slots and full per-slot parameter editing need additional
+host support.
 
-Existing mixed rows now open the proportion/linear-gradient editor. Native edits
-stage configuration, validate with validate_mixed_filament_params, and commit
-without changing component or slot IDs, model painting, preset identity or other
-process/printer/material values. Invalid edits retain the previous configuration.
-The editor preserves original ratio text when only gradient settings change and
-skips a no-op save. Imported custom curves/nonstandard ranges stay intact and
-are not replaced by the linear controls. Custom-curve editing and deletion remain separate work. Native cases cover invalid edit
-isolation, ratio/reverse-gradient updates, identity/process preservation and
-byte-identical retained custom curves; native execution is pending.
+## Processed preview
 
-Existing mixes can now replace their physical components and switch between two
-and three components without changing the virtual slot index. When the first
-component changes, the same native preset/variant composition used for slot
-assignment updates only the virtual material, retaining unsaved physical values
-and the global selection. Ratios remain byte-identical unless edited; derived
-swatches refresh. Invalid/duplicate/virtual references, mismatched materials and
-three-way gradients are rejected before commit. Imported custom gradients keep
-two components so changing the count cannot silently discard their curve.
-Regression cases cover virtual nozzle-variant inheritance, physical/process
-isolation, rejected replacements, two/three transitions and retained object/facet
-assignments. Native execution remains pending.
+Sliced and opened text G-code use the native `GCodeProcessor` stream. Physical
+moves/events retain width, height, roles, tool/color IDs and analysis metrics.
+No path/layer sampling is used. An owned-buffer transfer moves the record vector
+from the session into an opaque handle, valid until explicit destruction even
+across later session mutation/destruction. Swift frees it after conversion; native
+statistics/metadata remain available. Another export/take of a consumed cache
+fails explicitly until reload/slice repopulates it. Copying export remains an
+option for other ABI clients.
 
-Linear gradient endpoints are now editable when creating or editing a mix, with
-bounds queried from native FilamentMixer constants. Bottom/top shares can be
-reversed. Imported ranges retain their exact text when not changed. Imported
-custom curves take precedence in desktop GCode/ToolOrdering, so their linear
-endpoint controls stay hidden while the curve is retained. Users can explicitly
-choose linear mode; disabling/re-enabling a gradient otherwise preserves its
-curve/range. Gradient and component/proportion edits share a staged transaction.
-New mix gradient metadata is validated before appending a slot. Native regression
-cases cover nondefault ranges, curve retention, explicit linear selection,
-invalid endpoint isolation and unchanged slot count on failed creation. Custom
-anchor/tangent controls are added below; native execution is pending.
+SceneKit batches paths below the 16-bit vertex limit, uses normalized byte colors
+and shares job materials. Layer/filter/color changes rebuild selected geometry.
+Manual scrubbing and playback reuse its buffers: binary-searched primitive ranges
+show completed moves and a small partial bead/travel edge follows the fractional
+cursor. Original move IDs survive clipping, and compact visible intervals prevent
+hidden features from reappearing. Objective-C associations retain cursor state
+and are explicitly copied when cloning a preview root.
 
-Custom gradient editing now uses the native curve parser, serializer and
-Hermite/PCHIP sampler through pure C helpers. The mobile graph shows both
-component shares, with 44-point anchor targets, translation-based dragging,
-numeric height/share controls, insert/remove, reverse and reset. Incoming/outgoing
-tangents can stay automatic or be set explicitly. Reversal negates tangent slopes;
-moving an anchor restores its automatic tangents as desktop does. Imported text
-is kept when the editor is opened without changes or returned to its original
-serialized shape. Leaving the child editor without Use curve cancels the draft.
-The native helper rejects non-finite values, crossing/overlapping points and
-points that collapse under native four-decimal serialization. This does not add
-a project schema or change desktop defaults. Native curve/math cases are added;
-Apple/native/touch execution must be recorded separately. Desktop line-body
-interaction and pigment-mixed ramp swatches remain separate work.
+Manual input keeps a Double cursor with incremental precision control and adjacent
+move actions. Optional smoothing samples the actual polyline rather than cutting
+across corners. Automatic playback advances by commanded feedrates at selected
+speed multipliers; acceleration/dwell physics are not simulated. Show complete,
+pause and step actions reuse the cached geometry.
 
-Lay on face now resolves the tapped model/object and world-space point, finds a
-valid native hull face in the touched instance's coordinates and calls the shared
-`lay_on_face` routine used by desktop/CLI. The operation stages the model, uses the
-existing async edit gate and snapshot undo, and preserves the prior preview on a
-miss. It drops only the touched instance, even when automatic drop is disabled.
-The toolbar mode keeps one-finger orbit for reaching other faces and pinch zoom;
-taps place faces, while empty-bed taps do nothing. Native tests cover nonuniform
-scale, compound rotation, facet annotation retention, bad-pick isolation, existing
-preview retention and snapshot restoration. Desktop hull-plane highlights remain
-unfinished, and native/touch execution is pending.
+Preview controls expose native feature/event filters, tool/filament visibility,
+layer bounds and color metrics. Memory-saving rendering removes expensive shading
+while retaining paths, the source file and statistics. Desktop marker meshes,
+G-code text editing and binary G-code opening are separate viewer capabilities.
 
-Progressive toolpaths now share the marker's fractional cursor. The renderer
-retains the selected layer/filter geometry and updates SceneKit primitive ranges;
-only the current partial edge gets a small geometry update. Job materials and
-large vertex/index buffers are reused while scrubbing forward/backward, stepping,
-playing or showing the complete path. This avoids per-move materials, per-vertex
-cursor attributes and full mesh rebuilds on every frame or pause. Z-clipped runs
-keep their original move IDs and fractional endpoint positions so inclined/vase
-edges appear at the correct cursor time. The full model is still not rebuilt as
-the nozzle moves. Added runtime cases cover prefix ranges, partial beads/travel,
-reverse scrubbing, layer clipping, buffer identity and actual GPU pixels before,
-during and after a move. Native/GPU/touch and dense-project memory verification
-remain pending; playback still does not simulate acceleration or dwell.
+## Camera and plugin boundaries
 
-A standalone simulator harness now compiles the production SceneKit source and
-runs camera, geometry, primitive-range and GPU pixel checks without waiting for
-the C++ slicing dependencies. It uses a separate test-only UIKit bundle and the
-same SDK-matched runtime/timeout helpers as full engine validation. Its result
-cannot establish native slicing, full-app UI or physical-device compatibility.
-The first renderer SDK attempts exposed two metadata attachment errors (SCNNode
-has no userData; an instance method must qualify the static association key).
-Both are corrected in source; new SDK/runtime results remain separate evidence.
+Camera state includes the target, projection and orientation. Orbit/pan and
+centroid pinch zoom preserve that target/framing; explicit projection policy
+separates manual orthographic choices from automatic face alignment. Six face
+views and Home share the same framing path. Focused camera/GPU assertions are
+separate from native/full-app/hardware validation; see [renderer validation](ios-renderer-validation.md).
 
-Progressive visibility retains the original job arrays and compact merged cursor
-intervals, rather than retaining a second filtered path tree. Partial edges are
-sampled from the original route and clipped to those intervals; hidden travel or
-features cannot reappear in the partial overlay. Regression cases exercise
-filtered original-source reuse and inclined endpoints. Dense-device memory
-acceptance remains separate from this ownership correction.
-
-The first standalone graphics job returned green without copying its receipt:
-its timeout wrapper consumed the stdin intended for the child validation script.
-Artifact inspection found no receipt and app logs showed progressive GPU failure,
-despite primitive-range/static geometry checks passing. The wrapper now forwards
-caller stdin through a separate descriptor, with a regression that also requires
-child failures to fail the phase. Empty prefix batches are explicitly hidden;
-the GPU check now also exercises a nonempty prefix and logs pixel measurements.
-That earlier green job is not accepted as a graphics pass. Fresh results are
-required for these fixes.
-
-
-Objects settings now follow desktop `TabPrintObject` ownership: the union of
-`PrintObjectConfig` and `PrintRegionConfig`, filtered through the same presentation
-catalog, page/group order and Basic/Advanced/Expert visibility as Global. The
-browser also replaces the older four-field Object settings sheet, so toolbar and
-settings entry points use the same controls. It reuses boolean, enum and scalar
-editors, supports search, shows inherited
-versus overridden values and resets each override to its global value. A compact
-object picker replaces a long object list; filament assignment remains separate.
-Printer/global-only keys cannot be written as object overrides. Strict edits are
-staged, and both setting/reset actions invalidate stale preview/statistics and use
-snapshot undo in the host. Rejected edits discard their temporary snapshot without
-clearing redo history. Object drafts are isolated by selection and never save
-into the selected global preset. Save 3MF retains these settings. Native cases
-cover ownership, invalid-edit isolation, neighboring objects/global values, reset,
-3MF restore and retaining a previous preview on rejected edits; Apple/native UI
-execution remains pending. Per-part and per-height-range editors remain separate
-work, as do desktop conditional enable/disable rules for dependent controls.
-
-
-SDK60 passed both interface/host jobs on retry. Its renderer receipt records
-passing progressive ranges, actual progressive GPU pixels (empty prefix black,
-half edge left=255/right=0, nonempty prefix completed=255/future=0) and static
-preview geometry. The camera aggregate still failed, so the workflow correctly
-fails and is not an overall graphics pass. The next harness reports filament
-painting separately from camera math and logs failed camera assertion locations;
-full-app smoke coverage retains the combined checks by default. The receipt gate
-also independently requires every named test to be boolean true and the receipt
-source to equal the checked-out commit; a summary flag cannot override failures.
-
-
-Settings rows now open the native PrintConfig explanation in a scrollable help
-sheet with selectable text and a clear Done action. Help is fetched lazily, rather
-than retaining the entire tooltip catalog. Global and Objects share these help
-controls. Row buttons use borderless styling so tapping Apply, reset or help
-cannot trigger every button in a SwiftUI List row. The native metadata lookup has
-missing-key/null coverage; Apple SDK/UI execution remains pending.
-
-
-A fresh visual comparison used the official wiki's `images/GUI/full-sidebar.png`
-and `process-preset-full.png` (static documentation images, not a live desktop
-session). The desktop places common labels, values and units on one row. Mobile
-now uses that compact arrangement for simple controls when it fits, with a stacked
-fallback for narrow widths, long/vector/string values and accessibility text.
-The same value editor is reused in both arrangements; no extra settings/control
-instances are shown. Long explanations stay in help sheets. Apple layout/touch
-acceptance remains pending.
-
-
-The host now consumes processed records through an explicit owned-buffer transfer.
-The native vector moves into a small opaque handle and is freed after conversion;
-Swift no longer requests a full C-array copy while the original native vector
-remains cached. Every original record is retained during conversion, and session
-statistics/metadata remain available. A consumed cache reports an error instead
-of an empty successful export; reload/slice repopulates it. The existing copying
-API remains available to other callers. Native ownership cases cover second-take
-failure, cleared outputs, retained stats/metadata, reload and buffer lifetime past
-session mutation/destruction. Native execution and physical peak-memory profiling
-remain pending; no measured memory reduction is claimed yet.
-
-
-SDK61 never obtained a hosted runner: both SDK jobs were cancelled after fifteen
-minutes with the annotation “The job was not acquired by Runner of type hosted
-even after multiple attempts.” Its renderer was skipped. This is not source or
-runtime validation, and the camera diagnosis still requires a runnable job.
-
-
-The fast validation workflow now keeps device type checking, simulator/UI-test
-source checking and the standalone graphics step on one acquired Mac, instead of
-requesting three separate runners. They remain separate reported steps; SDK
-failures fail the job and prevent graphics acceptance. Mac-only fixtures run
-once; direct script/native-build invocations keep their full default checks.
-This addresses the observed runner-acquisition failures without changing slicer
-code, lowering assertions or promoting queued/cancelled jobs to passes.
-
-SDK62 acquired its Mac and exposed a Swift access-control error: Objects settings
-read a private slice-running flag. That flag is now published with a private
-setter so the browser can read and observe its actual lock state. Both SDK steps
-failed at that same error, and graphics was skipped; a new run is required.
+Native Zmod-compatible hooks run before an exported URL is published for sharing
+or upload. Unknown commands fail explicitly. This does not supply the general
+desktop plugin runtime, its Python/native dependencies, wx UI or the reported
+third-party plugin packages. Account/provider and printer/VPN protocols likewise
+require real service/device acceptance beyond fixtures.

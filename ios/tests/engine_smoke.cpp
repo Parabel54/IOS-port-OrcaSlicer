@@ -11,6 +11,8 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 int main(int argc, char **argv)
 {
@@ -110,6 +112,83 @@ int main(int argc, char **argv)
     if (!require(orca_option_tooltip("layer_height") && std::string(orca_option_tooltip("layer_height")).size() > 20 &&
                  !orca_option_tooltip("not_a_setting") && !orca_option_tooltip(nullptr),
                  "settings help comes from native definitions with explicit missing-key results")) return 4;
+    {
+        std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+            layers(orca_session_create(argv[2]), orca_session_destroy);
+        diagnostic_session = layers.get();
+        auto profile = [&](int object) {
+            orca_layer_profile_info_t info{};
+            orca_layer_height_point_t *points = nullptr;
+            std::vector<orca_layer_height_point_t> values;
+            if (orca_session_export_layer_profile(layers.get(), object, &info, &points) == 0 && points)
+                values.assign(points, points + info.point_count);
+            orca_free(points);
+            return std::make_pair(info, std::move(values));
+        };
+        if (!require(orca_session_add_primitive(layers.get(), 2, 20, 20, 20) == 0 &&
+                     orca_session_add_primitive(layers.get(), 0, 5, 5, 5) == 0 &&
+                     orca_session_translate_object(layers.get(), 1, 30, 0, 0) == 0 &&
+                     orca_session_set_option(layers.get(), "layer_height", "0.2") == 0 &&
+                     orca_session_set_option(layers.get(), "initial_layer_print_height", "0.2") == 0,
+                     "variable-layer sphere and independent neighbor fixture")) return 4;
+        const auto baseline = profile(0);
+        if (!require(!baseline.second.empty() && !baseline.first.is_custom && baseline.first.min_height > 0 &&
+                     baseline.first.max_height >= baseline.first.min_height && baseline.first.object_height > 0,
+                     "effective default profile comes from real native slicing parameters") ||
+            !require(orca_session_edit_layer_profile(layers.get(), 0, 0, 0, 0, 0) == 0,
+                     "native adaptive variable-layer algorithm")) return 4;
+        const auto adaptive = profile(0);
+        if (!require(adaptive.first.is_custom && adaptive.second.size() > baseline.second.size() &&
+                     !profile(1).first.is_custom, "adaptive profile affects only the chosen object")) return 4;
+        double previous_z = -1;
+        for (const auto &point : adaptive.second) {
+            if (!require(std::isfinite(point.z) && std::isfinite(point.height) && point.z >= previous_z &&
+                         point.height >= adaptive.first.min_height - 1e-5 && point.height <= adaptive.first.max_height + 1e-5,
+                         "adaptive heights remain ordered and within native nozzle limits")) return 4;
+            previous_z = point.z;
+        }
+        if (!require(std::fabs(previous_z - adaptive.first.object_height) < 0.001,
+                     "adaptive profile reaches the top of the object") ||
+            !require(orca_session_edit_layer_profile(layers.get(), 0, 0, std::numeric_limits<float>::quiet_NaN(), 0, 0) != 0 &&
+                     orca_session_edit_layer_profile(layers.get(), 0, 1, 0, 0, 0) != 0 &&
+                     orca_session_edit_layer_profile(layers.get(), 0, 99, 0, 5, 0) != 0,
+                     "invalid layer-profile operations are rejected")) return 4;
+        const auto unchanged = profile(0);
+        if (!require(unchanged.second.size() == adaptive.second.size() &&
+                     std::equal(unchanged.second.begin(), unchanged.second.end(), adaptive.second.begin(),
+                         [](const auto &a, const auto &b) { return a.z == b.z && a.height == b.height; }),
+                     "rejected profile edits preserve the prior curve") ||
+            !require(orca_session_edit_layer_profile(layers.get(), 0, 1, 0, 5, 1) == 0,
+                     "native profile smoothing with preserved minimums")) return 4;
+        const auto smoothed = profile(0);
+        const std::string saved_profile = directory + "/variable-layers.3mf";
+        if (!require(smoothed.first.is_custom && !smoothed.second.empty() &&
+                     orca_session_snapshot(layers.get(), saved_profile.c_str()) == 0 &&
+                     orca_session_edit_layer_profile(layers.get(), 0, 2, 0, 0, 0) == 0 && !profile(0).first.is_custom &&
+                     orca_session_restore_snapshot(layers.get(), saved_profile.c_str()) == 0,
+                     "profile reset and 3MF snapshot restoration")) return 4;
+        const auto restored = profile(0);
+        if (!require(restored.first.is_custom && restored.second.size() == smoothed.second.size() &&
+                     std::equal(restored.second.begin(), restored.second.end(), smoothed.second.begin(),
+                         [](const auto &a, const auto &b) { return std::fabs(a.z-b.z) < 1e-5 && std::fabs(a.height-b.height) < 1e-5; }),
+                     "3MF preserves the native variable-layer curve") ||
+            !require(orca_session_slice_to_gcode(layers.get(), (directory + "/variable-layers.gcode").c_str()) == 0,
+                     "slice using the restored adaptive profile")) return 4;
+        orca_preview_segment_t *moves = nullptr;
+        size_t count = 0, total = 0;
+        const int exported = orca_session_export_preview(layers.get(), &moves, &count, &total);
+        std::unique_ptr<orca_preview_segment_t, decltype(&orca_free)> owned(moves, orca_free);
+        bool variable_height = false;
+        for (size_t i = 0; i < count; ++i)
+            if (moves[i].move_type == 10 && moves[i].height > 0 && std::fabs(moves[i].height - 0.2f) > 0.01f)
+                variable_height = true;
+        if (!require(exported == 0 && moves && total == count && variable_height,
+                     "processed toolpaths contain the actual variable bead heights")) return 4;
+        char global[64]{};
+        if (!require(orca_session_get_option(layers.get(), "layer_height", global, sizeof(global)) == 0 &&
+                     std::fabs(std::strtod(global, nullptr) - 0.2) < 1e-6, "adaptive editing leaves global layer height unchanged")) return 4;
+        std::printf("PASS: native adaptive/smooth/reset layers, limits, isolation, 3MF restore and actual sliced bead heights\n");
+    }
     // All desktop primitives must be real, bed-placed engine objects.
     for (int kind = 0; kind < 6; ++kind) {
         std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
@@ -520,6 +599,8 @@ int main(int argc, char **argv)
             !require(orca_session_set_object_option(session.get(), 0, "wall_loops", "invalid") != 0 &&
                      orca_session_set_object_option(session.get(), 0, "nozzle_diameter", "0.8") != 0,
                      "reject invalid/global-only override on an already sliced model") ||
+            !require(orca_session_edit_layer_profile(session.get(), 0, 0, std::numeric_limits<float>::quiet_NaN(), 0, 0) != 0,
+                     "reject bad adaptive input on an already sliced model") ||
             !require(orca_session_export_preview(session.get(), &retained, &retained_count, &retained_total) == 0 &&
                      retained_count == count && retained_total == total,
                      "unsuccessful staged split/face picks preserve the sliced preview")) {

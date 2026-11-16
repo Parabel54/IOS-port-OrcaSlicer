@@ -2525,6 +2525,10 @@ final class OrcaEngine: ObservableObject {
     /// Save plate + config as 3MF via official store_3mf.
     func saveProject3MF() -> URL? {
         #if ORCA_LINKED
+        guard !sessionBusy, !sliceRunning, !presetsLoading else {
+            lastMessage = "Wait for the current operation to finish"
+            return nil
+        }
         guard let s = session, hasModel else {
             lastMessage = "Nothing to save"
             return nil
@@ -2737,6 +2741,10 @@ final class OrcaEngine: ObservableObject {
 
     func undo() {
         #if ORCA_LINKED
+        guard !sessionBusy, !sliceRunning, !presetsLoading else {
+            lastMessage = "Wait for the current operation to finish"
+            return
+        }
         guard let s = session, let entry = undoStack.popLast() else {
             lastMessage = "Nothing to undo"
             refreshUndoFlags()
@@ -2763,6 +2771,10 @@ final class OrcaEngine: ObservableObject {
 
     func redo() {
         #if ORCA_LINKED
+        guard !sessionBusy, !sliceRunning, !presetsLoading else {
+            lastMessage = "Wait for the current operation to finish"
+            return
+        }
         guard let s = session, let entry = redoStack.popLast() else {
             lastMessage = "Nothing to redo"
             refreshUndoFlags()
@@ -3163,17 +3175,72 @@ final class OrcaEngine: ObservableObject {
         #endif
     }
 
+    struct LayerHeightProfile: Sendable {
+        let minimum: Double
+        let maximum: Double
+        let objectHeight: Double
+        let custom: Bool
+        let points: [SIMD2<Double>]
+    }
+
+    enum LayerHeightEdit: Sendable {
+        case adaptive(Float)
+        case smooth(radius: Int, keepMinimum: Bool)
+        case reset
+    }
+
+    @MainActor
+    func layerHeightProfile(object index: Int) async -> LayerHeightProfile? {
+        #if ORCA_LINKED
+        guard let session, objectNames.indices.contains(index), !sessionBusy, !sliceRunning, !presetsLoading else { return nil }
+        sessionBusy = true
+        sessionBusyMessage = String(localized: "Reading layer heights…")
+        defer { sessionBusy = false }
+        let bits = UInt(bitPattern: session)
+        let result = await Task.detached(priority: .userInitiated) { () -> (LayerHeightProfile?, String) in
+            guard let session = OpaquePointer(bitPattern: bits) else { return (nil, String(localized: "Engine unavailable")) }
+            var info = orca_layer_profile_info_t()
+            var points: UnsafeMutablePointer<orca_layer_height_point_t>?
+            let code = orca_session_export_layer_profile(session, Int32(index), &info, &points)
+            defer { orca_free(points) }
+            guard code == 0, let points else {
+                return (nil, orca_session_last_error(session).map { String(cString: $0) } ?? String(localized: "Cannot read layer heights"))
+            }
+            let values = UnsafeBufferPointer(start: points, count: info.point_count).map { SIMD2($0.z, $0.height) }
+            return (LayerHeightProfile(minimum: info.min_height, maximum: info.max_height,
+                objectHeight: info.object_height, custom: info.is_custom != 0, points: values), "")
+        }.value
+        if result.0 == nil { lastMessage = result.1 }
+        return result.0
+        #else
+        return nil
+        #endif
+    }
+
     enum MeshEdit: Sendable {
         case repair
         case split(toObjects: Bool, part: Int, dropToBed: Bool)
         case layOnFace(SIMD3<Float>)
+        case layerHeights(LayerHeightEdit)
         case simplify(Int)
         case cut(position: Float, axis: Int, upper: Bool, lower: Bool)
         case boolean(other: Int, operation: Int, removeOther: Bool)
 
+        var undoLabel: String {
+            switch self {
+            case .repair: return String(localized: "Repair mesh")
+            case .split(let objects, _, _): return objects ? String(localized: "Split to objects") : String(localized: "Split to parts")
+            case .layOnFace: return String(localized: "Lay on face")
+            case .layerHeights: return String(localized: "Variable layer height")
+            case .simplify: return String(localized: "Simplify mesh")
+            case .cut: return String(localized: "Cut model")
+            case .boolean: return String(localized: "Boolean operation")
+            }
+        }
+
         var preservesModelOnFailure: Bool {
             switch self {
-            case .split, .layOnFace: return true
+            case .split, .layOnFace, .layerHeights: return true
             default: return false
             }
         }
@@ -3201,6 +3268,13 @@ final class OrcaEngine: ObservableObject {
             guard objectNames.indices.contains(other), other != index, (0...2).contains(operation) else {
                 lastMessage = "Choose two different objects and a valid operation"; return false
             }
+        case .layerHeights(let action):
+            if case .adaptive(let quality) = action, !quality.isFinite || !(0...1).contains(quality) {
+                lastMessage = String(localized: "Choose adaptive quality between 0 and 1"); return false
+            }
+            if case .smooth(let radius, _) = action, !(1...10).contains(radius) {
+                lastMessage = String(localized: "Choose a smoothing radius between 1 and 10"); return false
+            }
         case .repair: break
         case .split(_, let part, _):
             guard part >= 0 && part <= Int(Int32.max) else { lastMessage = "Choose a valid part"; return false }
@@ -3226,6 +3300,12 @@ final class OrcaEngine: ObservableObject {
                 code = orca_session_split_model(s, Int32(index), Int32(part), objects ? 1 : 0, drop ? 1 : 0)
             case .layOnFace(let point):
                 code = orca_session_lay_on_face(s, Int32(index), point.x, point.y, point.z)
+            case .layerHeights(let action):
+                switch action {
+                case .adaptive(let quality): code = orca_session_edit_layer_profile(s, Int32(index), 0, quality, 0, 0)
+                case .smooth(let radius, let keep): code = orca_session_edit_layer_profile(s, Int32(index), 1, 0, Int32(radius), keep ? 1 : 0)
+                case .reset: code = orca_session_edit_layer_profile(s, Int32(index), 2, 0, 0, 0)
+                }
             case .simplify(let target): code = orca_session_simplify_mesh(s, Int32(index), Int32(target))
             case .cut(let position, let axis, let upper, let lower):
                 var point = SIMD3<Float>(repeating: 0), normal = SIMD3<Float>(repeating: 0)
@@ -3243,9 +3323,14 @@ final class OrcaEngine: ObservableObject {
             }
             return (code, error.isEmpty ? "Mesh operation failed" : error, restoreFailed)
         }.value
-        if result.0 >= 0 || result.2 { recordUndoSnapshot(snapshot, label: "mesh-edit") }
+        if result.0 >= 0 || result.2 { recordUndoSnapshot(snapshot, label: edit.undoLabel) }
         else { try? FileManager.default.removeItem(at: snapshot) }
         if result.0 < 0 && edit.preservesModelOnFailure { lastMessage = result.1; return false }
+        if result.0 >= 0, case .layerHeights = edit {
+            invalidateSlice()
+            lastMessage = String(localized: "Updated variable layer heights")
+            return true
+        }
         if result.0 >= 0, case .boolean(let other, _, let removeOther) = edit {
             selectedObjectIndex = index - (removeOther && other < index ? 1 : 0)
         } else if result.0 >= 0, case .cut = edit { selectedObjectIndex = -1 }

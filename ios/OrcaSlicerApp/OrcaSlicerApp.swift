@@ -141,6 +141,7 @@ struct OrcaRootView: View {
     @State private var showPreferences = false
     @State private var showAbout = false
     @State private var showShortcuts = false
+    @State private var showLayerHeights = false
     @State private var showObjectSettings = false
     @State private var presetBundleShareURL: URL?
     @State private var textPlateName = "Text plate"
@@ -414,6 +415,20 @@ struct OrcaRootView: View {
             .presentationDetents([.medium, .large])
             .preferredColorScheme(.dark)
         }
+        .sheet(isPresented: $showLayerHeights, onDismiss: {
+            presentPendingDocumentPicker(); importPendingDocuments(); importCloudPresetsIfReady()
+        }) {
+            NavigationStack {
+                LayerHeightPanel(engine: engine, objectIndex: engine.selectedObjectIndex) { status = engine.lastMessage }
+                    .toolbar { ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { showLayerHeights = false }.disabled(engine.sessionBusy)
+                    } }
+            }
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+            .interactiveDismissDisabled(engine.sessionBusy)
+            .preferredColorScheme(.dark)
+        }
         .sheet(isPresented: $showObjectSettings) {
             objectSettingsSheet
                 .presentationDetents([.medium, .large])
@@ -524,6 +539,8 @@ struct OrcaRootView: View {
                     showObjectSettings = true
                 }
                 .disabled(!engine.hasModel || engine.selectedObjectIndex < 0)
+                Button("Variable layer height…") { showLayerHeights = true }
+                    .disabled(!engine.hasModel || engine.selectedObjectIndex < 0)
                 Button("Setup wizard…") { showWizard = true }
                 Button("Preferences…") { showPreferences = true }
                 Button("Keyboard shortcuts…") { showShortcuts = true }
@@ -2487,6 +2504,8 @@ struct OrcaRootView: View {
                                 toolChip("Add", "plus") { showModelLibrary = true }.accessibilityIdentifier("model-library-shortcut")
                                 toolChip("Transform", "slider.horizontal.3") { showPlateInspector = true }
                                 toolChip("Mesh tools", "cube.transparent") { showMeshTools = true }
+                                toolChip("Layer height", "slider.vertical.3") { showLayerHeights = true }
+                                    .disabled(!engine.objectNames.indices.contains(engine.selectedObjectIndex))
                                     .disabled(!engine.hasModel).accessibilityIdentifier("mesh-tools-shortcut")
                             }
                         }.padding(8)
@@ -3683,7 +3702,7 @@ struct OrcaRootView: View {
     }
 
     private var editingModalPresented: Bool {
-        showModelLibrary || showPlateInspector || showProcess || showWizard || showCalibration || showObjectSettings || showPreferences || showAbout || showShortcuts
+        showModelLibrary || showPlateInspector || showProcess || showWizard || showCalibration || showObjectSettings || showLayerHeights || showPreferences || showAbout || showShortcuts
     }
 
     private func importCloudPresetsIfReady() {
@@ -3744,6 +3763,106 @@ struct OrcaRootView: View {
         }
     }
 
+}
+
+private struct LayerHeightPanel: View {
+    @ObservedObject var engine: OrcaEngine
+    let objectIndex: Int
+    var onChanged: () -> Void
+    @State private var profile: OrcaEngine.LayerHeightProfile?
+    @State private var quality = 0.5
+    @State private var radius = 5
+    @State private var keepMinimum = false
+    @State private var failure: String?
+
+    var body: some View {
+        Form {
+            if engine.objectNames.indices.contains(objectIndex) {
+                Section("Object") { Text(engine.objectNames[objectIndex]) }
+            }
+            if let profile {
+                Section("Layer height along object") {
+                    profileChart(profile)
+                    if profile.custom {
+                        Text("Custom layer heights").font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Text("Using process and object layer heights").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Text("Printer limits: \(profile.minimum.formatted(.number.precision(.fractionLength(2...3))))–\(profile.maximum.formatted(.number.precision(.fractionLength(2...3)))) mm")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Section("Adaptive") {
+                Slider(value: $quality, in: 0...1).accessibilityLabel("Quality and speed balance")
+                HStack { Text("Finer detail"); Spacer(); Text("Faster print") }.font(.caption)
+                Button("Apply adaptive layer heights") { run(.adaptive(Float(quality))) }
+                Text("Uses the model's surfaces and your printer's layer-height limits.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }.disabled(profile == nil)
+            Section("Smooth") {
+                Stepper("Radius: \(radius)", value: $radius, in: 1...10)
+                Toggle("Keep thin layers", isOn: $keepMinimum)
+                Button("Smooth layer heights") { run(.smooth(radius: radius, keepMinimum: keepMinimum)) }
+            }.disabled(profile == nil)
+            Section {
+                Button("Reset layer heights", role: .destructive) { run(.reset) }
+                Text("Changes affect only this object. Slice again to see the resulting layers. Save 3MF to keep the profile; Undo restores the previous one.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if let failure {
+                Section { Text(failure).foregroundStyle(.red); Button("Reload layer heights") { Task { await reload() } } }
+            }
+        }
+        .disabled(engine.sessionBusy)
+        .tint(OrcaTheme.accent)
+        .navigationTitle("Variable layer height").navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(engine.sessionBusy)
+        .overlay {
+            if engine.sessionBusy { ProgressView(engine.sessionBusyMessage).padding(24).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16)) }
+        }
+        .task(id: [objectIndex, engine.meshRevision]) { await reload() }
+    }
+
+    private func profileChart(_ profile: OrcaEngine.LayerHeightProfile) -> some View {
+        let bounds = profile.points.reduce((profile.minimum, profile.maximum)) { (min($0.0, $1.y), max($0.1, $1.y)) }
+        let width = max(bounds.1 - bounds.0, 0.001)
+        return VStack(spacing: 6) {
+            Text("Top · \(profile.objectHeight.formatted(.number.precision(.fractionLength(1...2)))) mm")
+                .font(.caption).frame(maxWidth: .infinity, alignment: .leading)
+            GeometryReader { geometry in
+                Path { path in
+                    for (index, point) in profile.points.enumerated() {
+                        let position = CGPoint(x: CGFloat((point.y - bounds.0) / width) * geometry.size.width,
+                            y: (1 - CGFloat(point.x / max(profile.objectHeight, 0.001))) * geometry.size.height)
+                        if index == 0 { path.move(to: position) } else { path.addLine(to: position) }
+                    }
+                }.stroke(OrcaTheme.accent, lineWidth: 2)
+            }
+            .frame(height: 200).padding(6).background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+            HStack {
+                Text("\(bounds.0.formatted(.number.precision(.fractionLength(2...3)))) mm")
+                Spacer()
+                Text("\(bounds.1.formatted(.number.precision(.fractionLength(2...3)))) mm")
+            }.font(.caption)
+            Text("Bottom · 0 mm").font(.caption).frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text("Layer height profile. Object height: \(profile.objectHeight) mm."))
+    }
+
+    @MainActor
+    private func reload() async {
+        let value = await engine.layerHeightProfile(object: objectIndex)
+        profile = value
+        failure = value == nil ? engine.lastMessage : nil
+    }
+
+    private func run(_ action: OrcaEngine.LayerHeightEdit) {
+        Task { @MainActor in
+            if await engine.editMesh(.layerHeights(action)) { onChanged(); await reload() }
+            else { failure = engine.lastMessage }
+        }
+    }
 }
 
 private struct MeshToolsPanel: View {
