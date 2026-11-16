@@ -3562,7 +3562,7 @@ struct OrcaRootView: View {
         }
     }
 
-    private func exportUserPresetsZip(from source: UIView) {
+    private func exportUserPresetsZip(from source: UIView? = nil) {
         // Prefer store-only ZIP of Documents/OrcaSlicer/user_presets (portable bundle)
         if let zipURL = engine.exportPresetBundleZip() {
             presetBundleShareURL = zipURL

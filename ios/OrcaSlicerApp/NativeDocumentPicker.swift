@@ -23,13 +23,20 @@ struct NativeProjectMenu: UIViewRepresentable {
         button.menu = makeMenu(button)
     }
 
-    static func share(_ url: URL, from source: UIView) {
+    static func share(_ url: URL, from source: UIView?) {
         DispatchQueue.main.async { [weak source] in
-            guard let source, var presenter = source.window?.rootViewController else { return }
+            let window = source?.window ?? UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+                .filter { $0.activationState == .foregroundActive }
+                .flatMap(\.windows).first(where: \.isKeyWindow)
+            guard var presenter = window?.rootViewController else { return }
             while let presented = presenter.presentedViewController { presenter = presented }
+            guard let anchor = source ?? presenter.viewIfLoaded else { return }
             let activity = UIActivityViewController(activityItems: [url], applicationActivities: nil)
-            activity.popoverPresentationController?.sourceView = source
-            activity.popoverPresentationController?.sourceRect = source.bounds
+            activity.popoverPresentationController?.sourceView = anchor
+            activity.popoverPresentationController?.sourceRect = source?.bounds ??
+                CGRect(x: anchor.bounds.midX, y: anchor.bounds.midY, width: 1, height: 1)
+            if source == nil { activity.popoverPresentationController?.permittedArrowDirections = [] }
             presenter.present(activity, animated: true)
         }
     }
