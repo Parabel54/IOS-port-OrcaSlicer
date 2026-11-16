@@ -2932,6 +2932,7 @@ final class OrcaEngine: ObservableObject {
 
     enum MeshEdit: Sendable {
         case repair
+        case split(toObjects: Bool, part: Int, dropToBed: Bool)
         case simplify(Int)
         case cut(position: Float, axis: Int, upper: Bool, lower: Bool)
         case boolean(other: Int, operation: Int, removeOther: Bool)
@@ -2960,6 +2961,8 @@ final class OrcaEngine: ObservableObject {
                 lastMessage = "Choose two different objects and a valid operation"; return false
             }
         case .repair: break
+        case .split(_, let part, _):
+            guard part >= 0 && part <= Int(Int32.max) else { lastMessage = "Choose a valid part"; return false }
         }
         sessionBusyMessage = "Updating model…"
         sessionBusy = true
@@ -2976,6 +2979,8 @@ final class OrcaEngine: ObservableObject {
             let code: Int32
             switch edit {
             case .repair: code = orca_session_repair_mesh(s, Int32(index))
+            case .split(let objects, let part, let drop):
+                code = orca_session_split_model(s, Int32(index), Int32(part), objects ? 1 : 0, drop ? 1 : 0)
             case .simplify(let target): code = orca_session_simplify_mesh(s, Int32(index), Int32(target))
             case .cut(let position, let axis, let upper, let lower):
                 var point = SIMD3<Float>(repeating: 0), normal = SIMD3<Float>(repeating: 0)
@@ -2987,16 +2992,21 @@ final class OrcaEngine: ObservableObject {
             }
             let error = orca_session_last_error(s).map { String(cString: $0) } ?? ""
             var restoreFailed = false
-            if code < 0 {
+            // Split stages its own model and leaves the original untouched on
+            // failure; avoid reimporting it or losing its existing preview.
+            if code < 0, case .split = edit { /* No restoration needed. */ }
+            else if code < 0 {
                 restoreFailed = snapshot.path.withCString { orca_session_restore_snapshot(s, $0) } != 0
             }
             return (code, error.isEmpty ? "Mesh operation failed" : error, restoreFailed)
         }.value
         if result.0 >= 0 || result.2 { recordUndoSnapshot(snapshot, label: "mesh-edit") }
         else { try? FileManager.default.removeItem(at: snapshot) }
+        if result.0 < 0, case .split = edit { lastMessage = result.1; return false }
         if result.0 >= 0, case .boolean(let other, _, let removeOther) = edit {
             selectedObjectIndex = index - (removeOther && other < index ? 1 : 0)
         } else if result.0 >= 0, case .cut = edit { selectedObjectIndex = -1 }
+        else if result.0 >= 0, case .split(let objects, _, _) = edit, objects { selectedObjectIndex = -1 }
         refreshObjectList()
         hasModel = objectCount > 0
         refreshMesh(); refreshBounds(); refreshModelInfo()
@@ -3006,9 +3016,26 @@ final class OrcaEngine: ObservableObject {
         }
         _ = refreshMeshHealth()
         lastMessage = "Updated model · \(objectCount) objects"
+        if case .split(let objects, _, _) = edit {
+            explodeFactor = 0
+            lastMessage = "Split into \(result.0) \(objects ? "objects" : "parts")"
+        }
         return true
         #else
         lastMessage = "Engine not linked"; return false
+        #endif
+    }
+
+    func modelPartNames(object index: Int) -> [String] {
+        #if ORCA_LINKED
+        guard let session, !sessionBusy, !sliceRunning, !presetsLoading else { return [] }
+        let count = Int(orca_session_model_part_count(session, Int32(index)))
+        return (0..<count).map { part in
+            let name = orca_session_model_part_name(session, Int32(index), Int32(part)).map { String(cString: $0) } ?? ""
+            return name.isEmpty ? "Part \(part + 1)" : name
+        }
+        #else
+        return []
         #endif
     }
 

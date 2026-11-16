@@ -2,6 +2,7 @@
 #include "orca_slice_c_api.h"
 
 #include <cmath>
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -203,6 +204,75 @@ int main(int argc, char **argv)
                          "union preserves the operands' world bounds")) return 4;
     }
     std::printf("PASS: native simplify, plane cut and overlapping mesh union\n");
+    {
+        // One STL volume, two disconnected solids at different heights. This
+        // distinguishes native Parts (one object) from Objects (independent).
+        const std::string path = directory + "/disconnected.stl";
+        std::ofstream fixture(path);
+        const std::array<std::array<float, 3>, 4> vertices{{{0,0,0}, {10,0,0}, {0,10,0}, {0,0,10}}};
+        const int faces[4][3] = {{0,2,1}, {0,1,3}, {0,3,2}, {1,2,3}};
+        fixture << "solid disconnected\n";
+        for (int part = 0; part < 2; ++part)
+            for (const auto &face : faces) {
+                fixture << "facet normal 0 0 0\nouter loop\n";
+                for (int vertex : face)
+                    fixture << "vertex " << vertices[vertex][0] + part * 25 << ' '
+                            << vertices[vertex][1] << ' ' << vertices[vertex][2] + part * 12 << '\n';
+                fixture << "endloop\nendfacet\n";
+            }
+        fixture << "endsolid disconnected\n";
+        fixture.close();
+        std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+            split(orca_session_create(argv[2]), orca_session_destroy);
+        diagnostic_session = split.get();
+        if (!require(orca_session_load_model(split.get(), path.c_str()) == 0 &&
+                     orca_session_model_part_count(split.get(), 0) == 1, "single-volume disconnected fixture") ||
+            !require(orca_session_scale_object_axes(split.get(), 0, 1.1f, 0.8f, 1.2f) == 0 &&
+                     orca_session_rotate_object_z(split.get(), 0, 17) == 0 &&
+                     orca_session_translate_object(split.get(), 0, 17, -9, 6) == 0 &&
+                     orca_session_set_object_option(split.get(), 0, "layer_height", "0.12") == 0 &&
+                     orca_session_paint_fill(split.get(), 0, 2, 1) > 0, "split preserves transforms/settings/painting")) return 4;
+        float before[6]{}, after[6]{};
+        if (!require(orca_session_model_bounds(split.get(), before, before+1, before+2, before+3, before+4, before+5) == 0,
+                     "split initial bounds") ||
+            !require(orca_session_split_model(split.get(), 0, 99, 0, 0) < 0 &&
+                     orca_session_model_part_count(split.get(), 0) == 1, "invalid part does not alter model") ||
+            !require(orca_session_split_model(split.get(), 0, 0, 0, 0) == 2 &&
+                     orca_session_object_count(split.get()) == 1 && orca_session_model_part_count(split.get(), 0) == 2,
+                     "Split to parts retains one object with two volumes") ||
+            !require(orca_session_model_part_name(split.get(), 0, 1) != nullptr &&
+                     orca_session_model_part_name(split.get(), 0, 2) == nullptr, "part-name query bounds") ||
+            !require(orca_session_model_bounds(split.get(), after, after+1, after+2, after+3, after+4, after+5) == 0,
+                     "split parts bounds")) return 4;
+        for (int axis = 0; axis < 6; ++axis)
+            if (!require(std::fabs(before[axis] - after[axis]) < 0.001f, "parts preserve world bounds")) return 4;
+        const std::string snapshot = directory + "/split-parts.3mf";
+        if (!require(orca_session_snapshot(split.get(), snapshot.c_str()) == 0, "snapshot split parts") ||
+            !require(orca_session_split_model(split.get(), 0, 0, 1, 0) == 2 &&
+                     orca_session_object_count(split.get()) == 2, "Split to objects creates independent objects") ||
+            !require(orca_session_model_bounds(split.get(), after, after+1, after+2, after+3, after+4, after+5) == 0,
+                     "split objects bounds")) return 4;
+        for (int axis = 0; axis < 6; ++axis)
+            if (!require(std::fabs(before[axis] - after[axis]) < 0.001f, "objects preserve XY/Z when Drop is off")) return 4;
+        for (int object = 0; object < 2; ++object) {
+            char value[64]{};
+            int painted = 0;
+            if (!require(orca_session_get_object_option(split.get(), object, "layer_height", value, sizeof(value)) == 0 &&
+                         std::string(value) == "0.12", "split objects preserve object overrides") ||
+                !require(orca_session_paint_stats(split.get(), object, 2, 1, &painted) == 0 && painted > 0,
+                         "split objects retain native paint annotations")) return 4;
+        }
+        if (!require(orca_session_restore_snapshot(split.get(), snapshot.c_str()) == 0 &&
+                     orca_session_object_count(split.get()) == 1 && orca_session_model_part_count(split.get(), 0) == 2,
+                     "split snapshot restores multipart object") ||
+            !require(orca_session_split_model(split.get(), 0, 0, 1, 1) == 2 &&
+                     orca_session_model_bounds(split.get(), after, after+1, after+2, after+3, after+4, after+5) == 0 &&
+                     std::fabs(after[2]) < 0.001f, "optional split auto-drop places results on bed")) return 4;
+        const int count = orca_session_object_count(split.get());
+        if (!require(orca_session_split_model(split.get(), 0, 0, 1, 0) < 0 &&
+                     orca_session_object_count(split.get()) == count, "unsplittable object leaves the original intact")) return 4;
+        std::printf("PASS: native Split to parts/objects, world placement, overrides, painting, snapshot and failure recovery\n");
+    }
     diagnostic_session = session.get();
     int scope = -1;
     if (!require(orca_session_option_presentation("layer_height", &scope) >= 0 && scope == 0, "process option ownership") ||
@@ -307,6 +377,19 @@ int main(int argc, char **argv)
     }
     if (!require(has_metrics, "preview includes desktop speed, flow and layer time") || !require(has_height, "preview includes processed bead height") || !require(max_z > 19.f, "preview reaches the top of the cube"))
         return 11;
+    {
+        orca_preview_segment_t *retained = nullptr;
+        size_t retained_count = 0, retained_total = 0;
+        if (!require(orca_session_split_model(session.get(), 0, 0, 1, 0) < 0,
+                     "connected cube cannot be split") ||
+            !require(orca_session_export_preview(session.get(), &retained, &retained_count, &retained_total) == 0 &&
+                     retained_count == count && retained_total == total,
+                     "unsuccessful split preserves the existing sliced preview")) {
+            orca_free(retained);
+            return 11;
+        }
+        orca_free(retained);
+    }
     {
         std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
             viewer(orca_session_create(argv[2]), orca_session_destroy);

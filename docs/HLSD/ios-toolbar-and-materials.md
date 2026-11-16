@@ -11,7 +11,7 @@ session was unavailable. A matching label is not evidence of interaction parity.
 | Add/select plate | Snapshot-backed plate selector; desktop multi-plate layout remains different |
 | Auto orient, arrange | Native orient/libnest handlers; interactive desktop arrangement controls need comparison |
 | More/fewer copies, delete | Native duplicate/delete and undo; inspect selection behavior on devices |
-| Split objects / parts | Full desktop split workflows remain incomplete |
+| Split objects / parts | Native ModelObject/ModelVolume split exposed in Mesh tools, selected solid-part picker, optional object auto-drop and undo; full desktop part-tree selection/editing remains incomplete |
 | Move, rotate, scale | Native transforms and camera gestures; desktop gizmo handles/constraints are partial |
 | Lay on face | Auto-orient is available; explicit desktop face picking is not equivalent and remains incomplete |
 | Plane cut, mesh boolean, simplify | Native algorithms with numeric mobile controls and existing geometry tests; gizmo UI parity partial |
@@ -86,3 +86,15 @@ content despite the old rotation predicate passing. The UI test now waits for
 both header edges, all main tabs and Home/Slice to fit stable landscape bounds
 before capturing. That stronger landscape check is pending. This runtime pass
 predates the manual/automatic projection controls and last-object cache cleanup.
+
+Split operations now call the same ModelObject::split and ModelVolume::split
+routines as desktop Plater/ObjectList, with painting remapping enabled. The
+bridge stages a Model copy and commits only a real split; invalid targets and
+connected single pieces leave model/config/preview intact. Objects can preserve
+Z or drop to the bed. Parts remain volumes within the same object. Native
+modifier-removal behavior for Split to objects is explained in the mobile panel.
+The existing async model-edit gate and snapshot undo are reused; a direct Mesh
+tools chip reaches the panel without expanding the workspace. Per-part transform
+selection is still separate work. Regression coverage uses disconnected solids,
+nonuniform scale/rotation/translation, bounds, overrides, paint, snapshot restore
+and failed-split preview retention. Native compile/runtime results remain pending.

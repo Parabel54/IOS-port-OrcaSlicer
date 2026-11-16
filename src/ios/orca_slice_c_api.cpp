@@ -4288,6 +4288,97 @@ int orca_session_simplify_mesh(
     }
 }
 
+static ModelVolume *model_part_at(ModelObject *object, int index)
+{
+    if (!object || index < 0) return nullptr;
+    for (ModelVolume *volume : object->volumes)
+        if (volume && volume->is_model_part() && index-- == 0) return volume;
+    return nullptr;
+}
+
+int orca_session_model_part_count(orca_session_t *s, int object_index)
+{
+    if (!s || object_index < 0 || object_index >= int(s->model.objects.size())) return 0;
+    const ModelObject *object = s->model.objects[size_t(object_index)];
+    if (!object) return 0;
+    return int(std::count_if(object->volumes.begin(), object->volumes.end(),
+        [](const ModelVolume *volume) { return volume && volume->is_model_part(); }));
+}
+
+const char *orca_session_model_part_name(orca_session_t *s, int object_index, int part_index)
+{
+    if (!s || object_index < 0 || object_index >= int(s->model.objects.size())) return nullptr;
+    const ModelVolume *part = model_part_at(s->model.objects[size_t(object_index)], part_index);
+    return part ? part->name.c_str() : nullptr;
+}
+
+int orca_session_split_model(orca_session_t *s, int object_index, int part_index, int to_objects, int drop_to_bed)
+{
+    if (!s) return -1;
+    s->clear_error();
+    if (!s->has_model || object_index < 0 || object_index >= int(s->model.objects.size()) ||
+        (to_objects != 0 && to_objects != 1)) {
+        s->set_error("Select one valid object to split");
+        return -2;
+    }
+    try {
+        // Desktop also splits a model copy: its routines can consume volume
+        // meshes and append objects before determining whether a split exists.
+        Model staged = s->model;
+        ModelObject *object = staged.objects[size_t(object_index)];
+        if (!object) { s->set_error("The selected object is unavailable"); return -2; }
+        int pieces = 0;
+        if (to_objects) {
+            ModelObjectPtrs results;
+            object->split(&results, true);
+            pieces = int(results.size());
+            if (pieces <= 1) {
+                s->set_error("The selected object cannot be split into multiple objects");
+                return -3;
+            }
+            for (ModelObject *result : results) {
+                result->invalidate_bounding_box();
+                if (drop_to_bed) result->ensure_on_bed();
+            }
+            staged.delete_object(size_t(object_index));
+        } else {
+            ModelVolume *part = model_part_at(object, part_index);
+            if (!part) {
+                s->set_error("Select a solid model part to split");
+                return -2;
+            }
+            const auto *colors = s->config.option<ConfigOptionStrings>("filament_colour");
+            pieces = int(part->split(colors ? unsigned(colors->values.size()) : 1, true));
+            if (pieces <= 1) {
+                s->set_error("The selected part contains only one connected piece");
+                return -3;
+            }
+            object->input_file.clear();
+            object->invalidate_bounding_box();
+        }
+        s->model = std::move(staged);
+        s->has_slice_stats = false;
+        s->preview_segments.clear();
+        s->preview_total_segments = 0;
+        s->preview_metadata.clear();
+        s->role_names.clear();
+        s->role_meters.clear();
+        s->role_grams.clear();
+        s->has_explode_baseline = false;
+        s->explode_baseline_offsets.clear();
+        s->explode_factor_current = 0.f;
+        s->explode_saved = false;
+        s->explode_origin_offsets.clear();
+        return pieces;
+    } catch (const std::exception &ex) {
+        s->set_error(std::string("split_model: ") + ex.what());
+        return -4;
+    } catch (...) {
+        s->set_error("split_model: unknown error");
+        return -4;
+    }
+}
+
 int orca_session_cut_object_plane(
     orca_session_t *s, int index,
     float px, float py, float pz,

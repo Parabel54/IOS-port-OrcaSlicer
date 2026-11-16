@@ -499,6 +499,23 @@ ORCA_API int orca_session_mesh_stats(
  */
 ORCA_API int orca_session_repair_mesh(orca_session_t *s, int index);
 
+/** Solid model parts (excludes modifiers/negative/support volumes).
+ * part_index is an ordinal in this filtered list, not a raw volume index.
+ * Names remain valid until the model changes; invalid queries return 0/NULL.
+ */
+ORCA_API int orca_session_model_part_count(orca_session_t *s, int object_index);
+ORCA_API const char *orca_session_model_part_name(orca_session_t *s, int object_index, int part_index);
+
+/** Desktop Split to objects / Split to parts, using native painting remapping.
+ * to_objects=1 splits the whole object; part_index is ignored. drop_to_bed
+ * optionally drops the resulting independent objects (otherwise Z is retained).
+ * to_objects=0 splits one selected solid part into volumes in the same object,
+ * preserving their placement. Original model is retained on failure/no split.
+ * Returns the number of resulting pieces (>1), or <0 with a diagnostic.
+ */
+ORCA_API int orca_session_split_model(orca_session_t *s, int object_index,
+    int part_index, int to_objects, int drop_to_bed);
+
 /**
  * Horizontal plane cut at world Z = z_mm (mm).
  * keep_upper/keep_lower: non-zero to keep that half as separate objects.

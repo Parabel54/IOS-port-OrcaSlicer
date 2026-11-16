@@ -80,6 +80,7 @@ struct OrcaRootView: View {
     @State private var operationError: String?
     @State private var showProcess = false
     @State private var showPlateInspector = false
+    @State private var showMeshTools = false
     @State private var showModelLibrary = false
     @State private var primitiveKind = 0
     @State private var primitiveX = "20"
@@ -342,6 +343,15 @@ struct OrcaRootView: View {
                 .interactiveDismissDisabled(engine.sessionBusy)
         }
         .sheet(isPresented: $showModelLibrary) { modelLibrary }
+        .sheet(isPresented: $showMeshTools) {
+            NavigationStack {
+                MeshToolsPanel(engine: engine) { status = engine.lastMessage; showMeshTools = false }
+                    .toolbar { ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { showMeshTools = false }.disabled(engine.sessionBusy)
+                    } }
+            }.presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
+                .interactiveDismissDisabled(engine.sessionBusy)
+        }
         .sheet(isPresented: $showCalibration) {
             calibrationSheet
                 .presentationDetents([.medium, .large])
@@ -2462,6 +2472,8 @@ struct OrcaRootView: View {
                             if mainTab == .prepare {
                                 toolChip("Add", "plus") { showModelLibrary = true }.accessibilityIdentifier("model-library-shortcut")
                                 toolChip("Transform", "slider.horizontal.3") { showPlateInspector = true }
+                                toolChip("Mesh tools", "cube.transparent") { showMeshTools = true }
+                                    .disabled(!engine.hasModel).accessibilityIdentifier("mesh-tools-shortcut")
                             }
                         }.padding(8)
                     }
@@ -3783,6 +3795,9 @@ private struct MeshToolsPanel: View {
     @State private var booleanOperation = 0
     @State private var removeOther = true
     @State private var failure: String?
+    @State private var partNames: [String] = []
+    @State private var selectedPart = 0
+    @State private var dropSplitObjects = true
 
     private var hasSelection: Bool { engine.objectNames.indices.contains(engine.selectedObjectIndex) }
     private var secondObject: Int {
@@ -3797,7 +3812,7 @@ private struct MeshToolsPanel: View {
                     Text("All objects").tag(-1)
                     ForEach(Array(engine.objectNames.enumerated()), id: \.offset) { i, name in Text(name).tag(i) }
                 }
-                if !hasSelection { Text("Select one object for simplify, cut and boolean operations.").font(.caption) }
+                if !hasSelection { Text("Select one object for split, simplify, cut and boolean operations.").font(.caption) }
             }
             Section("Repair") {
                 Button(hasSelection ? "Repair selected object" : "Repair all objects") { run(.repair) }.accessibilityIdentifier("repair-mesh")
@@ -3811,6 +3826,25 @@ private struct MeshToolsPanel: View {
                     }
                     run(.simplify(target))
                 }
+            }.disabled(!hasSelection)
+            Section("Split") {
+                Toggle("Drop new objects to bed", isOn: $dropSplitObjects)
+                Button("Split to objects") { run(.split(toObjects: true, part: 0, dropToBed: dropSplitObjects)) }
+                    .accessibilityIdentifier("split-to-objects")
+                Text("Creates independent objects. Turn off Drop to keep floating parts at their current height.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("Splitting to objects removes modifier volumes. Undo restores the original object.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Picker("Model part", selection: $selectedPart) {
+                    if partNames.isEmpty { Text("No solid model parts selected").tag(0) }
+                    ForEach(Array(partNames.enumerated()), id: \.offset) { index, name in
+                        Text("\(index + 1): \(name)").tag(index)
+                    }
+                }
+                Button("Split to parts") { run(.split(toObjects: false, part: selectedPart, dropToBed: false)) }
+                    .disabled(partNames.isEmpty).accessibilityIdentifier("split-to-parts")
+                Text("Separates disconnected pieces inside the same object, preserving their placement.")
+                    .font(.caption).foregroundStyle(.secondary)
             }.disabled(!hasSelection)
             Section("Cut") {
                 Picker("Plane axis", selection: $cutAxis) { Text("X").tag(0); Text("Y").tag(1); Text("Z").tag(2) }
@@ -3846,9 +3880,10 @@ private struct MeshToolsPanel: View {
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
             }
         }
-        .onAppear { setCutMiddle() }
+        .onAppear { setCutMiddle(); refreshParts() }
         .onChange(of: cutAxis) { _ in setCutMiddle() }
-        .onChange(of: engine.selectedObjectIndex) { _ in setCutMiddle() }
+        .onChange(of: engine.selectedObjectIndex) { _ in setCutMiddle(); refreshParts() }
+        .onChange(of: engine.sessionBusy) { busy in if !busy { refreshParts() } }
         .alert("Mesh operation failed", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("OK", role: .cancel) {}
         } message: { Text(failure ?? "") }
@@ -3865,6 +3900,12 @@ private struct MeshToolsPanel: View {
             if await engine.editMesh(edit) { onComplete() }
             else { failure = engine.lastMessage }
         }
+    }
+
+    private func refreshParts() {
+        guard !engine.sessionBusy else { return }
+        partNames = engine.modelPartNames(object: engine.selectedObjectIndex)
+        if !partNames.indices.contains(selectedPart) { selectedPart = 0 }
     }
 }
 
