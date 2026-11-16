@@ -19,11 +19,11 @@ session was unavailable. A matching label is not evidence of interaction parity.
 | Emboss, SVG, texture displacement | Full desktop workflows missing; a text plate is not general emboss |
 | Variable layer height | Interactive desktop profile editor missing |
 | Assembly view/tools | Explode/assembly-related operations are partial; full desktop assembly workflow missing |
-| Views / Home | Six-face camera cube, Home, orbit/pan/zoom; compare projection/view preferences separately |
+| Views / Home | Six-face camera cube, Home, orbit/pan/zoom; orthographic/perspective and additional desktop view preferences remain incomplete |
 | Global / Objects | Explicit target tabs; initial object layer height, walls, infill and filament overrides with reset to Global |
-| Filament colors | Native color pickers, project slots, object display colors and Filament preview default; selection no longer replaces body color with teal |
+| Filament colors | Native color pickers, project slots, object display colors and Filament preview default; selection no longer replaces body color with teal; full per-slot preset editor remains incomplete |
 | Mixed Filament | Native FilamentMixer color blending, 2/3 physical components, positive percentages totaling 100, linear height gradient/direction/per-object option |
-| Mixed custom curves | Existing core data retained on import; desktop custom curve editor not exposed on mobile yet |
+| Mixed custom curves | Existing core data retained on import; desktop custom curve and existing-slot editing/deletion are not exposed on mobile yet |
 | Plugin manager | General desktop plugin runtime remains missing. Native Zmod processing is not compatibility with the 18 reported plugins |
 
 The mobile painting selector no longer cycles over only four filaments. Project

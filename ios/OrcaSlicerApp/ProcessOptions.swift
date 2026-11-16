@@ -423,9 +423,17 @@ struct ProcessSettingsBrowser: View {
     private var projectFilaments: some View {
         Section("Project filaments") {
             ForEach(Array(engine.projectFilamentColors.enumerated()), id: \.offset) { index, hex in
+                if engine.physicalFilamentIndices.contains(index) {
                 ColorPicker("Filament \(index + 1)", selection: Binding(get: { colorValue(hex) }, set: {
                     if !engine.setProjectFilamentColor(index, hex: colorHex($0)) { applyError = engine.lastMessage }
                 }), supportsOpacity: false)
+                } else {
+                    HStack {
+                        Text("Mixed filament \(index + 1)")
+                        Spacer()
+                        Circle().fill(colorValue(hex)).frame(width: 24, height: 24)
+                    }
+                }
             }
             Button("Add filament") { engine.addProjectFilament(); applyError = engine.lastMessage }
                 .disabled(engine.projectFilamentColors.count >= 16)
@@ -444,6 +452,7 @@ struct ProcessSettingsBrowser: View {
                     Button {
                         engine.selectObject(at: index)
                         objectDrafts = [:]
+                        applyError = nil
                     } label: {
                         HStack { Text(name); Spacer(); if engine.selectedObjectIndex == index { Image(systemName: "checkmark") } }
                     }
@@ -462,6 +471,7 @@ struct ProcessSettingsBrowser: View {
                     }
                 }
             }
+            if let applyError { Text(applyError).foregroundStyle(.red) }
         }.scrollContentBackground(.hidden)
     }
 
@@ -475,9 +485,8 @@ struct ProcessSettingsBrowser: View {
                 Button("Apply") {
                     var value = objectDrafts[key] ?? engine.getObjectOption(index: engine.selectedObjectIndex, key: key) ?? engine.getOption(key) ?? ""
                     if key == "sparse_infill_density" && !value.hasSuffix("%") { value += "%" }
-                    if !engine.setObjectOption(index: engine.selectedObjectIndex, key: key, value: value) {
-                        applyError = engine.lastMessage
-                    }
+                    let ok = engine.setObjectOption(index: engine.selectedObjectIndex, key: key, value: value)
+                    applyError = ok ? nil : engine.lastMessage
                 }
             }
             Button("Use global value") {
@@ -724,6 +733,13 @@ private struct MixedFilamentEditor: View {
             third = physical.dropFirst(2).first ?? 2
         }
         .onChange(of: firstRatio) { _ in secondRatio = min(secondRatio, 99-firstRatio) }
+        .onChange(of: count) { value in
+            if value == 3 {
+                firstRatio = min(firstRatio, 98)
+                secondRatio = min(secondRatio, 99-firstRatio)
+                third = engine.physicalFilamentIndices.first(where: { $0 != first && $0 != second }) ?? third
+            }
+        }
     }
 
     private func component(_ label: String, selection: Binding<Int>) -> some View {
