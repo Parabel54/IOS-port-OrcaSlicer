@@ -67,9 +67,12 @@ ios_test_run 360 xcrun simctl bootstatus "$DEVICE" -b 2>&1 | tee "$TEST_DIR/boot
 # The bounded Orca launches and startup markers below validate the launcher.
 # Launching Settings adds an unrelated cold-start failure to each fresh device.
 APP_BUNDLE="$ROOT/build-ios-app/Build/Products/Release-iphonesimulator/OrcaSlicer.app"
-ios_test_run 360 xcodebuild build-for-testing -project "$ROOT/ios/OrcaSlicer.xcodeproj" \
+# Match the app's generic build to reuse its compiled assets. Device-specific
+# thinning can stall on fresh simulators before tests begin; select devices
+# when running the tests rather than when building their products.
+ios_test_run 600 xcodebuild build-for-testing -project "$ROOT/ios/OrcaSlicer.xcodeproj" \
   -scheme OrcaSlicerUITests -configuration Release -sdk iphonesimulator \
-  -destination "id=$DEVICE" -derivedDataPath "$ROOT/build-ios-app" CODE_SIGNING_ALLOWED=NO ARCHS="$ARCH" \
+  -destination "generic/platform=iOS Simulator" -derivedDataPath "$ROOT/build-ios-app" CODE_SIGNING_ALLOWED=NO ARCHS="$ARCH" \
   2>&1 | tee "$TEST_DIR/ui-build.log"
 codesign --force --deep --sign - "$APP_BUNDLE"
 codesign --force --deep --sign - "$ROOT/build-ios-app/Build/Products/Release-iphonesimulator/OrcaSlicerUITests-Runner.app"

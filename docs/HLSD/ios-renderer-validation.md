@@ -34,6 +34,12 @@ infrastructure failures even when the simulator cannot serve unified logs.
 Runtime selection stays within the chosen SDK's iOS version family.
 Fresh devices isolate test state and are shut down/deleted during cleanup.
 
+Full-app test products build for the generic simulator platform, reusing the
+app's generic resource compilation. Device-specific thinning does not belong in
+that build. The 600-second build bound remains separate from boot, install and
+test bounds. Actual test-without-building commands select the intended phone or
+tablet device and retain their required assertions.
+
 SDK/interface checks, focused graphics, C++ implementation builds, native engine
 execution, full-app UI tests and physical-device/printer acceptance are separate
 evidence. Native integration builds the bridge against real dependencies before
