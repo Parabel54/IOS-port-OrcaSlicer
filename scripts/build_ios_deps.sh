@@ -8,8 +8,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET="${1:-iphonesimulator}"   # iphonesimulator | iphoneos
 ARCH="${2:-arm64}"
 case "$TARGET:$ARCH" in
-  iphoneos:arm64|iphonesimulator:arm64) ;;
-  *) echo "Expected iphoneos or iphonesimulator with arm64" >&2; exit 2 ;;
+  iphoneos:arm64|iphonesimulator:arm64|iphonesimulator:x86_64) ;;
+  *) echo "Expected iphoneos:arm64 or iphonesimulator:arm64/x86_64" >&2; exit 2 ;;
 esac
 BUILD_DIR="${ROOT}/deps/build-ios-${TARGET}-${ARCH}"
 LOG_DIR="${ROOT}/build_logs"

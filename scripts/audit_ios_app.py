@@ -24,7 +24,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('app', type=Path)
     parser.add_argument('sdk', choices=['iphoneos', 'iphonesimulator'])
+    parser.add_argument('--arch', choices=['arm64', 'x86_64'], default='arm64')
     args = parser.parse_args()
+    if args.sdk == 'iphoneos' and args.arch != 'arm64':
+        parser.error('Device apps must use arm64')
     if not args.app.is_dir():
         parser.error('App bundle does not exist')
     errors = audit_resources(args.app)
@@ -37,6 +40,9 @@ def main():
     binaries = [executable] + list((args.app / 'Frameworks').glob('*.dylib'))
     expected = 'IOS' if args.sdk == 'iphoneos' else 'IOSSIMULATOR'
     for binary in binaries:
+        architectures = subprocess.check_output(['xcrun', 'lipo', '-archs', str(binary)], text=True).split()
+        if architectures != [args.arch]:
+            raise SystemExit(f'Wrong architecture for {binary.name}: {architectures}, expected {args.arch}')
         build = subprocess.check_output(['xcrun', 'vtool', '-show-build', str(binary)], text=True)
         platforms = re.findall(r'^\s*platform\s+(\S+)', build, flags=re.MULTILINE)
         if not platforms or any(platform != expected for platform in platforms):

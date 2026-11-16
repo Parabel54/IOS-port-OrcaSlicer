@@ -2,8 +2,9 @@
 # Run the linked mobile ABI against a real iOS Simulator runtime.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-if [[ "$(uname -m)" != arm64 ]]; then
-  echo "The arm64 engine smoke test requires an Apple Silicon runner" >&2
+ARCH="${1:-$(uname -m)}"
+if [[ "$ARCH" != "$(uname -m)" || ( "$ARCH" != arm64 && "$ARCH" != x86_64 ) ]]; then
+  echo "Simulator architecture must be arm64 or x86_64 and match the Mac host" >&2
   exit 1
 fi
 # CoreSimulator commands can stall without returning a diagnostic. Bound each
@@ -39,10 +40,10 @@ SDK_PATH="$(xcrun --sdk iphonesimulator --show-sdk-path)"
 TEST_DIR="$ROOT/build_logs/simulator-smoke"
 mkdir -p "$TEST_DIR"
 python3 "$ROOT/scripts/make_ios_3mf_fixture.py" "$TEST_DIR/orca-project.3mf" --padding-mib 100
-xcrun --sdk iphonesimulator clang++ -std=c++17 -arch arm64 \
+xcrun --sdk iphonesimulator clang++ -std=c++17 -arch "$ARCH" \
   -isysroot "$SDK_PATH" -mios-simulator-version-min=16.0 \
   -I "$ROOT/src/ios" "$ROOT/ios/tests/engine_smoke.cpp" \
-  "$ROOT/build-ios-iphonesimulator-arm64/engine_bundle/lib/liborca_engine.a" \
+  "$ROOT/build-ios-iphonesimulator-${ARCH}/engine_bundle/lib/liborca_engine.a" \
   -lc++ -lz -liconv -lexpat -framework Foundation -framework ModelIO \
   -framework Security -framework SystemConfiguration -framework UIKit \
   -framework SceneKit -framework Network -o "$TEST_DIR/engine_smoke"
@@ -105,7 +106,7 @@ ios_test_run 240 xcrun simctl bootstatus "$DEVICE" -b
 APP_BUNDLE="$ROOT/build-ios-app/Build/Products/Release-iphonesimulator/OrcaSlicer.app"
 ios_test_run 360 xcodebuild build-for-testing -project "$ROOT/ios/OrcaSlicer.xcodeproj" \
   -scheme OrcaSlicerUITests -configuration Release -sdk iphonesimulator \
-  -destination "id=$DEVICE" -derivedDataPath "$ROOT/build-ios-app" CODE_SIGNING_ALLOWED=NO \
+  -destination "id=$DEVICE" -derivedDataPath "$ROOT/build-ios-app" CODE_SIGNING_ALLOWED=NO ARCHS="$ARCH" \
   2>&1 | tee "$TEST_DIR/ui-build.log"
 codesign --force --deep --sign - "$APP_BUNDLE"
 codesign --force --deep --sign - "$ROOT/build-ios-app/Build/Products/Release-iphonesimulator/OrcaSlicerUITests-Runner.app"
@@ -120,7 +121,7 @@ PYRUNFILE
 )"
 ios_test_run 180 xcrun simctl spawn "$DEVICE" "$TEST_DIR/engine_smoke" "$TEST_DIR" "$APP_BUNDLE" \
   2>&1 | tee "$TEST_DIR/result.log"
-python3 "$ROOT/scripts/audit_ios_app.py" "$APP_BUNDLE" iphonesimulator
+python3 "$ROOT/scripts/audit_ios_app.py" "$APP_BUNDLE" iphonesimulator --arch "$ARCH"
 ios_test_run 120 xcrun simctl install "$DEVICE" "$APP_BUNDLE"
 APP_DATA="$(xcrun simctl get_app_container "$DEVICE" com.orcaslicer.ios data)"
 mkdir -p "$APP_DATA/Documents"

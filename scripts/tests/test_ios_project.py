@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 SOURCE = Path(__file__).resolve().parents[2] / 'ios/generate_xcodeproj.py'
@@ -52,12 +53,12 @@ class ProjectGenerationTests(unittest.TestCase):
             resource.mkdir()
             (resource / 'table.json').write_text('{}')
 
-    def generate(self, sdk):
+    def generate(self, sdk, arch="arm64"):
         return subprocess.run([sys.executable, str(self.root / 'ios/generate_xcodeproj.py'),
-                               '--require-engine', sdk], capture_output=True, text=True)
+                               '--require-engine', sdk, '--simulator-arch', arch], capture_output=True, text=True)
 
-    def engine(self, sdk):
-        archive = self.root / f'build-ios-{sdk}-arm64/engine_bundle/lib/liborca_engine.a'
+    def engine(self, sdk, arch="arm64"):
+        archive = self.root / f'build-ios-{sdk}-{arch}/engine_bundle/lib/liborca_engine.a'
         archive.parent.mkdir(parents=True, exist_ok=True)
         archive.write_bytes(b'!<arch>\n')
         return archive
@@ -99,6 +100,21 @@ class ProjectGenerationTests(unittest.TestCase):
         self.assertNotIn('SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx"', project)
         self.assertIn('TARGETED_DEVICE_FAMILY = "1,2"', project)
 
+    def test_explicit_intel_simulator_keeps_device_bundle_separate(self):
+        self.engine('iphonesimulator', 'x86_64')
+        self.engine('iphoneos')
+        # An Intel archive must not silently satisfy the default ARM build.
+        self.assertNotEqual(self.generate('iphonesimulator').returncode, 0)
+        result = self.generate('iphonesimulator', 'x86_64')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        project = (self.root / 'ios/OrcaSlicer.xcodeproj/project.pbxproj').read_text()
+        self.assertIn('build-ios-iphonesimulator-x86_64/engine_bundle/lib', project)
+        self.assertNotIn('build-ios-iphonesimulator-arm64/engine_bundle/lib', project)
+        self.assertIn('"ARCHS[sdk=iphonesimulator*]" = x86_64;', project)
+        self.assertIn('"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = "arm64 i386";', project)
+        self.assertIn('build-ios-iphoneos-arm64/engine_bundle/lib', project)
+        self.assertNotIn('build-ios-iphoneos-x86_64', project)
+
     def test_bundles_engine_tables_and_rejects_missing_tables(self):
         self.engine('iphoneos')
         result = self.generate('iphoneos')
@@ -134,7 +150,61 @@ class ProjectGenerationTests(unittest.TestCase):
         self.assertNotEqual(self.generate('iphoneos').returncode, 0)
 
 
+class ToolchainArchitectureTests(unittest.TestCase):
+    def test_device_and_both_simulator_architectures(self):
+        toolchain = SOURCE.parents[1] / 'cmake/ios.toolchain.cmake'
+        with tempfile.TemporaryDirectory() as directory:
+            check = Path(directory) / 'check.cmake'
+            check.write_text(f'include("{toolchain}")\n'
+                             'if(NOT CMAKE_OSX_SYSROOT STREQUAL EXPECTED_SDK OR '
+                             'NOT CMAKE_OSX_ARCHITECTURES STREQUAL EXPECTED_ARCH)\n'
+                             '  message(FATAL_ERROR "Wrong SDK/architecture")\nendif()\n')
+            for platform, sdk, arch in (('OS64', 'iphoneos', 'arm64'),
+                                        ('OS64SIMULATOR', 'iphonesimulator', 'arm64'),
+                                        ('SIMULATORARM64', 'iphonesimulator', 'arm64'),
+                                        ('SIMULATOR64', 'iphonesimulator', 'x86_64')):
+                with self.subTest(platform=platform):
+                    result = subprocess.run(['cmake', f'-DPLATFORM={platform}', f'-DEXPECTED_SDK={sdk}',
+                                             f'-DEXPECTED_ARCH={arch}', '-P', str(check)],
+                                            capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+
 class AppResourceAuditTests(unittest.TestCase):
+    def test_binary_platform_and_architecture_must_match_requested_target(self):
+        script = SOURCE.parents[1] / 'scripts/audit_ios_app.py'
+        spec = importlib.util.spec_from_file_location('audit_ios_app', script)
+        audit = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(audit)
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory)
+            (app / 'Info.plist').write_bytes(plistlib.dumps({'CFBundleExecutable': 'OrcaSlicer'}))
+            (app / 'OrcaSlicer').write_bytes(b'\xcf\xfa\xed\xfe')
+            for sdk, arch, actual_arch, platform, passes in (
+                ('iphoneos', 'arm64', 'arm64', 'IOS', True),
+                ('iphoneos', 'x86_64', 'x86_64', 'IOS', False),
+                ('iphonesimulator', 'arm64', 'arm64', 'IOSSIMULATOR', True),
+                ('iphonesimulator', 'x86_64', 'x86_64', 'IOSSIMULATOR', True),
+                ('iphonesimulator', 'x86_64', 'arm64', 'IOSSIMULATOR', False),
+                ('iphonesimulator', 'x86_64', 'x86_64', 'MACOS', False),
+                ('iphoneos', 'arm64', 'arm64', 'IOSSIMULATOR', False),
+            ):
+                with self.subTest(sdk=sdk, arch=arch, actual_arch=actual_arch, platform=platform):
+                    def output(command, **kwargs):
+                        if command[:3] == ['xcrun', 'lipo', '-archs']:
+                            return actual_arch + '\n'
+                        if command[:3] == ['xcrun', 'vtool', '-show-build']:
+                            return ' platform ' + platform + '\n'
+                        self.assertEqual(command[:2], ['otool', '-L'])
+                        return 'OrcaSlicer:\n /usr/lib/libc++.1.dylib (compatibility version 1.0)\n'
+                    argv = ['audit', str(app), sdk, '--arch', arch]
+                    with mock.patch.object(sys, 'argv', argv), mock.patch.object(audit.subprocess, 'check_output', side_effect=output):
+                        if passes:
+                            audit.main()
+                        else:
+                            with self.assertRaises(SystemExit):
+                                audit.main()
+
     def test_rejects_foreign_executables_and_profile_caches(self):
         script = SOURCE.parents[1] / 'scripts/audit_ios_app.py'
         spec = importlib.util.spec_from_file_location('audit_ios_app', script)

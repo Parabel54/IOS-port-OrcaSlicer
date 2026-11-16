@@ -6,8 +6,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET="${1:-iphonesimulator}"   # iphonesimulator | iphoneos
 ARCH="${2:-arm64}"
 case "$TARGET:$ARCH" in
-  iphoneos:arm64|iphonesimulator:arm64) ;;
-  *) echo "Expected iphoneos or iphonesimulator with arm64" >&2; exit 2 ;;
+  iphoneos:arm64|iphonesimulator:arm64|iphonesimulator:x86_64) ;;
+  *) echo "Expected iphoneos:arm64 or iphonesimulator:arm64/x86_64" >&2; exit 2 ;;
 esac
 DEPS_PREFIX="${ROOT}/deps/build-ios-${TARGET}-${ARCH}/OrcaSlicer_dep/usr/local"
 BUILD_DIR="${ROOT}/build-ios-${TARGET}-${ARCH}"
@@ -16,6 +16,8 @@ if [[ ! -d "$DEPS_PREFIX/lib" ]]; then
 fi
 if [[ "$TARGET" == "iphoneos" ]]; then
   PLATFORM=OS64
+elif [[ "$ARCH" == x86_64 ]]; then
+  PLATFORM=SIMULATOR64
 else
   PLATFORM=OS64SIMULATOR
 fi
@@ -55,5 +57,7 @@ subprocess.run(check, cwd=entry["directory"], check=True)
 PYCODE
 cmake --build "$BUILD_DIR" --target orca_ios_api -j "$(sysctl -n hw.ncpu)"
 "$ROOT/scripts/bundle_engine_libs.sh" "$BUILD_DIR" "$DEPS_PREFIX/lib"
-cd "$ROOT/ios" && python3 generate_xcodeproj.py --require-engine "$TARGET"
+SIM_ARCH=arm64
+if [[ "$TARGET" == iphonesimulator ]]; then SIM_ARCH="$ARCH"; fi
+cd "$ROOT/ios" && python3 generate_xcodeproj.py --require-engine "$TARGET" --simulator-arch "$SIM_ARCH"
 echo "iOS engine ready ($TARGET $ARCH). Rebuild Xcode with ORCA_LINKED."

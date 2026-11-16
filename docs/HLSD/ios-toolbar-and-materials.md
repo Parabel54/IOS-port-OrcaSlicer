@@ -111,7 +111,10 @@ instead of guessing. Full per-slot parameter editing remains separate work.
 
 CI runner annotations for source 9bf56cfefec7 report hosted ARM capacity failures
 without executed steps. SDK checks and device cross-builds now use the standard
-macos-15-intel image; simulator execution retains macos-15 ARM. Device artifacts
-still target arm64 and retain the binary/SDK audit. Host architecture remains
-part of dependency/compiler/engine cache keys. This changes job scheduling,
-not the app's supported iOS architectures.
+macos-15-intel image. Simulator builds now support an explicit x86_64 bundle
+and execute on the Intel host, with ARM simulator support retained for local
+Apple Silicon builds. Device artifacts still target arm64. The audit verifies
+the requested CPU and SDK independently; project/toolchain tests reject bundle
+selection mismatches and Intel device targets. Host and target architecture
+remain part of dependency/compiler/engine cache keys. GPU and UI assertions are
+retained; successful SDK type checks are not native runtime acceptance.

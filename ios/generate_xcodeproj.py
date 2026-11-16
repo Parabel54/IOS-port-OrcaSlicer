@@ -9,6 +9,8 @@ import os
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--require-engine", choices=("iphoneos", "iphonesimulator"),
                     help="Fail instead of generating an unlinked app for this SDK")
+parser.add_argument("--simulator-arch", choices=("arm64", "x86_64"), default="arm64",
+                    help="Architecture of the simulator engine bundle (default: arm64)")
 args = parser.parse_args()
 
 ROOT = Path(__file__).resolve().parent
@@ -16,7 +18,7 @@ REPO = ROOT.parent
 PROJ = ROOT / "OrcaSlicer.xcodeproj"
 PROJ.mkdir(exist_ok=True)
 
-ENGINE_IOS_SIM = REPO / "build-ios-iphonesimulator-arm64" / "engine_bundle" / "lib"
+ENGINE_IOS_SIM = REPO / f"build-ios-iphonesimulator-{args.simulator_arch}" / "engine_bundle" / "lib"
 ENGINE_IOS_DEV = REPO / "build-ios-iphoneos-arm64" / "engine_bundle" / "lib"
 
 has_ios_sim_engine = (ENGINE_IOS_SIM / "liborca_engine.a").is_file()
@@ -92,7 +94,7 @@ if license_destination.exists():
 shutil.copytree(ROOT / "licenses", license_destination)
 engine_resource_folders.append("licenses")
 
-ios_sim_lib_path = "$(SRCROOT)/../build-ios-iphonesimulator-arm64/engine_bundle/lib"
+ios_sim_lib_path = f"$(SRCROOT)/../build-ios-iphonesimulator-{args.simulator_arch}/engine_bundle/lib"
 ios_dev_lib_path = "$(SRCROOT)/../build-ios-iphoneos-arm64/engine_bundle/lib"
 hdr_path = "$(SRCROOT)/../src/ios"
 
@@ -152,9 +154,8 @@ def tgt_settings(name: str) -> str:
         "\t\t\t\tMARKETING_VERSION = 2.5.1;",
         f"\t\t\t\tORCA_PROFILE_REVISION = {PROFILE_REVISION};",
         f"\t\t\t\tORCA_BUILD_REVISION = {BUILD_REVISION};",
-        # Engine bundles are arm64-only (Apple Silicon). Exclude x86_64 so Xcode
-        # does not try to link Intel-sim slices that do not exist → linker fail.
-        '\t\t\t\t"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = "x86_64 i386";',
+        # Link only the architecture in the selected simulator bundle.
+        f'\t\t\t\t"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = "{("x86_64 i386" if args.simulator_arch == "arm64" else "arm64 i386")}";',
         "\t\t\t\tONLY_ACTIVE_ARCH = YES;",
         "\t\t\t\tOTHER_LDFLAGS = (",
         '\t\t\t\t\t"$(inherited)",',
@@ -180,9 +181,9 @@ def tgt_settings(name: str) -> str:
             f'\t\t\t\t\t"{ios_ld}",',
             "\t\t\t\t);",
             '\t\t\t\t"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphonesimulator*]" = "ORCA_LINKED";',
-            # Force arm64 sim slices when Xcode would otherwise prefer x86_64
-            '\t\t\t\t"ARCHS[sdk=iphonesimulator*]" = arm64;',
-            '\t\t\t\t"VALID_ARCHS[sdk=iphonesimulator*]" = arm64;',
+            # Match the explicitly selected simulator engine architecture.
+            f'\t\t\t\t"ARCHS[sdk=iphonesimulator*]" = {args.simulator_arch};',
+            f'\t\t\t\t"VALID_ARCHS[sdk=iphonesimulator*]" = {args.simulator_arch};',
         ]
     if has_ios_dev_engine:
         lines += [
