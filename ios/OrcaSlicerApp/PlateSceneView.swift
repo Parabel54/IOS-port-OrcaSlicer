@@ -619,6 +619,7 @@ struct PlateSceneView: UIViewRepresentable {
             if showGCode, let gcodeNode {
                 let clone = gcodeNode.clone()
                 clone.name = "gcode"
+                clone.userData = gcodeNode.userData
                 clone.eulerAngles = SCNVector3Zero
                 content.addChildNode(clone)
             }
@@ -626,8 +627,9 @@ struct PlateSceneView: UIViewRepresentable {
             context.coordinator.lastShowGCode = showGCode
         }
         if let preview = content.childNode(withName: "gcode", recursively: false) {
+            let markerPosition = toolheadPosition ?? GCodePathGeometry.endPoint(in: preview)
             var marker = preview.childNode(withName: "scrub-toolhead", recursively: false)
-            if marker == nil, showToolhead, let position = toolheadPosition {
+            if marker == nil, showToolhead, let position = markerPosition {
                 let sphere = SCNSphere(radius: 1)
                 sphere.segmentCount = 12
                 let material = SCNMaterial()
@@ -641,10 +643,13 @@ struct PlateSceneView: UIViewRepresentable {
                 preview.addChildNode(node)
             }
             marker?.isHidden = !showToolhead
-            if showToolhead, let marker, let position = toolheadPosition {
+            if showToolhead, let marker, let position = markerPosition {
                 context.coordinator.moveToolhead(marker, position: position, move: toolheadMove,
-                    geometry: toolpathGeometry, smooth: smoothToolhead)
-            } else { context.coordinator.stopToolheadMotion() }
+                    geometry: toolpathGeometry, smooth: smoothToolhead, preview: preview)
+            } else {
+                context.coordinator.stopToolheadMotion()
+                GCodePathGeometry.updateCursor(on: preview, through: toolheadMove)
+            }
         } else { context.coordinator.stopToolheadMotion() }
         if let model = content.childNode(withName: "model", recursively: false) {
             model.isHidden = showGCode && !showShell
@@ -943,11 +948,12 @@ struct PlateSceneView: UIViewRepresentable {
         }
 
         func moveToolhead(_ marker: SCNNode, position: SCNVector3, move: Double?,
-                          geometry: GCodePathGeometry?, smooth: Bool) {
+                          geometry: GCodePathGeometry?, smooth: Bool, preview: SCNNode) {
             guard let move, move.isFinite, let geometry, smooth,
                   let start = displayedToolheadMove else {
                 stopToolheadMotion()
                 marker.position = position
+                GCodePathGeometry.updateCursor(on: preview, through: move)
                 displayedToolheadMove = move
                 requestedToolheadMove = move
                 return
@@ -958,11 +964,12 @@ struct PlateSceneView: UIViewRepresentable {
             let began = ProcessInfo.processInfo.systemUptime
             // Interpolate the move cursor, then sample the real polyline. A
             // position tween would cut across corners and disconnected paths.
-            let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self, weak marker] timer in
-                guard let self, let marker else { timer.invalidate(); return }
+            let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self, weak marker, weak preview] timer in
+                guard let self, let marker, let preview else { timer.invalidate(); return }
                 let t = min(1, (ProcessInfo.processInfo.systemUptime - began) / 0.08)
                 let cursor = start + (move - start) * t
                 if let point = geometry.position(atMove: cursor) { marker.position = point }
+                GCodePathGeometry.updateCursor(on: preview, through: cursor)
                 self.displayedToolheadMove = cursor
                 if t >= 1 { timer.invalidate(); self.toolheadTimer = nil }
             }
@@ -1711,6 +1718,25 @@ struct GCodePathGeometry {
         var metrics = Metrics()
         var firstMove: Int = 0
         var lastMove: Int = 0
+        // Cursor positions of Z/sequence-clipped endpoints. Interior vertices
+        // still correspond to consecutive original moves.
+        var startPosition: Double? = nil
+        var endPosition: Double? = nil
+
+        func cursor(at point: Int) -> Double {
+            if point == 0, let startPosition { return startPosition }
+            if point == points.count - 1, let endPosition { return endPosition }
+            return Double(firstMove + point - 1)
+        }
+
+        func edge(at value: Double) -> Int {
+            var low = 1, high = points.count
+            while low < high {
+                let middle = (low + high) / 2
+                if cursor(at: middle) <= value { low = middle + 1 } else { high = middle }
+            }
+            return max(0, min(points.count - 2, low - 1))
+        }
     }
     var segments: [Segment]
     var zMin: Float = 0
@@ -1848,6 +1874,7 @@ struct GCodePathGeometry {
                         a.y + (b.y-a.y)*fraction, a.z + (b.z-a.z)*fraction))
                 }
                 seg.lastMove = Int(ceil(limit))
+                seg.endPosition = limit
             }
             if let enabled = enabledGroups {
                 let g = Self.group(for: seg.feature)
@@ -1856,15 +1883,21 @@ struct GCodePathGeometry {
             // Keep separate runs when a path exits/re-enters the Z range;
             // filtering vertices alone would draw a false connecting extrusion.
             var run: [SCNVector3] = []
+            var runStart = 0.0, runEnd = 0.0
             func flush() {
                 if run.count > 1 {
                     var clipped = seg
                     clipped.points = run
+                    clipped.firstMove = Int(floor(runStart)) + 1
+                    clipped.lastMove = Int(ceil(runEnd))
+                    clipped.startPosition = runStart
+                    clipped.endPosition = runEnd
                     out.append(clipped)
                 }
                 run.removeAll(keepingCapacity: true)
             }
-            for (a, b) in zip(seg.points, seg.points.dropFirst()) {
+            for (edge, pair) in zip(seg.points, seg.points.dropFirst()).enumerated() {
+                let (a, b) = pair
                 let dz = b.z - a.z
                 var lo: Float = 0, hi: Float = 1
                 if abs(dz) < 0.000001 {
@@ -1877,8 +1910,10 @@ struct GCodePathGeometry {
                 let start = SCNVector3(a.x + (b.x - a.x) * lo, a.y + (b.y - a.y) * lo, a.z + dz * lo)
                 let end = SCNVector3(a.x + (b.x - a.x) * hi, a.y + (b.y - a.y) * hi, a.z + dz * hi)
                 if let last = run.last, abs(last.x - start.x) + abs(last.y - start.y) + abs(last.z - start.z) > 0.001 { flush() }
-                if run.isEmpty { run.append(start) }
+                let edgeStart = seg.cursor(at: edge), span = seg.cursor(at: edge + 1) - edgeStart
+                if run.isEmpty { run.append(start); runStart = edgeStart + span * Double(lo) }
                 run.append(end)
+                runEnd = edgeStart + span * Double(hi)
                 if hi < 1 { flush() }
             }
             flush()
@@ -1920,6 +1955,80 @@ struct GCodePathGeometry {
             // and swapped channels for the desktop orange outer-wall palette.
             return r > 150 && r > g + 10 && g > b + 10 && a > 200
         }
+    }
+
+    private static func progressiveCursorSmokeTest() -> Bool {
+        let wall = Segment(points: [SCNVector3Zero, SCNVector3(10,0,0), SCNVector3(10,10,0)],
+            feature: "Outer wall", width: 0.4, feedrate: 600, firstMove: 0, lastMove: 1)
+        let travel = Segment(points: [SCNVector3(20,10,0), SCNVector3(40,10,0)],
+            feature: "Travel", width: 0, feedrate: 1200, kind: .travel, firstMove: 2, lastMove: 2)
+        let source = GCodePathGeometry(segments: [wall, travel]).filtered(maxZ: 1)
+        let node = source.makeNode(color: .white, trackCursor: true)
+        guard let renderer = node.userData?["orca-cursor-renderer"] as? CursorRenderer,
+              renderer.batches.count == 2,
+              let partial = node.childNode(withName: "partial-toolpath", recursively: false) else { return false }
+        let original = node.childNodes.compactMap(\.geometry).map { ObjectIdentifier($0) }
+        updateCursor(on: node, through: -1)
+        guard renderer.batches.allSatisfy({ $0.element.primitiveRange.length == 0 }), partial.geometry == nil else { return false }
+        updateCursor(on: node, through: 0.5)
+        guard renderer.batches[0].element.primitiveRange.length == 10,
+              renderer.batches[1].element.primitiveRange.length == 0,
+              let bead = partial.geometry, bead.elements.first?.primitiveType == .triangles,
+              abs(bead.boundingBox.max.y - 5) < 0.001 else { return false }
+        updateCursor(on: node, through: 1.5)
+        guard renderer.batches[0].element.primitiveRange.length == renderer.batches[0].element.primitiveCount,
+              renderer.batches[1].element.primitiveRange.length == 0,
+              partial.geometry?.elements.first?.primitiveType == .line,
+              abs((partial.geometry?.boundingBox.max.x ?? -1) - 30) < 0.001 else { return false }
+        updateCursor(on: node, through: 0)
+        guard renderer.batches[0].element.primitiveRange.length == 10, partial.geometry == nil else { return false }
+        updateCursor(on: node, through: nil)
+        guard renderer.batches.allSatisfy({ $0.element.primitiveRange.length == $0.element.primitiveCount }),
+              node.childNodes.compactMap(\.geometry).map({ ObjectIdentifier($0) }) == original,
+              partial.geometry == nil else { return false }
+        let rise = Segment(points: [SCNVector3Zero, SCNVector3(10,0,2)],
+            feature: "Support", width: 0.4, feedrate: 600, firstMove: 20, lastMove: 20)
+        let selected = GCodePathGeometry(segments: [rise]).filtered(minZ: 0.5, maxZ: 1.5)
+        guard selected.segments.first?.startPosition == 19.25, selected.segments.first?.endPosition == 19.75 else { return false }
+        let clipped = selected.makeNode(color: .white, trackCursor: true)
+        updateCursor(on: clipped, through: 19.5)
+        guard let tip = clipped.childNode(withName: "partial-toolpath", recursively: false)?.geometry,
+              abs(tip.boundingBox.max.z - 1) < 0.001 else { return false }
+        updateCursor(on: clipped, through: 19.2)
+        return clipped.childNode(withName: "partial-toolpath", recursively: false)?.geometry == nil
+    }
+
+    private static func progressiveGPUSmokeTest() -> Bool {
+        guard let device = MTLCreateSystemDefaultDevice() else { return false }
+        let scene = SCNScene(); scene.background.contents = UIColor.black
+        let path = Segment(points: [SCNVector3(-1,0,0), SCNVector3(1,0,0)],
+            feature: "Outer wall", width: 1, feedrate: 1200)
+        let source = GCodePathGeometry(segments: [path]).makeNode(color: .white, lightweight: true, trackCursor: true)
+        let node = source.clone(); node.userData = source.userData
+        scene.rootNode.addChildNode(node)
+        let camera = SCNNode(); camera.camera = SCNCamera()
+        camera.camera?.usesOrthographicProjection = true; camera.camera?.orthographicScale = 1
+        camera.position = SCNVector3(0,0,4)
+        scene.rootNode.addChildNode(camera)
+        let renderer = SCNRenderer(device: device, options: nil)
+        renderer.scene = scene; renderer.pointOfView = camera
+        func intensity(_ x: Int) -> Int {
+            guard let image = renderer.snapshot(atTime: 0, with: CGSize(width: 32, height: 32), antialiasingMode: .none).cgImage else { return -1 }
+            var bytes = [UInt8](repeating: 0, count: 32 * 32 * 4)
+            return bytes.withUnsafeMutableBytes { buffer in
+                guard let context = CGContext(data: buffer.baseAddress, width: 32, height: 32, bitsPerComponent: 8,
+                    bytesPerRow: 128, space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue) else { return -1 }
+                context.draw(image, in: CGRect(x: 0, y: 0, width: 32, height: 32))
+                return Int(buffer[(16 * 32 + x) * 4])
+            }
+        }
+        updateCursor(on: node, through: -1)
+        guard (0..<30).contains(intensity(8)) else { return false }
+        updateCursor(on: node, through: -0.5)
+        guard intensity(8) > 150, (0..<30).contains(intensity(24)) else { return false }
+        updateCursor(on: node, through: nil)
+        return intensity(24) > 150
     }
 
     static func previewSmokeTest() -> Bool {
@@ -1986,7 +2095,7 @@ struct GCodePathGeometry {
               compactMesh.sources(for: .normal).isEmpty,
               compactMesh.sources(for: .color).count == 1,
               compactMesh.sources(for: .vertex).first?.vectorCount == 8,
-              compactColorSmokeTest() else { return false }
+              compactColorSmokeTest(), progressiveCursorSmokeTest(), progressiveGPUSmokeTest() else { return false }
         let node = GCodePathGeometry(segments: [bead]).makeNode(color: .white)
         guard let geometry = node.childNodes.first else { return false }
         let bounds = geometry.boundingBox
@@ -1994,7 +2103,8 @@ struct GCodePathGeometry {
         guard let mesh = geometry.geometry, let source = mesh.sources(for: .vertex).first,
               let element = mesh.elements.first else { return false }
         let topIndices = element.data.withUnsafeBytes { bytes in
-            (0..<3).map { Int(bytes.loadUnaligned(fromByteOffset: $0 * element.bytesPerIndex, as: UInt16.self)) }
+            // The two start-cap triangles precede the first top surface.
+            (6..<9).map { Int(bytes.loadUnaligned(fromByteOffset: $0 * element.bytesPerIndex, as: UInt16.self)) }
         }
         func point(_ index: Int) -> SIMD3<Float> {
             source.data.withUnsafeBytes { bytes in
@@ -2185,7 +2295,7 @@ struct GCodePathGeometry {
     /// A bounded number of geometry buffers share TWO materials for the entire job.
     /// Per-path materials caused quadratic SceneKit resource-manager cleanup on
     /// device (exit watchdog in SCNMTLResourceManager::_materialWillDie).
-    func makeNode(color: UIColor, colorMode: ColorMode = .feature, showToolMarker: Bool = false, showCenterOfGravity: Bool = false, lightweight: Bool = false, cancelled: () -> Bool = { false }) -> SCNNode {
+    func makeNode(color: UIColor, colorMode: ColorMode = .feature, showToolMarker: Bool = false, showCenterOfGravity: Bool = false, lightweight: Bool = false, trackCursor: Bool = false, cancelled: () -> Bool = { false }) -> SCNNode {
         let root = SCNNode()
         root.name = "gcode"
         let solid = SCNMaterial()
@@ -2197,6 +2307,7 @@ struct GCodePathGeometry {
         lines.lightingModel = .constant
         var beads = Batch(material: solid, primitive: .triangles, includeNormals: !lightweight)
         var travels = Batch(material: lines, primitive: .line, includeNormals: false)
+        let cursorRenderer = trackCursor ? CursorRenderer(geometry: self, mode: colorMode, solid: solid, lines: lines, lightweight: lightweight) : nil
         for seg in segments {
             if cancelled() { return SCNNode() }
             guard seg.points.count > 1 else { continue }
@@ -2209,13 +2320,16 @@ struct GCodePathGeometry {
                                 SCNVector3(p.x,p.y-r,p.z), SCNVector3(p.x,p.y+r,p.z),
                                 SCNVector3(p.x,p.y,p.z-r), SCNVector3(p.x,p.y,p.z+r)]
                     travels.appendLines(ends, color: rgba)
+                    if trackCursor { travels.recordCut(at: seg.cursor(at: seg.points.count - 1)) }
                 } else {
-                    for (a, b) in zip(seg.points, seg.points.dropFirst()) {
+                    for (edge, pair) in zip(seg.points, seg.points.dropFirst()).enumerated() {
+                        let (a, b) = pair
                         travels.appendLines([a, b], color: rgba.withAlphaComponent(seg.kind == .extrude ? 1 : 0.65))
-                        if travels.vertexCount >= 32768 { travels.flush(into: root) }
+                        if trackCursor { travels.recordCut(at: seg.cursor(at: edge + 1)) }
+                        if travels.vertexCount >= 32768 { travels.flush(into: root, cursorRenderer: cursorRenderer) }
                     }
                 }
-                if travels.vertexCount >= 32768 { travels.flush(into: root) }
+                if travels.vertexCount >= 32768 { travels.flush(into: root, cursorRenderer: cursorRenderer) }
             } else {
                 // Split only at a shared endpoint; every original corner survives.
                 var offset = 0
@@ -2223,8 +2337,9 @@ struct GCodePathGeometry {
                     if cancelled() { return SCNNode() }
                     let end = min(offset + 4095, seg.points.count - 1)
                     beads.appendBead(Array(seg.points[offset...end]), width: seg.width,
-                                     height: seg.height, color: rgba)
-                    if beads.vertexCount >= 32768 { beads.flush(into: root) }
+                                     height: seg.height, color: rgba,
+                                     cursors: trackCursor ? (offset...end).map { seg.cursor(at: $0) } : nil)
+                    if beads.vertexCount >= 32768 { beads.flush(into: root, cursorRenderer: cursorRenderer) }
                     offset = end
                 }
             }
@@ -2238,12 +2353,95 @@ struct GCodePathGeometry {
             cross.flush(into: marker)
             root.addChildNode(marker)
         }
+        beads.flush(into: root, cursorRenderer: cursorRenderer)
+        travels.flush(into: root, cursorRenderer: cursorRenderer)
         if showCenterOfGravity, let p = centerOfGravity {
             travels.appendMarker(p, radius: 4, color: .systemPink)
+            travels.flush(into: root) // Job annotation, independent of move cursor.
         }
-        beads.flush(into: root)
-        travels.flush(into: root)
+        if let cursorRenderer {
+            root.userData = ["orca-cursor-renderer": cursorRenderer]
+            let partial = SCNNode(); partial.name = "partial-toolpath"
+            root.addChildNode(partial)
+        }
         return root
+    }
+
+    static func updateCursor(on root: SCNNode, through position: Double?) {
+        (root.userData?["orca-cursor-renderer"] as? CursorRenderer)?.update(root, through: position)
+    }
+
+    static func endPoint(in root: SCNNode) -> SCNVector3? {
+        (root.userData?["orca-cursor-renderer"] as? CursorRenderer)?.geometry.segments.last?.points.last
+    }
+
+    /// Cached batches keep their GPU buffers. Each frame changes only primitive
+    /// ranges and a single partial edge, sharing the job's existing materials.
+    private final class CursorRenderer: NSObject {
+        struct Cut { let position: Double; var primitives: Int }
+        struct DrawBatch { let element: SCNGeometryElement; let cuts: [Cut] }
+        var batches: [DrawBatch] = []
+        let geometry: GCodePathGeometry
+        let mode: ColorMode
+        let solid: SCNMaterial
+        let lines: SCNMaterial
+        let lightweight: Bool
+        private var lastRoot: ObjectIdentifier?
+        private var lastPosition: Double?
+
+        init(geometry: GCodePathGeometry, mode: ColorMode, solid: SCNMaterial, lines: SCNMaterial, lightweight: Bool) {
+            self.geometry = geometry; self.mode = mode
+            self.solid = solid; self.lines = lines; self.lightweight = lightweight
+        }
+
+        func update(_ root: SCNNode, through position: Double?) {
+            if let position, !position.isFinite { return }
+            guard lastRoot != ObjectIdentifier(root) || lastPosition != position else { return }
+            lastRoot = ObjectIdentifier(root); lastPosition = position
+            SCNTransaction.begin(); SCNTransaction.animationDuration = 0
+            defer { SCNTransaction.commit() }
+            for batch in batches {
+                var low = 0, high = batch.cuts.count
+                if let position {
+                    while low < high {
+                        let middle = (low + high) / 2
+                        if batch.cuts[middle].position <= position { low = middle + 1 } else { high = middle }
+                    }
+                } else { low = high }
+                let count = low > 0 ? batch.cuts[low - 1].primitives : 0
+                if batch.element.primitiveRange.length != count {
+                    batch.element.primitiveRange = NSRange(location: 0, length: count)
+                }
+            }
+            guard let partial = root.childNode(withName: "partial-toolpath", recursively: false) else { return }
+            partial.geometry = nil
+            guard let position else { return }
+            let segments = geometry.segments
+            var low = 0, high = segments.count
+            while low < high {
+                let middle = (low + high) / 2
+                if segments[middle].cursor(at: segments[middle].points.count - 1) <= position { low = middle + 1 }
+                else { high = middle }
+            }
+            guard low < segments.count else { return }
+            let segment = segments[low]
+            guard segment.points.count > 1, !segment.kind.isMarker else { return }
+            let edge = segment.edge(at: position)
+            let start = segment.cursor(at: edge), end = segment.cursor(at: edge + 1)
+            guard position > start, position < end else { return }
+            let a = segment.points[edge], b = segment.points[edge + 1]
+            let fraction = Float((position - start) / (end - start))
+            let tip = SCNVector3(a.x + (b.x - a.x) * fraction, a.y + (b.y - a.y) * fraction, a.z + (b.z - a.z) * fraction)
+            let color = geometry.color(for: segment, mode: mode)
+            let bead = segment.kind == .extrude && segment.width > 0.01
+            var batch = Batch(material: bead ? solid : lines, primitive: bead ? .triangles : .line,
+                              includeNormals: bead && !lightweight)
+            if bead { batch.appendBead([a, tip], width: segment.width, height: segment.height, color: color) }
+            else { batch.appendLines([a, tip], color: color.withAlphaComponent(segment.kind == .extrude ? 1 : 0.65)) }
+            let holder = SCNNode()
+            batch.flush(into: holder)
+            partial.geometry = holder.childNodes.first?.geometry
+        }
     }
 
     private struct Batch {
@@ -2254,6 +2452,7 @@ struct GCodePathGeometry {
         var normals: [Float] = []
         var colors: [UInt8] = []
         var indices: [UInt16] = []
+        var cuts: [CursorRenderer.Cut] = []
         var vertexCount: Int { positions.count / 3 }
 
         mutating func vertex(_ p: SCNVector3, normal: SCNVector3, color: UIColor) {
@@ -2277,7 +2476,13 @@ struct GCodePathGeometry {
             }
         }
 
-        mutating func appendBead(_ points: [SCNVector3], width: Float, height: Float, color: UIColor) {
+        mutating func recordCut(at position: Double) {
+            let count = indices.count / (primitive == .line ? 2 : 3)
+            if cuts.last?.position == position { cuts[cuts.count - 1].primitives = count }
+            else { cuts.append(.init(position: position, primitives: count)) }
+        }
+
+        mutating func appendBead(_ points: [SCNVector3], width: Float, height: Float, color: UIColor, cursors: [Double]? = nil) {
             let base = UInt16(vertexCount)
             let half = max(0.01, width) * 0.5
             for j in points.indices {
@@ -2291,19 +2496,23 @@ struct GCodePathGeometry {
                 vertex(SCNVector3(p.x+nx*half,p.y+ny*half,bottom), normal: SCNVector3(nx,ny,-1), color: color)
                 vertex(SCNVector3(p.x-nx*half,p.y-ny*half,bottom), normal: SCNVector3(-nx,-ny,-1), color: color)
             }
+            // Keep primitives in move order so visibility can advance without
+            // rebuilding or adding a per-vertex cursor attribute.
+            indices.append(contentsOf: [base,base+2,base+1,base+2,base+3,base+1])
             for j in 0..<(points.count-1) {
                 let a = base+UInt16(j*4), b = a+4
                 // Outward winding matters now that beads use lit materials.
                 indices.append(contentsOf: [a,a+1,b,a+1,b+1,b,
                     a,b,a+2,b,b+2,a+2, a+1,a+3,b+1,a+3,b+3,b+1,
                     a+2,b+2,a+3,b+2,b+3,a+3])
+                if let cursors { recordCut(at: cursors[j + 1]) }
             }
             let last = base+UInt16((points.count-1)*4)
-            indices.append(contentsOf: [base,base+2,base+1,base+2,base+3,base+1,
-                last,last+1,last+2,last+1,last+3,last+2])
+            indices.append(contentsOf: [last,last+1,last+2,last+1,last+3,last+2])
+            if let end = cursors?.last { recordCut(at: end) }
         }
 
-        mutating func flush(into root: SCNNode) {
+        mutating func flush(into root: SCNNode, cursorRenderer: CursorRenderer? = nil) {
             guard !indices.isEmpty else { return }
             func source(_ values: [Float], _ semantic: SCNGeometrySource.Semantic, _ components: Int) -> SCNGeometrySource {
                 let data = values.withUnsafeBytes { Data($0) }
@@ -2334,6 +2543,8 @@ struct GCodePathGeometry {
             let geometry = SCNGeometry(sources: sources, elements: [element])
             geometry.materials = [material]
             root.addChildNode(SCNNode(geometry: geometry))
+            if let cursorRenderer, !cuts.isEmpty { cursorRenderer.batches.append(.init(element: element, cuts: cuts)) }
+            cuts.removeAll(keepingCapacity: true)
             positions.removeAll(keepingCapacity: true)
             normals.removeAll(keepingCapacity: true)
             colors.removeAll(keepingCapacity: true)

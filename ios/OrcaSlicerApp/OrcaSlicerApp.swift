@@ -458,12 +458,12 @@ struct OrcaRootView: View {
             }
         }
         .onChange(of: mainTab) { tab in
-            if tab != .preview { engine.pauseToolheadPlayback(refresh: false) }
+            if tab != .preview { engine.pauseToolheadPlayback() }
         }
         .onChange(of: scenePhase) { phase in
-            if phase != .active { engine.pauseToolheadPlayback(refresh: false) }
+            if phase != .active { engine.pauseToolheadPlayback() }
         }
-        .onDisappear { engine.pauseToolheadPlayback(refresh: false) }
+        .onDisappear { engine.pauseToolheadPlayback() }
         .onChange(of: cloudAccount.busy) { busy in if !busy { importCloudPresetsIfReady() } }
         .onChange(of: cloudAccount.profileRevision) { _ in importCloudPresetsIfReady() }
         .onChange(of: engine.sessionBusy) { importing in if !importing { importPendingDocuments(); importCloudPresetsIfReady() } }
@@ -3133,12 +3133,11 @@ struct OrcaRootView: View {
                         Text("100×").tag(100.0)
                     }.pickerStyle(.menu)
                 }
-                Text("Uses G-code feedrates. Pause to inspect this position.")
+                Text("Scrub or play to see each move. Playback uses G-code feedrates.")
                     .font(.caption).foregroundStyle(.secondary)
                 Toggle("Smooth toolhead movement", isOn: $engine.smoothToolheadMovement)
                 Button("Show complete toolpath") {
                     engine.resetPreviewSequence()
-                    engine.requestPreviewLayer()
                 }
             }
         }

@@ -50,6 +50,8 @@ final class WorkspaceUITests: XCTestCase {
         app.buttons["Next toolpath move"].tap()
         XCTAssertNotEqual(manual.value as? String, beforeStep, "Manual controls must advance exactly one move")
         app.buttons["Previous toolpath move"].tap()
+        XCTAssertFalse(app.progressIndicators["preview-building"].exists,
+                       "Manual move changes must reuse the cached toolpath buffers")
         XCTAssertEqual(playback.label, "Play", "Manual scrubbing must not start automatic playback")
         for _ in 0..<3 where !playback.isHittable { controls.swipeUp() }
         playback.tap()

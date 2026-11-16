@@ -68,7 +68,7 @@ final class OrcaEngine: ObservableObject {
     @Published var explodeFactor: Float = 0
     @Published var previewShowShell = false
     @Published var previewShowToolMarker = false {
-        didSet { if !previewShowToolMarker { pauseToolheadPlayback(refresh: false) } }
+        didSet { if !previewShowToolMarker { pauseToolheadPlayback() } }
     }
     @Published var previewShowCenterOfGravity = false
     @Published var previewHiddenTools: Set<Int> = []
@@ -244,7 +244,7 @@ final class OrcaEngine: ObservableObject {
     /// A memory warning must not turn a successful slice into an unsliced plate.
     /// Retain paths/file/statistics; rebuild compact lines with every move intact.
     func handleMemoryWarning() {
-        pauseToolheadPlayback(refresh: false)
+        pauseToolheadPlayback()
         #if ORCA_LINKED
         if let s = session, !presetsLoading, !sliceRunning, !sessionBusy {
             orca_session_purge_option_caches(s)
@@ -1084,29 +1084,25 @@ final class OrcaEngine: ObservableObject {
     @Published var smoothToolheadMovement = true
     @Published private(set) var previewToolheadMove: Double?
     @Published private(set) var previewPlaybackRunning = false
-    private var previewManualScrubbing = false
     @Published var previewPlaybackRate = 1.0
     private var previewPlaybackTask: Task<Void, Never>?
 
     func resetPreviewSequence() {
-        pauseToolheadPlayback(refresh: false)
-        previewManualScrubbing = false
+        pauseToolheadPlayback()
         previewThroughMove = .max
         previewToolheadMove = nil
         previewToolheadPosition = nil
     }
 
-    func pauseToolheadPlayback(refresh: Bool = true) {
+    func pauseToolheadPlayback() {
         previewPlaybackTask?.cancel()
         previewPlaybackTask = nil
-        let wasPlaying = previewPlaybackRunning
         previewPlaybackRunning = false
-        if refresh && wasPlaying { requestPreviewLayer() }
     }
 
     func playToolhead() {
         guard let geometry = gcodeGeometry, geometry.moveCount > 0 else { return }
-        pauseToolheadPlayback(refresh: false)
+        pauseToolheadPlayback()
         // Restrict playback to the selected layer range; feature filters affect
         // visibility, while physical nozzle travel still belongs to the route.
         var first: Int?, last: Int?
@@ -1120,12 +1116,7 @@ final class OrcaEngine: ObservableObject {
         guard let first, let last else { return }
         let start = Double(first - 1), end = Double(last)
         let cursor = previewToolheadMove ?? start
-        let needsFullPath = previewThroughMove != .max || previewBuilding
         updateToolhead(to: cursor < start || cursor >= end ? start : cursor)
-        // Show the selected range during motion; rebuild the clipped beads
-        // once paused, rather than rebuilding a large mesh on every tick.
-        previewThroughMove = .max
-        if needsFullPath { applyPreviewLayer() }
         previewPlaybackRunning = true
         previewPlaybackTask = Task { @MainActor [weak self] in
             var timestamp = ProcessInfo.processInfo.systemUptime
@@ -1154,25 +1145,18 @@ final class OrcaEngine: ObservableObject {
     }
 
     func scrubToolhead(to value: Double) {
-        pauseToolheadPlayback(refresh: false)
+        pauseToolheadPlayback()
         updateToolhead(to: value)
     }
 
     func setToolheadScrubbing(_ editing: Bool) {
-        pauseToolheadPlayback(refresh: false)
-        let needsFullPath = previewThroughMove != .max
-        previewManualScrubbing = editing
-        if editing {
-            if needsFullPath { applyPreviewLayer() }
-        } else { requestPreviewLayer() }
+        if editing { pauseToolheadPlayback() }
     }
 
     func stepToolhead(_ direction: Int) {
         guard let geometry = gcodeGeometry, geometry.moveCount > 0 else { return }
-        previewManualScrubbing = false
         let cursor = previewToolheadMove ?? Double(min(previewThroughMove, geometry.moveCount - 1))
         scrubToolhead(to: max(0, direction > 0 ? floor(cursor) + 1 : ceil(cursor) - 1))
-        requestPreviewLayer()
     }
 
     private var previewRefreshTask: Task<Void, Never>?
@@ -1203,16 +1187,15 @@ final class OrcaEngine: ObservableObject {
         let lo = min(previewMinZ, previewMaxZ), hi = max(previewMinZ, previewMaxZ)
         let hidden = previewHiddenFeatures, moves = previewEnabledMoves
         let tools = previewHiddenTools, filaments = previewHiddenFilaments
-        let moving = previewPlaybackRunning || previewManualScrubbing
-        let through = moving || previewToolheadMove != nil ? Int.max : previewThroughMove
-        let fractionalThrough = moving ? nil : previewToolheadMove, mode = previewColorMode
+        let through = previewToolheadMove != nil ? Int.max : previewThroughMove
+        let mode = previewColorMode
         let toolMarker = previewShowToolMarker, cog = previewShowCenterOfGravity
         let lightweight = previewLightweight || geo.moveCount > 250_000
         previewBuilding = true
         let work = Task.detached(priority: .userInitiated) {
             let filtered = geo.filtered(minZ: lo, maxZ: hi, hiddenFeatures: hidden,
-                enabledMoves: moves, hiddenTools: tools, hiddenFilaments: filaments, throughMove: through, throughPosition: fractionalThrough, cancelled: { Task.isCancelled })
-            return filtered.makeNode(color: .white, colorMode: mode, showToolMarker: toolMarker, showCenterOfGravity: cog, lightweight: lightweight, cancelled: { Task.isCancelled })
+                enabledMoves: moves, hiddenTools: tools, hiddenFilaments: filaments, throughMove: through, cancelled: { Task.isCancelled })
+            return filtered.makeNode(color: .white, colorMode: mode, showToolMarker: toolMarker, showCenterOfGravity: cog, lightweight: lightweight, trackCursor: true, cancelled: { Task.isCancelled })
         }
         previewBuildTask = work
         Task { @MainActor [weak self] in

@@ -40,9 +40,10 @@ snapshots without letting filament settings overwrite process settings. Applying
 changes to an existing personal preset persists them; Save preset creates a copy.
 
 Preview has one upper-layer slider. Toolhead scrubbing appears above the lower
-layer control and interpolates a separate marker without rebuilding every path
-on every drag update; clipped toolpath geometry is rebuilt on release. An explicit
-smooth-motion toggle controls interpolation. These controls do not modify G-code.
+layer control. Cached primitive ranges and a small partial edge reveal extrusion
+and travel in sync with the interpolated marker during dragging/playback, without
+rebuilding the job on each frame or release. An explicit smooth-motion toggle
+controls interpolation. These controls do not modify G-code.
 
 Validation added: cold-session preset restoration and scope isolation, canonical
 names, native filament growth, mixed-ratio rejection and gradient metadata, marker
@@ -206,3 +207,16 @@ taps place faces, while empty-bed taps do nothing. Native tests cover nonuniform
 scale, compound rotation, facet annotation retention, bad-pick isolation, existing
 preview retention and snapshot restoration. Desktop hull-plane highlights remain
 unfinished, and native/touch execution is pending.
+
+Progressive toolpaths now share the marker's fractional cursor. The renderer
+retains the selected layer/filter geometry and updates SceneKit primitive ranges;
+only the current partial edge gets a small geometry update. Job materials and
+large vertex/index buffers are reused while scrubbing forward/backward, stepping,
+playing or showing the complete path. This avoids per-move materials, per-vertex
+cursor attributes and full mesh rebuilds on every frame or pause. Z-clipped runs
+keep their original move IDs and fractional endpoint positions so inclined/vase
+edges appear at the correct cursor time. The full model is still not rebuilt as
+the nozzle moves. Added runtime cases cover prefix ranges, partial beads/travel,
+reverse scrubbing, layer clipping, buffer identity and actual GPU pixels before,
+during and after a move. Native/GPU/touch and dense-project memory verification
+remain pending; playback still does not simulate acceleration or dwell.
