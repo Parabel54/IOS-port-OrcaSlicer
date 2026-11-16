@@ -77,3 +77,12 @@ perspective after automatic alignment. An explicit manual projection selection
 cancels that automatic return; pan/zoom keep the projection. The existing manual
 behavior remains the default. Policy regression cases cover disabled mode, face
 selection, orbit/Home transitions and explicit manual orthographic selection.
+
+Runtime checkpoint: source 39167d7016f2/build b94f7b395389 passes native paint
+state isolation, material/profile persistence, GPU color/camera checks and both
+phone plus all three tablet UI tests (run 43839633585). Phone/tablet portrait
+preview screenshots were reviewed. The landscape capture shows clipped header
+content despite the old rotation predicate passing. The UI test now waits for
+both header edges, all main tabs and Home/Slice to fit stable landscape bounds
+before capturing. That stronger landscape check is pending. This runtime pass
+predates the manual/automatic projection controls and last-object cache cleanup.

@@ -140,8 +140,22 @@ final class WorkspaceUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [edited], timeout: 180), .completed,
                        "Native mesh editing must finish and dismiss its inspector")
         XCUIDevice.shared.orientation = .landscapeRight
+        let anchors = [app.buttons["File and project actions"], app.staticTexts["OrcaSlicer"].firstMatch,
+                       app.buttons["Prepare"], app.buttons["Preview"], app.buttons["Device"],
+                       app.buttons["camera-home"], slice]
+        var stableSince: Date?
+        var lastBounds = CGRect.null
         let landscape = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-            app.state == .runningForeground && app.frame.width > app.frame.height
+            let bounds = app.frame
+            guard app.state == .runningForeground, bounds.width > bounds.height,
+                  anchors.allSatisfy({ $0.exists && $0.isHittable && bounds.contains($0.frame) }) else {
+                stableSince = nil
+                return false
+            }
+            // UIKit reports landscape bounds before SwiftUI's rotation finishes.
+            // Require both header edges, tabs and footer to settle before capture.
+            if lastBounds != bounds || stableSince == nil { stableSince = Date(); lastBounds = bounds }
+            return Date().timeIntervalSince(stableSince!) >= 1
         }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [landscape], timeout: 60), .completed)
         XCTAssertTrue(slice.isHittable, "Primary actions must remain reachable after rotation")
