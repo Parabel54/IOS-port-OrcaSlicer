@@ -2221,7 +2221,7 @@ final class OrcaEngine: ObservableObject {
         #endif
     }
 
-    private var sliceRunning = false
+    @Published private(set) var sliceRunning = false
     private var postProcessingTask: Task<Void, Error>?
 
     @MainActor

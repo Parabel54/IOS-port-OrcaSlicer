@@ -321,3 +321,8 @@ failures fail the job and prevent graphics acceptance. Mac-only fixtures run
 once; direct script/native-build invocations keep their full default checks.
 This addresses the observed runner-acquisition failures without changing slicer
 code, lowering assertions or promoting queued/cancelled jobs to passes.
+
+SDK62 acquired its Mac and exposed a Swift access-control error: Objects settings
+read a private slice-running flag. That flag is now published with a private
+setter so the browser can read and observe its actual lock state. Both SDK steps
+failed at that same error, and graphics was skipped; a new run is required.
