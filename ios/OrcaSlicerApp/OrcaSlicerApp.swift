@@ -121,6 +121,7 @@ struct OrcaRootView: View {
         case move = "Move"
         case rotate = "Rotate"
         case scale = "Scale"
+        case layOnFace = "Lay on face"
         case measure = "Measure"
         case paintSupport = "Support paint"
         case paintSeam = "Seam paint"
@@ -2286,6 +2287,7 @@ struct OrcaRootView: View {
                         if mode == .move { plateTouchMode = .move }
                         else if mode == .rotate { plateTouchMode = .rotate }
                         else if mode == .scale { plateTouchMode = .scale }
+                        else if mode == .layOnFace { plateTouchMode = .layOnFace }
                         else if mode == .select { plateTouchMode = .select }
                         if mode != .measure {
                             measurePointA = nil
@@ -2461,6 +2463,13 @@ struct OrcaRootView: View {
                         engine.selectObject(at: idx)
                     }
                     status = engine.lastMessage
+                },
+                onFacePick: { index, point in
+                    engine.selectedObjectIndex = index
+                    Task { @MainActor in
+                        if await engine.editMesh(.layOnFace(point)) == false { operationError = engine.lastMessage }
+                        status = engine.lastMessage
+                    }
                 }
             )
             .overlay(alignment: .bottom) {
@@ -2473,7 +2482,7 @@ struct OrcaRootView: View {
                                 if mainTab == .prepare || mode == .orbit || mode == .pan {
                                     toolChip(mode.rawValue, mode.icon, selected: activePlateTouchMode == mode) {
                                         plateTouchMode = mode
-                                        gizmoMode = mode == .move ? .move : mode == .rotate ? .rotate : mode == .scale ? .scale : .select
+                                        gizmoMode = mode == .move ? .move : mode == .rotate ? .rotate : mode == .scale ? .scale : mode == .layOnFace ? .layOnFace : .select
                                         moveMode = mode == .move
                                         engine.clearPaintOverlay()
                                     }
@@ -2648,6 +2657,11 @@ struct OrcaRootView: View {
 
     private var gizmoStatusBadges: some View {
         VStack(alignment: .trailing, spacing: 6) {
+            if activePlateTouchMode == .layOnFace && mainTab == .prepare {
+                Text("Tap a flat outer face · drag to orbit")
+                    .font(.caption).padding(8)
+                    .background(.regularMaterial, in: Capsule())
+            }
             if (moveMode || gizmoMode == .move) && mainTab == .prepare && engine.hasModel {
                 Text("Move gizmo · orbit off")
                     .font(.system(size: 11, weight: .semibold))
@@ -2745,6 +2759,7 @@ struct OrcaRootView: View {
         case .move: return "arrow.up.and.down.and.arrow.left.and.right"
         case .rotate: return "rotate.3d"
         case .scale: return "arrow.up.left.and.arrow.down.right"
+        case .layOnFace: return "cube.transparent"
         case .measure: return "ruler"
         case .paintSupport: return "paintbrush.pointed"
         case .paintSeam: return "line.diagonal"

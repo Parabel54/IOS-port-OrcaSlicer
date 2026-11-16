@@ -13,7 +13,7 @@ session was unavailable. A matching label is not evidence of interaction parity.
 | More/fewer copies, delete | Native duplicate/delete and undo; inspect selection behavior on devices |
 | Split objects / parts | Native ModelObject/ModelVolume split exposed in Mesh tools, selected solid-part picker, optional object auto-drop and undo; full desktop part-tree selection/editing remains incomplete |
 | Move, rotate, scale | Native transforms and camera gestures; desktop gizmo handles/constraints are partial |
-| Lay on face | Auto-orient is available; explicit desktop face picking is not equivalent and remains incomplete |
+| Lay on face | Explicit world-space face pick calls the shared native hull-face picker and lay_on_face, including scale/mirror/rotation and instance auto-drop. One-finger drag still orbits and pinch zooms. Desktop hull highlights/plane handles remain incomplete |
 | Plane cut, mesh boolean, simplify | Native algorithms with numeric mobile controls and existing geometry tests; gizmo UI parity partial |
 | Support/seam/MMU/fuzzy/brim-ear paint | Native facet annotations; persistent per-filament Prepare regions; full desktop brush modes remain incomplete |
 | Emboss, SVG, texture displacement | Full desktop workflows missing; a text plate is not general emboss |
@@ -195,3 +195,14 @@ points that collapse under native four-decimal serialization. This does not add
 a project schema or change desktop defaults. Native curve/math cases are added;
 Apple/native/touch execution must be recorded separately. Desktop line-body
 interaction and pigment-mixed ramp swatches remain separate work.
+
+Lay on face now resolves the tapped model/object and world-space point, finds a
+valid native hull face in the touched instance's coordinates and calls the shared
+`lay_on_face` routine used by desktop/CLI. The operation stages the model, uses the
+existing async edit gate and snapshot undo, and preserves the prior preview on a
+miss. It drops only the touched instance, even when automatic drop is disabled.
+The toolbar mode keeps one-finger orbit for reaching other faces and pinch zoom;
+taps place faces, while empty-bed taps do nothing. Native tests cover nonuniform
+scale, compound rotation, facet annotation retention, bad-pick isolation, existing
+preview retention and snapshot restoration. Desktop hull-plane highlights remain
+unfinished, and native/touch execution is pending.

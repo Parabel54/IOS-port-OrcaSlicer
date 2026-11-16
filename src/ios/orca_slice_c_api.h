@@ -237,6 +237,10 @@ ORCA_API int orca_session_scale_to_fit(
  * Official auto-orient (libslic3r orient) for object; index = -1 → all.
  */
 ORCA_API int orca_session_orient_object(orca_session_t *s, int index);
+/** Desktop Lay on Face. Pick a world-space point on a candidate hull face;
+ * native code resolves the touched instance, rotates that face down and drops
+ * that instance to the bed. Rejected picks leave model/preview untouched. */
+ORCA_API int orca_session_lay_on_face(orca_session_t *s, int object_index, float x, float y, float z);
 
 /**
  * Auto-arrange objects on bed (libnest2d arrange_objects).

@@ -31,6 +31,7 @@
 
 #include "libslic3r/Config.hpp"
 #include "libslic3r/FilamentMixer.hpp"
+#include "libslic3r/LayOnFace.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintBase.hpp"
@@ -1446,6 +1447,45 @@ int orca_session_orient_object(orca_session_t *s, int index)
         s->set_error("orient: unknown error");
         return -2;
     }
+}
+
+int orca_session_lay_on_face(orca_session_t *s, int object_index, float x, float y, float z)
+{
+    if (!s) return -1;
+    s->clear_error();
+    if (!s->has_model || object_index < 0 || size_t(object_index) >= s->model.objects.size() ||
+        !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
+        s->set_error("Select a valid object face"); return -2;
+    }
+    try {
+        // Stage the same native operation as desktop. Failed hull/pick/rotation
+        // work must not invalidate a usable slice or partly transform a model.
+        Model staged = s->model;
+        ModelObject *object = staged.objects[size_t(object_index)];
+        if (!object) { s->set_error("The selected object is unavailable"); return -2; }
+        const Vec3d world(x, y, z);
+        for (size_t i = 0; i < object->instances.size(); ++i) {
+            const ModelInstance *instance = object->instances[i];
+            if (!instance) continue;
+            const Transform3d matrix = instance->get_matrix_no_offset();
+            const auto planes = lay_on_face_planes(*object, matrix);
+            const Vec3d local = instance->get_matrix().inverse() * world;
+            const int plane = find_plane_at_point(planes, matrix, local, 0.01);
+            if (plane < 0) continue;
+            lay_on_face(*object, i, planes[size_t(plane)].normal);
+            s->model = std::move(staged);
+            s->has_slice_stats = false;
+            s->preview_segments.clear(); s->preview_metadata.clear(); s->preview_total_segments = 0;
+            s->role_names.clear(); s->role_meters.clear(); s->role_grams.clear();
+            s->has_explode_baseline = false; s->explode_baseline_offsets.clear();
+            s->explode_factor_current = 0; s->explode_saved = false; s->explode_origin_offsets.clear();
+            return 0;
+        }
+        s->set_error("Tap a flat outer face large enough to rest on the bed");
+        return -3;
+    } catch (const std::exception &ex) {
+        s->set_error(std::string("lay_on_face: ") + ex.what()); return -4;
+    } catch (...) { s->set_error("lay_on_face: unknown error"); return -4; }
 }
 
 int orca_session_extruder_count(orca_session_t *s)

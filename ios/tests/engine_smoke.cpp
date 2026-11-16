@@ -1,6 +1,7 @@
 // Exercise import -> slice -> processed preview -> export through the mobile ABI.
 #include "orca_slice_c_api.h"
 
+#include <algorithm>
 #include <cmath>
 #include <array>
 #include <cstdio>
@@ -88,6 +89,56 @@ int main(int argc, char **argv)
                      std::fabs(b[5]-4) < 0.01 && std::fabs((b[0]+b[3])*0.5-center_x) < 0.01 &&
                      std::fabs((b[1]+b[4])*0.5-center_y) < 0.01, "scaled dimensions and stable center") ||
             !require(orca_session_scale_object_axes(shape.get(), 0, -1, 1, 1) != 0, "reject negative scale")) return 4;
+        if (!require(orca_session_rotate_object_axis(shape.get(), 0, 0, 29) == 0 &&
+                     orca_session_rotate_object_axis(shape.get(), 0, 1, 17) == 0 &&
+                     orca_session_rotate_object_axis(shape.get(), 0, 2, 37) == 0 &&
+                     orca_session_paint_fill(shape.get(), 0, 2, 1) > 0, "transformed painted face fixture")) return 4;
+        const std::string face_snapshot = directory + "/lay-face-snapshot.3mf";
+        if (!require(orca_session_model_bounds(shape.get(), b, b+1, b+2, b+3, b+4, b+5) == 0 &&
+                     orca_session_snapshot(shape.get(), face_snapshot.c_str()) == 0, "snapshot before laying a face")) return 4;
+        const std::array<float, 6> original_face_bounds{b[0], b[1], b[2], b[3], b[4], b[5]};
+        float *positions = nullptr; uint32_t *indices = nullptr;
+        size_t vertices = 0, index_count = 0;
+        int painted_before = 0, painted_after = 0;
+        if (!require(orca_session_export_object_mesh(shape.get(), 0, &positions, &vertices, &indices, &index_count) == 0 &&
+                     vertices > 0 && index_count >= 3, "export transformed face pick") ||
+            !require(orca_session_paint_stats(shape.get(), 0, 2, 1, &painted_before) == 0, "painted face count before lay")) return 4;
+        std::array<double, 3> hit{}, u{}, v{}, normal{};
+        for (int axis = 0; axis < 3; ++axis) {
+            for (int vertex = 0; vertex < 3; ++vertex) hit[axis] += positions[3 * indices[vertex] + axis] / 3.0;
+            u[axis] = positions[3 * indices[1] + axis] - positions[3 * indices[0] + axis];
+            v[axis] = positions[3 * indices[2] + axis] - positions[3 * indices[0] + axis];
+        }
+        normal = {u[1]*v[2]-u[2]*v[1], u[2]*v[0]-u[0]*v[2], u[0]*v[1]-u[1]*v[0]};
+        const double length = std::sqrt(normal[0]*normal[0] + normal[1]*normal[1] + normal[2]*normal[2]);
+        double minimum = std::numeric_limits<double>::infinity(), maximum = -minimum;
+        for (size_t vertex = 0; vertex < vertices; ++vertex) {
+            double projection = 0;
+            for (int axis = 0; axis < 3; ++axis) projection += positions[3 * vertex + axis] * normal[axis] / length;
+            minimum = std::min(minimum, projection); maximum = std::max(maximum, projection);
+        }
+        orca_free(positions); orca_free(indices);
+        if (!require(orca_session_lay_on_face(shape.get(), 0, float(hit[0]), float(hit[1]), float(hit[2])) == 0,
+                     "native picked face with nonuniform scale and compound rotation") ||
+            !require(orca_session_model_bounds(shape.get(), b, b+1, b+2, b+3, b+4, b+5) == 0 &&
+                     std::fabs(b[2]) < 0.001 && std::fabs(b[5] - (maximum - minimum)) < 0.01,
+                     "chosen face points down and drops to bed with correct thickness") ||
+            !require(orca_session_paint_stats(shape.get(), 0, 2, 1, &painted_after) == 0 && painted_before == painted_after,
+                     "lay on face preserves facet annotations")) return 4;
+        const std::array<float, 6> before_failed_pick{b[0], b[1], b[2], b[3], b[4], b[5]};
+        if (!require(orca_session_lay_on_face(shape.get(), 0, 100000, 100000, 100000) < 0 &&
+                     orca_session_lay_on_face(shape.get(), 0, NAN, 0, 0) < 0,
+                     "reject missed and non-finite face picks") ||
+            !require(orca_session_model_bounds(shape.get(), b, b+1, b+2, b+3, b+4, b+5) == 0 &&
+                     std::equal(before_failed_pick.begin(), before_failed_pick.end(), b),
+                     "rejected face picks retain model bounds")) return 4;
+        if (!require(orca_session_restore_snapshot(shape.get(), face_snapshot.c_str()) == 0 &&
+                     orca_session_model_bounds(shape.get(), b, b+1, b+2, b+3, b+4, b+5) == 0,
+                     "restore lay-on-face undo snapshot")) return 4;
+        for (size_t axis = 0; axis < original_face_bounds.size(); ++axis)
+            if (!require(std::fabs(b[axis] - original_face_bounds[axis]) < 0.001,
+                         "face snapshot retains original world-space placement")) return 4;
+        std::printf("PASS: native Lay on Face, transformed hit coordinates, bed contact and painting retention\n");
     }
     {
         std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
@@ -416,9 +467,11 @@ int main(int argc, char **argv)
         size_t retained_count = 0, retained_total = 0;
         if (!require(orca_session_split_model(session.get(), 0, 0, 1, 0) < 0,
                      "connected cube cannot be split") ||
+            !require(orca_session_lay_on_face(session.get(), 0, 100000, 100000, 100000) < 0,
+                     "failed face pick on an already sliced model") ||
             !require(orca_session_export_preview(session.get(), &retained, &retained_count, &retained_total) == 0 &&
                      retained_count == count && retained_total == total,
-                     "unsuccessful split preserves the existing sliced preview")) {
+                     "unsuccessful staged split/face picks preserve the sliced preview")) {
             orca_free(retained);
             return 11;
         }

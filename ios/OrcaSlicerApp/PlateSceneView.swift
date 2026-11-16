@@ -59,7 +59,7 @@ private final class PlateSCNView: SCNView {
 }
 
 enum PlateTouchMode: String, CaseIterable, Identifiable {
-    case orbit = "Orbit", pan = "Pan", move = "Move", rotate = "Rotate", scale = "Scale", select = "Select"
+    case orbit = "Orbit", pan = "Pan", move = "Move", rotate = "Rotate", scale = "Scale", layOnFace = "Lay on face", select = "Select"
     var id: String { rawValue }
     var icon: String {
         switch self {
@@ -68,6 +68,7 @@ enum PlateTouchMode: String, CaseIterable, Identifiable {
         case .move: return "arrow.up.and.down.and.arrow.left.and.right"
         case .rotate: return "rotate.3d"
         case .scale: return "arrow.up.left.and.arrow.down.right"
+        case .layOnFace: return "cube.transparent"
         case .select: return "cursorarrow"
         }
     }
@@ -292,7 +293,7 @@ struct PlateSceneView: UIViewRepresentable {
     var onOrbitBegin: (() -> Void)? = nil
     var rotationAxis: Int = 2
     /// Tap object to select; drag on object to move (without requiring Move gizmo).
-    var selectMode: Bool { [.select, .move, .rotate, .scale].contains(touchMode) }
+    var selectMode: Bool { [.select, .move, .rotate, .scale, .layOnFace].contains(touchMode) }
     var moveMode: Bool { touchMode == .move }
     var onScaleCommit: ((Float, Int) -> Void)? = nil
     var onRotateCommit: ((Float, Int) -> Void)? = nil
@@ -314,6 +315,7 @@ struct PlateSceneView: UIViewRepresentable {
     var onPaintHit: ((SIMD3<Float>, Bool /*isBegin*/) -> Void)? = nil
     /// User tapped an object on the plate (-1 = empty bed / deselect).
     var onSelectObject: ((Int) -> Void)? = nil
+    var onFacePick: ((Int, SIMD3<Float>) -> Void)? = nil
 
     /// Run on the simulator main thread against a real SceneKit camera.
     static func cameraSmokeTest() -> Bool {
@@ -1276,6 +1278,10 @@ struct PlateSceneView: UIViewRepresentable {
 
         /// Resolve object index from SceneKit hit (node name object_N)
         private func hitObjectIndex(view: SCNView, screen: CGPoint) -> Int? {
+            hitObject(view: view, screen: screen)?.index
+        }
+
+        private func hitObject(view: SCNView, screen: CGPoint) -> (index: Int, point: SIMD3<Float>)? {
             let hits = view.hitTest(screen, options: [
                 SCNHitTestOption.searchMode: SCNHitTestSearchMode.all.rawValue
             ])
@@ -1284,7 +1290,7 @@ struct PlateSceneView: UIViewRepresentable {
                 while let node = n {
                     if let name = node.name, name.hasPrefix("object_"),
                        let idx = Int(name.dropFirst("object_".count)) {
-                        return idx
+                        return (idx, slic3rFromWorld(h.worldCoordinates))
                     }
                     if node.name == "model" { break }
                     n = node.parent
@@ -1300,6 +1306,10 @@ struct PlateSceneView: UIViewRepresentable {
                 return
             }
             let screen = gr.location(in: view)
+            if parent.touchMode == .layOnFace {
+                if let hit = hitObject(view: view, screen: screen) { parent.onFacePick?(hit.index, hit.point) }
+                return
+            }
             if parent.paintMode {
                 if let p = hitModelSlic3r(view: view, screen: screen) {
                     parent.onPaintHit?(p, true)
@@ -1361,8 +1371,8 @@ struct PlateSceneView: UIViewRepresentable {
                 return
             }
 
-            if parent.touchMode == .orbit || parent.touchMode == .pan {
-                cameraPan(gr, view: view, mode: parent.touchMode)
+            if parent.touchMode == .orbit || parent.touchMode == .pan || parent.touchMode == .layOnFace {
+                cameraPan(gr, view: view, mode: parent.touchMode == .layOnFace ? .orbit : parent.touchMode)
                 return
             }
             if parent.touchMode == .rotate || parent.touchMode == .scale {
