@@ -319,23 +319,28 @@ struct PlateSceneView: UIViewRepresentable {
     var onFacePick: ((Int, SIMD3<Float>) -> Void)? = nil
 
     /// Run on the simulator main thread against a real SceneKit camera.
-    static func cameraSmokeTest(includePreview: Bool = true, includePaint: Bool = true) -> Bool {
+    static func cameraSmokeTest(includePreview: Bool = true, includePaint: Bool = true, onFailure: ((String) -> Void)? = nil) -> Bool {
+        func fail(_ detail: String, line: Int = #line) -> Bool {
+            let message = "Camera assertion \(line): " + detail
+            onFailure?(message); NSLog("%@", message)
+            return false
+        }
         var policy = CameraViewPolicy()
         guard policy.select(.top, automatic: false, current: .perspective) == .perspective,
               policy.select(.front, automatic: true, current: .perspective) == .orthographic,
               policy.orbit(automatic: true, current: .orthographic) == .perspective,
-              policy.select(.right, automatic: true, current: .perspective) == .orthographic else { NSLog("Camera smoke failed at line %ld", Int(#line)); return false }
+              policy.select(.right, automatic: true, current: .perspective) == .orthographic else { return fail("automatic projection policy") }
         policy.reset() // Explicit manual orthographic choice.
         guard policy.orbit(automatic: true, current: .orthographic) == .orthographic,
               policy.select(.home, automatic: true, current: .orthographic) == .orthographic,
               policy.select(.bottom, automatic: true, current: .perspective) == .orthographic,
-              policy.select(.home, automatic: true, current: .orthographic) == .perspective else { NSLog("Camera smoke failed at line %ld", Int(#line)); return false }
+              policy.select(.home, automatic: true, current: .orthographic) == .perspective else { return fail("manual projection policy") }
         let view = PlateSCNView(frame: CGRect(x: 0, y: 0, width: 390, height: 600))
         view.scene = SCNScene()
         view.setRenderingActive(false)
-        guard view.scene?.isPaused == true, !view.isPlaying else { NSLog("Camera smoke failed at line %ld", Int(#line)); return false }
+        guard view.scene?.isPaused == true, !view.isPlaying else { return fail("render pause state") }
         view.setRenderingActive(true)
-        guard view.scene?.isPaused == false else { NSLog("Camera smoke failed at line %ld", Int(#line)); return false }
+        guard view.scene?.isPaused == false else { return fail("render resume state") }
         let camera = SCNNode()
         camera.camera = SCNCamera()
         camera.position = SCNVector3(50, 60, 80)
@@ -348,27 +353,27 @@ struct PlateSceneView: UIViewRepresentable {
         view.defaultCameraController.interactionMode = .orbitTurntable
         let coordinator = Coordinator()
         coordinator.installGestures(on: view)
-        guard coordinator.panGesture?.maximumNumberOfTouches == 1, coordinator.pinchGesture != nil else { NSLog("Camera smoke failed at line %ld", Int(#line)); return false }
+        guard coordinator.panGesture?.maximumNumberOfTouches == 1, coordinator.pinchGesture != nil else { return fail("one-finger pan and pinch recognizers") }
         let distance = simd_length(SIMD3<Float>(50, 60, 80))
         coordinator.zoom(scale: 2, view: view)
-        guard abs(simd_length(SIMD3<Float>(camera.position.x, camera.position.y, camera.position.z)) - distance / 2) < 0.01 else { NSLog("Camera smoke failed at line %ld", Int(#line)); return false }
+        guard abs(simd_length(SIMD3<Float>(camera.position.x, camera.position.y, camera.position.z)) - distance / 2) < 0.01 else { return fail("pinch distance \(simd_length(camera.simdPosition)) expected \(distance / 2)") }
         let before = camera.position
         coordinator.cameraDrag(delta: CGPoint(x: 35, y: 25), view: view, mode: .pan)
         let target = view.defaultCameraController.target
         guard abs(camera.position.x - before.x - target.x) < 0.01,
               abs(camera.position.y - before.y - target.y) < 0.01,
-              abs(target.x) + abs(target.y) + abs(target.z) > 0.01 else { NSLog("Camera smoke failed at line %ld", Int(#line)); return false }
+              abs(target.x) + abs(target.y) + abs(target.z) > 0.01 else { return fail("pan camera \(camera.position) target \(target)") }
         let beforeOrbit = camera.position
         coordinator.cameraDrag(delta: CGPoint(x: 60, y: 20), view: view, mode: .orbit)
         let afterOrbit = camera.position
         let offset = SIMD3<Float>(afterOrbit.x - target.x, afterOrbit.y - target.y, afterOrbit.z - target.z)
         guard abs(simd_length(offset) - distance / 2) < 0.1,
-              abs(afterOrbit.x - beforeOrbit.x) + abs(afterOrbit.z - beforeOrbit.z) > 0.01 else { NSLog("Camera smoke failed at line %ld", Int(#line)); return false }
+              abs(afterOrbit.x - beforeOrbit.x) + abs(afterOrbit.z - beforeOrbit.z) > 0.01 else { return fail("orbit radius \(simd_length(offset)) expected \(distance / 2)") }
         // A zero-distance touch must preserve both framing and orientation.
         let orientation = camera.simdOrientation
         coordinator.cameraDrag(delta: .zero, view: view, mode: .orbit)
         guard simd_length(camera.simdPosition - SIMD3<Float>(afterOrbit.x, afterOrbit.y, afterOrbit.z)) < 0.001,
-              abs(simd_dot(orientation.vector, camera.simdOrientation.vector)) > 0.9999 else { NSLog("Camera smoke failed at line %ld", Int(#line)); return false }
+              abs(simd_dot(orientation.vector, camera.simdOrientation.vector)) > 0.9999 else { return fail("stationary orbit changed camera position/orientation") }
         let originalSize = view.bounds.size
         let startPosition = camera.simdPosition
         let startOrientation = camera.simdOrientation
@@ -378,16 +383,16 @@ struct PlateSceneView: UIViewRepresentable {
         camera.simdOrientation = startOrientation
         view.frame.size = CGSize(width: 1024, height: 1366)
         coordinator.cameraDrag(delta: CGPoint(x: 102.4, y: 0), view: view, mode: .orbit)
-        guard simd_length(camera.simdPosition - phonePosition) < 0.01 else { NSLog("Camera smoke failed at line %ld", Int(#line)); return false }
+        guard simd_length(camera.simdPosition - phonePosition) < 0.01 else { return fail("normalized phone/tablet orbit delta \(simd_length(camera.simdPosition - phonePosition))") }
         coordinator.cameraDrag(delta: CGPoint(x: -102.4, y: 0), view: view, mode: .orbit)
-        guard simd_length(camera.simdPosition - startPosition) < 0.01 else { NSLog("Camera smoke failed at line %ld", Int(#line)); return false }
+        guard simd_length(camera.simdPosition - startPosition) < 0.01 else { return fail("reverse orbit delta \(simd_length(camera.simdPosition - startPosition))") }
         let anchor = CGPoint(x: 400, y: 500)
         let depth = view.projectPoint(view.defaultCameraController.target).z
         let focus = view.unprojectPoint(SCNVector3(Float(anchor.x), Float(anchor.y), depth))
         coordinator.zoom(scale: 1.5, view: view, anchor: anchor)
         let projected = view.projectPoint(focus)
         guard abs(projected.x - Float(anchor.x)) < 0.5,
-              abs(projected.y - Float(anchor.y)) < 0.5 else { NSLog("Camera smoke failed at line %ld", Int(#line)); return false }
+              abs(projected.y - Float(anchor.y)) < 0.5 else { return fail("perspective pinch anchor \(projected) expected \(anchor)") }
         let probe = view.defaultCameraController.target
         let probeOffset = camera.simdWorldRight * 5
         let projectionProbe = SCNVector3(probe.x + probeOffset.x, probe.y + probeOffset.y, probe.z + probeOffset.z)
@@ -398,7 +403,7 @@ struct PlateSceneView: UIViewRepresentable {
         guard camera.camera?.usesOrthographicProjection == true,
               simd_length(camera.simdPosition - beforeProjection) < 0.001,
               abs(perspectivePoint.x - orthographicPoint.x) < 0.5,
-              abs(perspectivePoint.y - orthographicPoint.y) < 0.5 else { NSLog("Camera smoke failed at line %ld", Int(#line)); return false }
+              abs(perspectivePoint.y - orthographicPoint.y) < 0.5 else { return fail("perspective/orthographic span \(perspectivePoint) -> \(orthographicPoint), FOV \(camera.camera?.fieldOfView ?? 0)") }
         let orthoScale = camera.camera?.orthographicScale ?? 0
         let orthoDepth = view.projectPoint(probe).z
         let orthoFocus = view.unprojectPoint(SCNVector3(Float(anchor.x), Float(anchor.y), orthoDepth))
@@ -406,13 +411,13 @@ struct PlateSceneView: UIViewRepresentable {
         let zoomedFocus = view.projectPoint(orthoFocus)
         guard abs((camera.camera?.orthographicScale ?? 0) - orthoScale / 1.5) < 0.001,
               abs(zoomedFocus.x - Float(anchor.x)) < 0.5,
-              abs(zoomedFocus.y - Float(anchor.y)) < 0.5 else { NSLog("Camera smoke failed at line %ld", Int(#line)); return false }
+              abs(zoomedFocus.y - Float(anchor.y)) < 0.5 else { return fail("orthographic pinch anchor \(zoomedFocus) expected \(anchor), scale \(camera.camera?.orthographicScale ?? 0) expected \(orthoScale / 1.5)") }
         let beforePan = camera.simdPosition
         let oldTarget = view.defaultCameraController.target
         coordinator.cameraDrag(delta: CGPoint(x: 30, y: -15), view: view, mode: .pan)
         let pannedTarget = view.defaultCameraController.target
         let shift = SIMD3<Float>(pannedTarget.x - oldTarget.x, pannedTarget.y - oldTarget.y, pannedTarget.z - oldTarget.z)
-        guard simd_length(camera.simdPosition - beforePan - shift) < 0.001, simd_length(shift) > 0.001 else { NSLog("Camera smoke failed at line %ld", Int(#line)); return false }
+        guard simd_length(camera.simdPosition - beforePan - shift) < 0.001, simd_length(shift) > 0.001 else { return fail("orthographic pan shift \(shift)") }
         let center = SIMD3<Float>(pannedTarget.x, pannedTarget.y, pannedTarget.z)
         let side = center + camera.simdWorldRight * 5
         let beforeSwitch = view.projectPoint(SCNVector3(side.x, side.y, side.z))
@@ -420,24 +425,24 @@ struct PlateSceneView: UIViewRepresentable {
         let afterSwitch = view.projectPoint(SCNVector3(side.x, side.y, side.z))
         guard camera.camera?.usesOrthographicProjection == false,
               abs(beforeSwitch.x - afterSwitch.x) < 0.5,
-              abs(beforeSwitch.y - afterSwitch.y) < 0.5 else { NSLog("Camera smoke failed at line %ld", Int(#line)); return false }
+              abs(beforeSwitch.y - afterSwitch.y) < 0.5 else { return fail("orthographic/perspective span \(beforeSwitch) -> \(afterSwitch)") }
         let finalTarget = view.defaultCameraController.target
         camera.position = SCNVector3(finalTarget.x, finalTarget.y + 100, finalTarget.z + 0.01)
         camera.look(at: finalTarget)
         let top = camera.simdPosition
         coordinator.cameraDrag(delta: .zero, view: view, mode: .orbit)
         coordinator.cameraDrag(delta: CGPoint(x: 10, y: 0), view: view, mode: .orbit)
-        guard abs(camera.simdPosition.y - top.y) < 0.001 else { NSLog("Camera smoke failed at line %ld", Int(#line)); return false }
+        guard abs(camera.simdPosition.y - top.y) < 0.001 else { return fail("pole orbit changed Y from \(top.y) to \(camera.simdPosition.y)") }
         camera.name = "camera"
         coordinator.frameCamera(view: view, minimum: SIMD3(0, 0, 990), maximum: SIMD3(10, 10, 1010))
         let raisedTarget = view.defaultCameraController.target
-        guard abs(raisedTarget.y - 1000) < 0.001, camera.position.y > raisedTarget.y else { NSLog("Camera smoke failed at line %ld", Int(#line)); return false }
+        guard abs(raisedTarget.y - 1000) < 0.001, camera.position.y > raisedTarget.y else { return fail("raised framing target \(raisedTarget) camera \(camera.position)") }
         for preset in CameraPreset.allCases {
             coordinator.frameCamera(view: view, minimum: SIMD3(0, 0, 990), maximum: SIMD3(10, 10, 1010), preset: preset)
             let center = SIMD3<Float>(5, 1000, -5)
             let direction = simd_normalize(camera.simdPosition - center)
             guard simd_dot(direction, preset.direction) > 0.999,
-                  camera.simdOrientation.vector.x.isFinite else { NSLog("Camera smoke failed at line %ld", Int(#line)); return false }
+                  camera.simdOrientation.vector.x.isFinite else { return fail("preset \(preset) direction \(direction) expected \(preset.direction)") }
         }
         for size in [CGSize(width: 390, height: 600), CGSize(width: 1024, height: 768)] {
             view.frame.size = size
@@ -450,7 +455,7 @@ struct PlateSceneView: UIViewRepresentable {
                             for z in [Float(990), 1010] {
                                 let point = view.projectPoint(SCNVector3(x, z, -y))
                                 guard point.x >= 0, point.x <= Float(size.width),
-                                      point.y >= 0, point.y <= Float(size.height), point.z >= 0, point.z <= 1 else { NSLog("Camera smoke failed at line %ld", Int(#line)); return false }
+                                      point.y >= 0, point.y <= Float(size.height), point.z >= 0, point.z <= 1 else { return fail("bounds \(size) \(projection) \(preset), point \(point), source (\(x),\(y),\(z))") }
                             }
                         }
                     }

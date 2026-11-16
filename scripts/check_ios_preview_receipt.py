@@ -10,6 +10,8 @@ EXPECTED_TESTS = {"camera", "painted_filaments_gpu", "progressive_ranges", "prog
 def validate(result, source):
     if result.get("source") != source:
         raise ValueError("Renderer receipt belongs to a different source checkout")
+    if result.get("completed") is not True:
+        raise ValueError("Renderer receipt is incomplete")
     tests = result.get("tests")
     if not isinstance(tests, dict) or not EXPECTED_TESTS.issubset(tests):
         raise ValueError("Renderer receipt is missing required tests")

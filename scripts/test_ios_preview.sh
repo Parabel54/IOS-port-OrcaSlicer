@@ -50,12 +50,20 @@ SIMCTL_CHILD_ORCA_GRAPHICS_SOURCE="$SOURCE_COMMIT" \
 APP_DATA="$(ios_test_run 30 xcrun simctl get_app_container "$DEVICE" com.orcaslicer.preview-smoke data)"
 ios_test_run 75 python3 - "$APP_DATA" "$TEST_DIR" <<'PYRESULT'
 from pathlib import Path
-import shutil, sys, time
+import json, shutil, sys, time
 source = Path(sys.argv[1]) / 'tmp/preview-renderer.json'
 deadline = time.monotonic() + 60
-while not source.is_file():
+while True:
+    try:
+        completed = json.loads(source.read_text()).get('completed') is True
+    except (FileNotFoundError, json.JSONDecodeError):
+        completed = False
+    if completed:
+        break
     if time.monotonic() >= deadline:
-        raise SystemExit('No renderer result within 60 seconds')
+        if source.is_file():
+            shutil.copy2(source, Path(sys.argv[2]) / source.name)
+        raise SystemExit('No completed renderer result within 60 seconds; any partial receipt was preserved')
     time.sleep(1)
 shutil.copy2(source, Path(sys.argv[2]) / source.name)
 PYRESULT

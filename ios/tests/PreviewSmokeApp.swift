@@ -17,8 +17,10 @@ final class PreviewSmokeApp: UIResponder, UIApplicationDelegate {
     }
 
     private func runChecks() {
+        var diagnostics: [String: String] = [:]
         let checks: [(String, () -> Bool)] = [
-            ("camera", { PlateSceneView.cameraSmokeTest(includePreview: false, includePaint: false) }),
+            ("camera", { PlateSceneView.cameraSmokeTest(includePreview: false, includePaint: false,
+                onFailure: { diagnostics["camera"] = $0 }) }),
             ("painted_filaments_gpu", PlateSceneView.filamentPaintSmokeTest),
             ("progressive_ranges", GCodePathGeometry.progressiveCursorSmokeTest),
             ("progressive_gpu", GCodePathGeometry.progressiveGPUSmokeTest),
@@ -26,14 +28,18 @@ final class PreviewSmokeApp: UIResponder, UIApplicationDelegate {
         ]
         var results: [String: Bool] = [:]
         for (name, check) in checks {
-            let passed = check()
-            results[name] = passed
-            NSLog("%@: %@", passed ? "PASS" : "FAIL", name)
+            results[name] = check()
+            NSLog("%@: %@", results[name] == true ? "PASS" : "FAIL", name)
+            writeReceipt(results, diagnostics: diagnostics, completed: false)
         }
+        writeReceipt(results, diagnostics: diagnostics, completed: true)
+    }
+
+    private func writeReceipt(_ results: [String: Bool], diagnostics: [String: String], completed: Bool) {
         let receipt: [String: Any] = [
             "source": ProcessInfo.processInfo.environment["ORCA_GRAPHICS_SOURCE"] ?? "unknown",
-            "tests": results,
-            "passed": results.values.allSatisfy { $0 },
+            "tests": results, "diagnostics": diagnostics, "completed": completed,
+            "passed": completed && results.values.allSatisfy { $0 },
             "scope": "SceneKit camera, geometry and GPU; no slicing engine or full-app UI"
         ]
         do {

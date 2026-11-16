@@ -61,7 +61,7 @@ class RendererReceiptTests(unittest.TestCase):
         spec.loader.exec_module(cls.module)
 
     def receipt(self):
-        return {'source': 'current-checkout', 'passed': True,
+        return {'source': 'current-checkout', 'passed': True, 'completed': True,
                 'tests': {name: True for name in self.module.EXPECTED_TESTS}}
 
     def test_accepts_all_required_checks_from_current_source(self):
@@ -69,6 +69,8 @@ class RendererReceiptTests(unittest.TestCase):
 
     def test_rejects_stale_missing_and_inconsistent_green_receipts(self):
         cases = []
+        incomplete = self.receipt(); incomplete['completed'] = False; cases.append(incomplete)
+        missing_completion = self.receipt(); del missing_completion['completed']; cases.append(missing_completion)
         stale = self.receipt(); stale['source'] = 'old-checkout'; cases.append(stale)
         missing = self.receipt(); del missing['tests']['progressive_gpu']; cases.append(missing)
         failed = self.receipt(); failed['tests']['progressive_gpu'] = False; cases.append(failed)
