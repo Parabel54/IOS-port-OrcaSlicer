@@ -732,11 +732,13 @@ private struct MixedFilamentEditor: View {
             second = physical.dropFirst().first ?? 1
             third = physical.dropFirst(2).first ?? 2
         }
-        .onChange(of: firstRatio) { _ in secondRatio = min(secondRatio, 99-firstRatio) }
+        .onChange(of: firstRatio) { _ in
+            if count == 3 { secondRatio = max(1, min(secondRatio, 99-firstRatio)) }
+        }
         .onChange(of: count) { value in
             if value == 3 {
                 firstRatio = min(firstRatio, 98)
-                secondRatio = min(secondRatio, 99-firstRatio)
+                secondRatio = max(1, min(secondRatio, 99-firstRatio))
                 third = engine.physicalFilamentIndices.first(where: { $0 != first && $0 != second }) ?? third
             }
         }
@@ -744,7 +746,9 @@ private struct MixedFilamentEditor: View {
 
     private func component(_ label: String, selection: Binding<Int>) -> some View {
         Picker(label, selection: selection) {
-            ForEach(engine.physicalFilamentIndices, id: \.self) { index in
+            ForEach(engine.physicalFilamentIndices.filter { index in
+                index == selection.wrappedValue || !(count == 2 ? [first, second] : [first, second, third]).contains(index)
+            }, id: \.self) { index in
                 Text("Filament \(index + 1)").tag(index)
             }
         }
