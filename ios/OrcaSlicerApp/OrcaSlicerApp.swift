@@ -3750,6 +3750,11 @@ struct OrcaRootView: View {
             else { mainTab = .prepare }
             if ProcessInfo.processInfo.arguments.contains("--test-document-import"), success,
                engine.hasModel, engine.objectCount == 1 {
+                if ProcessInfo.processInfo.arguments.contains("--test-session-gate") {
+                    try? engine.sessionGateSmokeTest().write(
+                        to: FileManager.default.temporaryDirectory.appendingPathComponent("orca-session-gate-smoke.txt"),
+                        atomically: true, encoding: .utf8)
+                }
                 try? "PASS: app document inbox imported a 3MF model".write(
                     to: FileManager.default.temporaryDirectory.appendingPathComponent("orca-document-import-smoke.txt"),
                     atomically: true, encoding: .utf8)

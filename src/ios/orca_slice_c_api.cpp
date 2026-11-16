@@ -548,6 +548,8 @@ int orca_session_add_model(orca_session_t *s, const char *path)
     return load_model_impl(s, path, true);
 }
 
+static void invalidate_object_slice(orca_session_t *s);
+
 int orca_session_load_config(orca_session_t *s, const char *config_path)
 {
     if (!s || !config_path)
@@ -555,6 +557,7 @@ int orca_session_load_config(orca_session_t *s, const char *config_path)
     s->clear_error();
     try {
         ensure_default_config(s);
+        DynamicPrintConfig config = s->config;
         std::string path(config_path);
         ConfigSubstitutions subs;
         if (path.size() >= 5 &&
@@ -563,17 +566,19 @@ int orca_session_load_config(orca_session_t *s, const char *config_path)
             std::map<std::string, std::string> key_values;
             std::string reason;
             ConfigSubstitutionContext ctx(ForwardCompatibilitySubstitutionRule::Enable);
-            int rc = s->config.load_from_json(path, ctx, true, key_values, reason);
+            int rc = config.load_from_json(path, ctx, true, key_values, reason);
             if (rc != 0) {
                 s->set_error(reason.empty() ? "load_from_json failed" : reason);
                 return -2;
             }
         } else {
             // .ini / gcode-style config
-            subs = s->config.load_from_ini(path, ForwardCompatibilitySubstitutionRule::Enable);
+            subs = config.load_from_ini(path, ForwardCompatibilitySubstitutionRule::Enable);
             (void) subs;
         }
+        s->config = std::move(config);
         s->has_config = true;
+        invalidate_object_slice(s);
         return 0;
     } catch (const std::exception &ex) {
         s->set_error(std::string("load_config: ") + ex.what());
@@ -619,8 +624,6 @@ static void refresh_mixed_filament_colors(DynamicPrintConfig &config)
     }
 }
 
-static void invalidate_object_slice(orca_session_t *s);
-
 int orca_session_set_option(orca_session_t *s, const char *key, const char *value)
 {
     if (!s || !key || !value)
@@ -628,9 +631,9 @@ int orca_session_set_option(orca_session_t *s, const char *key, const char *valu
     s->clear_error();
     try {
         ensure_default_config(s);
+        DynamicPrintConfig updated = s->config;
+        updated.set_deserialize_strict(key, value);
         if (std::strcmp(key, "filament_colour") == 0) {
-            DynamicPrintConfig updated = s->config;
-            updated.set_deserialize_strict(key, value);
             const auto &old = s->config.option<ConfigOptionStrings>(key)->values;
             const auto &colors = updated.option<ConfigOptionStrings>(key)->values;
             auto *multi = updated.option<ConfigOptionStrings>("filament_multi_colour");
@@ -644,12 +647,9 @@ int orca_session_set_option(orca_session_t *s, const char *key, const char *valu
                 project.apply_only(updated, {"filament_colour", "filament_multi_colour"}, true);
                 s->preset_bundle->project_config = std::move(project);
             }
-            s->config = std::move(updated);
-            invalidate_object_slice(s);
-        } else {
-            // DynamicPrintConfig option set by string (official ConfigBase API)
-            s->config.set_deserialize_strict(key, value);
         }
+        s->config = std::move(updated);
+        invalidate_object_slice(s);
         return 0;
     } catch (const std::exception &ex) {
         s->set_error(std::string("set_option: ") + ex.what());

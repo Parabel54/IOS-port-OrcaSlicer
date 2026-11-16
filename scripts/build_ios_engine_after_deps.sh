@@ -22,6 +22,8 @@ else
   PLATFORM=OS64SIMULATOR
 fi
 mkdir -p "$BUILD_DIR"
+LOG_DIR="$ROOT/build_logs"
+mkdir -p "$LOG_DIR"
 cmake -S "$ROOT" -B "$BUILD_DIR" \
   -DCMAKE_TOOLCHAIN_FILE="$ROOT/cmake/ios.toolchain.cmake" \
   -DPLATFORM="$PLATFORM" \
@@ -33,9 +35,9 @@ cmake -S "$ROOT" -B "$BUILD_DIR" \
   -DSLIC3R_GUI=OFF -DORCA_IOS=ON -DORCA_IOS_API=ON \
   -DSLIC3R_STATIC=ON -DBUILD_TESTS=OFF -DORCA_TOOLS=OFF \
   -DORCA_BUILD_PYTHON_STUBGEN_MODULE=OFF \
-  -G "Unix Makefiles"
+  -G "Unix Makefiles" 2>&1 | tee "$LOG_DIR/ios_engine_configure.log"
 # Check the bridge against current upstream headers before the full core build.
-python3 - "$BUILD_DIR/compile_commands.json" <<'PYCODE'
+python3 - "$BUILD_DIR/compile_commands.json" <<'PYCODE' 2>&1 | tee "$LOG_DIR/ios_engine_bridge_check.log"
 import json
 import shlex
 import subprocess
@@ -55,7 +57,11 @@ for argument in command:
         check.append("-fsyntax-only" if argument == "-c" else argument)
 subprocess.run(check, cwd=entry["directory"], check=True)
 PYCODE
-cmake --build "$BUILD_DIR" --target orca_ios_api -j "$(sysctl -n hw.ncpu)"
+cmake --build "$BUILD_DIR" --target orca_ios_api -j "$(sysctl -n hw.ncpu)" \
+  2>&1 | tee "$LOG_DIR/ios_engine_build.log"
+if command -v ccache >/dev/null 2>&1; then
+  ccache --show-stats > "$LOG_DIR/ios_engine_compiler_cache.log" 2>&1 || true
+fi
 "$ROOT/scripts/bundle_engine_libs.sh" "$BUILD_DIR" "$DEPS_PREFIX/lib"
 SIM_ARCH=arm64
 if [[ "$TARGET" == iphonesimulator ]]; then SIM_ARCH="$ARCH"; fi

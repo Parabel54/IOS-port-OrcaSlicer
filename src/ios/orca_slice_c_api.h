@@ -42,11 +42,15 @@ ORCA_API int orca_session_add_model_geometry(orca_session_t *s, const char *path
 /**
  * Load config from official .json / .ini profile.
  * Implementation: DynamicPrintConfig::load_from_json / load_from_ini
+ * Staged failures preserve the current configuration and processed preview.
+ * Success invalidates previous slicing/statistics.
  */
 ORCA_API int orca_session_load_config(orca_session_t *s, const char *config_path);
 
 /**
  * Set a single DynamicPrintConfig option (e.g. "layer_height", "0.2").
+ * Stage strict deserialization; failure preserves config and processed preview.
+ * Success invalidates previous slicing/statistics, including global settings.
  */
 ORCA_API int orca_session_set_option(orca_session_t *s, const char *key, const char *value);
 

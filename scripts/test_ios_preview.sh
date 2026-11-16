@@ -42,8 +42,8 @@ cleanup() {
 }
 trap cleanup EXIT
 ios_test_run 120 xcrun simctl boot "$DEVICE"
-ios_test_run 240 xcrun simctl bootstatus "$DEVICE" -b
-ios_test_run 240 xcrun simctl install "$DEVICE" "$APP"
+ios_test_run 360 xcrun simctl bootstatus "$DEVICE" -b 2>&1 | tee "$TEST_DIR/boot.log"
+ios_test_run 240 xcrun simctl install "$DEVICE" "$APP" 2>&1 | tee "$TEST_DIR/install.log"
 SOURCE_COMMIT="$(git -C "$ROOT" rev-parse HEAD)"
 SIMCTL_CHILD_ORCA_GRAPHICS_SOURCE="$SOURCE_COMMIT" \
   ios_test_run 90 xcrun simctl launch "$DEVICE" com.orcaslicer.preview-smoke | tee "$TEST_DIR/launch.log"

@@ -43,6 +43,15 @@ algorithms. Heavy model/profile operations prepare a 3MF undo snapshot and run
 outside the UI thread. Staged failures preserve the original model/preview.
 Successful edits invalidate derived slicing. Undo, Redo and public project saving
 honor the same gate, including keyboard-triggered actions.
+Synchronous model, painting, plate, calibration and global-setting entry points
+also check import/slice/preset ownership themselves. Disabled controls alone do
+not serialize keyboard commands or notification handlers. Accepted global edits
+invalidate the old preview in both host and bridge; rejected deserialization is
+staged and preserves the previous configuration and processed paths.
+UI option/material-name reads use their last idle values while a worker owns the
+session. Catalog, enum and overlay queries defer native access. Completion paths
+refresh owned values after awaiting the worker; slicing captures width/density
+inputs before handing the session to its background task.
 Single-object imports reuse the same immutable Swift mesh arrays for framing and
 selection rather than exporting that geometry twice.
 

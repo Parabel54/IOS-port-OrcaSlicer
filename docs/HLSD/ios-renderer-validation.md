@@ -28,8 +28,10 @@ crash therefore fails the gate as well.
 ## Execution boundaries
 
 The shared timeout helper forwards caller stdin separately from its own Python
-source. Each simulator phase is bounded, including a 240-second cold app-install
-phase. Runtime selection stays within the chosen SDK's iOS version family.
+source. Each simulator phase is bounded, including 360 seconds for cold runtime
+migration and 240 seconds for app installation. Separate boot/install logs retain
+infrastructure failures even when the simulator cannot serve unified logs.
+Runtime selection stays within the chosen SDK's iOS version family.
 Fresh devices isolate test state and are shut down/deleted during cleanup.
 
 SDK/interface checks, focused graphics, C++ implementation builds, native engine
@@ -38,3 +40,10 @@ evidence. Native integration builds the bridge against real dependencies before
 bundling the engine and exercising simulator slicing/UI flows. Comparing a PR
 checkout's tree with its source tree pins results to exact code. Job status alone
 is insufficient evidence for a successful graphics or native-runtime result.
+
+The full-app import fixture also requires a session-ownership receipt. It invokes
+public model/configuration/painting/plate/undo actions under each import, slice
+and preset ownership flag, and compares native bounds, settings, paint counts and
+host history state. Every blocked action must leave them intact; a valid edit
+must work when ownership is released. This deterministic fixture tests command
+guards without intentionally racing native code.

@@ -63,7 +63,7 @@ PYDIAG
 }
 trap cleanup EXIT
 ios_test_run 120 xcrun simctl boot "$DEVICE"
-ios_test_run 240 xcrun simctl bootstatus "$DEVICE" -b
+ios_test_run 360 xcrun simctl bootstatus "$DEVICE" -b 2>&1 | tee "$TEST_DIR/boot-$DEVICE.log"
 # The bounded Orca launches and startup markers below validate the launcher.
 # Launching Settings adds an unrelated cold-start failure to each fresh device.
 APP_BUNDLE="$ROOT/build-ios-app/Build/Products/Release-iphonesimulator/OrcaSlicer.app"
@@ -89,7 +89,7 @@ ios_test_run 240 xcrun simctl install "$DEVICE" "$APP_BUNDLE"
 APP_DATA="$(xcrun simctl get_app_container "$DEVICE" com.orcaslicer.ios data)"
 mkdir -p "$APP_DATA/Documents"
 cp "$TEST_DIR/orca-project.3mf" "$APP_DATA/Documents/ios-import-smoke.3mf"
-ios_test_run 90 xcrun simctl launch "$DEVICE" com.orcaslicer.ios --test-view-metadata --test-document-import \
+ios_test_run 90 xcrun simctl launch "$DEVICE" com.orcaslicer.ios --test-view-metadata --test-document-import --test-session-gate \
   | tee "$TEST_DIR/app-launch.log"
 # Wait for the app's full profile startup, not just its initial process spawn.
 APP_DATA="$(xcrun simctl get_app_container "$DEVICE" com.orcaslicer.ios data)"
@@ -108,6 +108,10 @@ metadata = Path(sys.argv[1]) / 'tmp/orca-view-metadata-smoke.txt'
 if not metadata.is_file():
     raise SystemExit('Missing small-stack view metadata test result')
 print(metadata.read_text())
+ownership = Path(sys.argv[1]) / 'tmp/orca-session-gate-smoke.txt'
+if not ownership.is_file() or not ownership.read_text().startswith('PASS:'):
+    raise SystemExit('Public session ownership test failed or did not run')
+print(ownership.read_text())
 camera = Path(sys.argv[1]) / 'tmp/orca-camera-smoke.txt'
 if not camera.is_file() or not camera.read_text().startswith('PASS:'):
     raise SystemExit('Camera pan/orbit/zoom smoke test failed')
@@ -131,7 +135,7 @@ for variant in compact tablet; do
   fi
   DEVICE="$(ios_test_run 120 xcrun simctl create "OrcaWorkspace-$variant" "$device_type" "$RUNTIME")"
   ios_test_run 120 xcrun simctl boot "$DEVICE"
-  ios_test_run 240 xcrun simctl bootstatus "$DEVICE" -b
+  ios_test_run 360 xcrun simctl bootstatus "$DEVICE" -b 2>&1 | tee "$TEST_DIR/boot-$DEVICE.log"
   ios_test_run 240 xcrun simctl install "$DEVICE" "$APP_BUNDLE"
   APP_DATA="$(xcrun simctl get_app_container "$DEVICE" com.orcaslicer.ios data)"
   mkdir -p "$APP_DATA/Documents"

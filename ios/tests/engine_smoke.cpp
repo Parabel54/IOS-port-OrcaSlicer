@@ -80,7 +80,7 @@ int main(int argc, char **argv)
                      orca_object_option_supported(nullptr) == 0,
                      "global/printer-only settings cannot become object overrides") ||
             !require(orca_session_add_primitive(objects.get(), 0, 10, 10, 10) == 0 &&
-                     orca_session_add_primitive(objects.get(), 0, 10, 10, 10) == 0 &&
+                     orca_session_add_primitive(objects.get(), 0, 10, 10, 10) == 1 &&
                      orca_session_set_option(objects.get(), "wall_loops", "2") == 0 &&
                      orca_session_set_object_option(objects.get(), 0, "wall_loops", "5") == 0 &&
                      orca_session_set_object_option(objects.get(), 0, "enable_support", "1") == 0 &&
@@ -126,7 +126,7 @@ int main(int argc, char **argv)
             return std::make_pair(info, std::move(values));
         };
         if (!require(orca_session_add_primitive(layers.get(), 2, 20, 20, 20) == 0 &&
-                     orca_session_add_primitive(layers.get(), 0, 5, 5, 5) == 0 &&
+                     orca_session_add_primitive(layers.get(), 0, 5, 5, 5) == 1 &&
                      orca_session_translate_object(layers.get(), 1, 30, 0, 0) == 0 &&
                      orca_session_set_option(layers.get(), "layer_height", "0.2") == 0 &&
                      orca_session_set_option(layers.get(), "initial_layer_print_height", "0.2") == 0,
@@ -601,6 +601,8 @@ int main(int argc, char **argv)
                      "reject invalid/global-only override on an already sliced model") ||
             !require(orca_session_edit_layer_profile(session.get(), 0, 0, std::numeric_limits<float>::quiet_NaN(), 0, 0) != 0,
                      "reject bad adaptive input on an already sliced model") ||
+            !require(orca_session_set_option(session.get(), "wall_loops", "invalid") != 0,
+                     "reject invalid global setting without replacing the slice") ||
             !require(orca_session_export_preview(session.get(), &retained, &retained_count, &retained_total) == 0 &&
                      retained_count == count && retained_total == total,
                      "unsuccessful staged split/face picks preserve the sliced preview")) {
@@ -686,6 +688,39 @@ int main(int argc, char **argv)
             orca_free(opened);
             if (!require(cleared, "object setting edit and reset invalidate previous toolpaths and statistics")) return 11;
         }
+        if (!require(orca_session_load_gcode(viewer.get(), output.c_str()) == 0 &&
+                     orca_session_set_option(viewer.get(), "layer_height", "invalid") != 0 &&
+                     orca_session_get_option(viewer.get(), "layer_height", height, sizeof(height)) == 0 &&
+                     std::fabs(std::strtof(height, nullptr) - 0.16f) < 0.001f,
+                     "invalid global edit preserves the old configuration")) return 11;
+        const std::string invalid_config = directory + "/invalid-global-edit.ini";
+        { std::ofstream config(invalid_config); config << "layer_height = 0.23\nwall_loops = invalid\n"; }
+        if (!require(orca_session_load_config(viewer.get(), invalid_config.c_str()) != 0 &&
+                     orca_session_get_option(viewer.get(), "layer_height", height, sizeof(height)) == 0 &&
+                     std::fabs(std::strtof(height, nullptr) - 0.16f) < 0.001f,
+                     "partially parsed config failure preserves old values")) return 11;
+        opened = nullptr; opened_count = 0; opened_total = 0;
+        const bool preserved = orca_session_export_preview(viewer.get(), &opened, &opened_count, &opened_total) == 0 &&
+            opened_count == retained_count;
+        orca_free(opened);
+        if (!require(preserved, "invalid global edit preserves processed paths") ||
+            !require(orca_session_set_option(viewer.get(), "layer_height", "0.18") == 0,
+                     "accept new global process height")) return 11;
+        opened = nullptr; opened_count = 0; opened_total = 0;
+        const bool invalidated = orca_session_export_preview(viewer.get(), &opened, &opened_count, &opened_total) != 0 &&
+            orca_session_last_slice_stats(viewer.get(), &taken_seconds, &taken_volume, &taken_layers) != 0;
+        orca_free(opened);
+        if (!require(invalidated, "successful global edit invalidates old toolpaths and statistics before reslicing")) return 11;
+        const std::string valid_config = directory + "/valid-global-edit.ini";
+        { std::ofstream config(valid_config); config << "layer_height = 0.19\n"; }
+        if (!require(orca_session_load_gcode(viewer.get(), output.c_str()) == 0 &&
+                     orca_session_load_config(viewer.get(), valid_config.c_str()) == 0,
+                     "load valid global configuration over an existing preview")) return 11;
+        opened = nullptr; opened_count = 0; opened_total = 0;
+        const bool imported_invalidated = orca_session_export_preview(viewer.get(), &opened, &opened_count, &opened_total) != 0 &&
+            orca_session_last_slice_stats(viewer.get(), &taken_seconds, &taken_volume, &taken_layers) != 0;
+        orca_free(opened);
+        if (!require(imported_invalidated, "successful config import invalidates prior paths and statistics")) return 11;
         diagnostic_session = session.get();
         viewer.reset();
         if (!require(owned_records[0].end_x == first_endpoint && owned_records[owned_count - 1].end_z == last_endpoint,
