@@ -163,7 +163,12 @@ struct PlateSceneView: UIViewRepresentable {
         let top = camera.simdPosition
         coordinator.cameraDrag(delta: .zero, view: view, mode: .orbit)
         coordinator.cameraDrag(delta: CGPoint(x: 10, y: 0), view: view, mode: .orbit)
-        return abs(camera.simdPosition.y - top.y) < 0.001 && GCodePathGeometry.previewSmokeTest()
+        guard abs(camera.simdPosition.y - top.y) < 0.001 else { return false }
+        camera.name = "camera"
+        coordinator.frameCamera(view: view, minimum: SIMD3(0, 0, 990), maximum: SIMD3(10, 10, 1010))
+        let raisedTarget = view.defaultCameraController.target
+        guard abs(raisedTarget.y - 1000) < 0.001, camera.position.y > raisedTarget.y else { return false }
+        return GCodePathGeometry.previewSmokeTest()
 
     }
 
@@ -971,7 +976,7 @@ struct PlateSceneView: UIViewRepresentable {
 
             cam.position = SCNVector3(
                 target.x + dist * 0.55,
-                dist * 0.65,
+                target.y + dist * 0.65,
                 target.z + dist * 0.8
             )
             cam.look(at: target)
