@@ -354,6 +354,10 @@ int main(int argc, char **argv)
                    ";TYPE:Support\nG1 X10 Y10 F6000\nG1 X20 E1 F1200\n"
                    ";TYPE:Support interface\nG1 Y20 E1 F1200\n"
                    ";TYPE:Outer wall\nG1 X10 E1 F1200\n";
+        // An Orca-produced file requires its embedded configuration block.
+        const auto config_start = gcode.find("; CONFIG_BLOCK_START");
+        if (!require(config_start != std::string::npos, "real export contains embedded configuration")) return 16;
+        fixture << gcode.substr(config_start);
         fixture.close();
         std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
             supported(orca_session_create(argv[2]), orca_session_destroy);
