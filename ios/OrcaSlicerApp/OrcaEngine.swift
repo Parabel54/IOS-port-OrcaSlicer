@@ -535,6 +535,7 @@ final class OrcaEngine: ObservableObject {
         _ = orca_session_apply_presets(s)
         invalidateSlice()
         selectedFilament = name
+        refreshObjectFilamentColors()
         persistSelection()
         lastMessage = "Filament: \(name)"
         return true
@@ -1670,12 +1671,14 @@ final class OrcaEngine: ObservableObject {
             let n = Int(orca_session_object_count(s))
             hasModel = n > 0
             if !hasModel {
-                mesh = nil
                 modelName = nil
                 objectNames = []
                 objectCount = 0
                 modelVolumeMm3 = 0
                 selectedObjectIndex = -1
+                refreshMesh()
+                clearPaintOverlay()
+                refreshBounds()
                 lastMessage = "Plate empty"
             } else {
                 if selectedObjectIndex >= n {
@@ -1701,15 +1704,14 @@ final class OrcaEngine: ObservableObject {
         guard let s = session else { return }
         _ = orca_session_clear_model(s)
         hasModel = false
-        mesh = nil
         modelName = nil
         objectNames = []
         objectCount = 0
         modelVolumeMm3 = 0
-        gcodeURL = nil
-        gcodePathNode = nil
-        gcodeGeometry = nil
-        previewLayerHeights = []
+        selectedObjectIndex = -1
+        refreshMesh()
+        clearPaintOverlay()
+        refreshBounds()
         lastMessage = "Plate cleared"
         #endif
     }
