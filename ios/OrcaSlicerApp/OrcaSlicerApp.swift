@@ -132,6 +132,8 @@ struct OrcaRootView: View {
     @State private var fitCameraRequest = UUID()
     @State private var cameraView: CameraPreset = .home
     @AppStorage("orca.usePerspectiveCamera") private var usePerspectiveCamera = true
+    @AppStorage("orca.autoPerspective") private var autoPerspective = false
+    @State private var cameraViewPolicy = CameraViewPolicy()
     @State private var gizmoMode: GizmoMode = .select
     @State private var showPreferences = false
     @State private var showAbout = false
@@ -2401,6 +2403,11 @@ struct OrcaRootView: View {
                 fitRequest: fitCameraRequest,
                 cameraView: cameraView,
                 projection: usePerspectiveCamera ? .perspective : .orthographic,
+                onCameraView: selectCameraView,
+                onOrbitBegin: {
+                    usePerspectiveCamera = cameraViewPolicy.orbit(automatic: autoPerspective,
+                        current: usePerspectiveCamera ? .perspective : .orthographic) == .perspective
+                },
                 rotationAxis: rotationAxis,
                 onScaleCommit: { factor, index in
                     engine.scale(factor: factor, index: index)
@@ -2512,8 +2519,24 @@ struct OrcaRootView: View {
     }
 
     private func selectCameraView(_ view: CameraPreset) {
+        usePerspectiveCamera = cameraViewPolicy.select(view, automatic: autoPerspective,
+            current: usePerspectiveCamera ? .perspective : .orthographic) == .perspective
         cameraView = view
         fitCameraRequest = UUID()
+    }
+
+    private var projectionSelection: Binding<Bool> {
+        Binding(get: { usePerspectiveCamera }, set: {
+            cameraViewPolicy.reset()
+            usePerspectiveCamera = $0
+        })
+    }
+
+    private var automaticPerspectiveSelection: Binding<Bool> {
+        Binding(get: { autoPerspective }, set: {
+            cameraViewPolicy.reset()
+            autoPerspective = $0
+        })
     }
 
     private var cameraViewMenu: some View {
@@ -2523,10 +2546,11 @@ struct OrcaRootView: View {
                 Button("\(view.rawValue) view") { selectCameraView(view) }
             }
             Divider()
-            Picker("Projection", selection: $usePerspectiveCamera) {
+            Picker("Projection", selection: projectionSelection) {
                 Text("Perspective").tag(true)
                 Text("Orthographic").tag(false)
             }
+            Toggle("Auto Perspective", isOn: automaticPerspectiveSelection)
         }.accessibilityIdentifier("camera-view-menu")
     }
 
@@ -2816,10 +2840,11 @@ struct OrcaRootView: View {
                     labeled("Theme", "Orca desktop dark")
                 }
                 Section("3D view") {
-                    Picker("Projection", selection: $usePerspectiveCamera) {
+                    Picker("Projection", selection: projectionSelection) {
                         Text("Perspective").tag(true)
                         Text("Orthographic").tag(false)
                     }
+                    Toggle("Auto Perspective", isOn: automaticPerspectiveSelection)
                 }
                 Section("Setup") {
                     Button("Show setup wizard again") {

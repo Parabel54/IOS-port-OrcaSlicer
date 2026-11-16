@@ -92,6 +92,26 @@ enum CameraProjection {
     case perspective, orthographic
 }
 
+/// Desktop Camera::auto_type only returns to perspective after an automatic
+/// face view. A manual projection choice cancels that automatic transition.
+struct CameraViewPolicy {
+    private var automaticallyAligned = false
+
+    mutating func select(_ view: CameraPreset, automatic: Bool, current: CameraProjection) -> CameraProjection {
+        guard automatic else { reset(); return current }
+        if view != .home { automaticallyAligned = true; return .orthographic }
+        return orbit(automatic: automatic, current: current)
+    }
+
+    mutating func orbit(automatic: Bool, current: CameraProjection) -> CameraProjection {
+        let next: CameraProjection = automatic && automaticallyAligned ? .perspective : current
+        reset()
+        return next
+    }
+
+    mutating func reset() { automaticallyAligned = false }
+}
+
 /// Interactive build plate with official-engine mesh geometry + optional G-code paths.
 struct PlateSceneView: UIViewRepresentable {
     var mesh: MeshGeometry?
@@ -119,6 +139,8 @@ struct PlateSceneView: UIViewRepresentable {
     var fitRequest = UUID()
     var cameraView: CameraPreset = .home
     var projection: CameraProjection = .perspective
+    var onCameraView: ((CameraPreset) -> Void)? = nil
+    var onOrbitBegin: (() -> Void)? = nil
     var rotationAxis: Int = 2
     /// Tap object to select; drag on object to move (without requiring Move gizmo).
     var selectMode: Bool { [.select, .move, .rotate, .scale].contains(touchMode) }
@@ -146,6 +168,16 @@ struct PlateSceneView: UIViewRepresentable {
 
     /// Run on the simulator main thread against a real SceneKit camera.
     static func cameraSmokeTest() -> Bool {
+        var policy = CameraViewPolicy()
+        guard policy.select(.top, automatic: false, current: .perspective) == .perspective,
+              policy.select(.front, automatic: true, current: .perspective) == .orthographic,
+              policy.orbit(automatic: true, current: .orthographic) == .perspective,
+              policy.select(.right, automatic: true, current: .perspective) == .orthographic else { return false }
+        policy.reset() // Explicit manual orthographic choice.
+        guard policy.orbit(automatic: true, current: .orthographic) == .orthographic,
+              policy.select(.home, automatic: true, current: .orthographic) == .orthographic,
+              policy.select(.bottom, automatic: true, current: .perspective) == .orthographic,
+              policy.select(.home, automatic: true, current: .orthographic) == .perspective else { return false }
         let view = PlateSCNView(frame: CGRect(x: 0, y: 0, width: 390, height: 600))
         view.scene = SCNScene()
         view.setRenderingActive(false)
@@ -925,6 +957,7 @@ struct PlateSceneView: UIViewRepresentable {
 
         func selectCamera(_ preset: CameraPreset) {
             guard let view, let parent else { return }
+            if let select = parent.onCameraView { select(preset); return }
             let low = parent.framingBounds?.min ?? parent.mesh?.min ?? SIMD3<Float>(0, 0, 0)
             let high = parent.framingBounds?.max ?? parent.mesh?.max ?? SIMD3<Float>(parent.bedSize.x, parent.bedSize.y, 0)
             frameCamera(view: view, minimum: low, maximum: high, preset: preset)
@@ -941,6 +974,7 @@ struct PlateSceneView: UIViewRepresentable {
             // Consume the recognizer's initial movement too; subsequent changes
             // are incremental so crossing its recognition threshold cannot jump.
             guard gesture.state == .began || gesture.state == .changed else { return }
+            if gesture.state == .began && mode == .orbit { parent?.onOrbitBegin?() }
             let delta = gesture.translation(in: view)
             gesture.setTranslation(.zero, in: view)
             cameraDrag(delta: delta, view: view, mode: mode)
