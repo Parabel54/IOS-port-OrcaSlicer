@@ -22,6 +22,27 @@ struct PrinterConnection: Codable, Identifiable, Equatable {
               parts.port.map({ (1...65535).contains($0) }) ?? true else { return nil }
         return parts.url
     }
+
+    static func validatedTCPURL(_ address: String) -> URL? {
+        let text = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty,
+              var parts = URLComponents(string: text.contains("://") ? text : "tcp://" + text),
+              parts.scheme?.lowercased() == "tcp", let host = parts.host, !host.isEmpty,
+              !host.contains(where: { $0.isWhitespace }),
+              parts.user == nil, parts.password == nil,
+              parts.query == nil, parts.fragment == nil,
+              parts.path.isEmpty || parts.path == "/",
+              parts.port.map({ (1...65535).contains($0) }) ?? true else { return nil }
+        parts.scheme = "tcp"
+        parts.host = host.lowercased()
+        parts.port = parts.port ?? 8899
+        parts.path = ""
+        return parts.url
+    }
+
+    static func validatedAddress(_ address: String, kind: String) -> URL? {
+        kind == "Flashforge TCP" ? validatedTCPURL(address) : validatedURL(address)
+    }
 }
 
 // Only connection metadata lives in preferences. API keys stay in the device Keychain.
@@ -80,10 +101,11 @@ struct PrinterCredentialStore {
 }
 
 enum ConnectionError: LocalizedError {
-    case invalidAddress, invalidName, credential, flashforgeCredentials
+    case invalidAddress, invalidTCPAddress, invalidName, credential, flashforgeCredentials
     var errorDescription: String? {
         switch self {
         case .invalidAddress: return String(localized: "Enter an HTTP or HTTPS printer URL without a username, password, query, or fragment.")
+        case .invalidTCPAddress: return String(localized: "Enter a Flashforge TCP address such as tcp://printer.local:8899, without a path or credentials.")
         case .invalidName: return String(localized: "Enter a name for this printer.")
         case .flashforgeCredentials: return String(localized: "Enter the Flashforge serial number and LAN access code.")
         case .credential: return String(localized: "Could not access printer credentials in Keychain. Unlock your device and try again.")
@@ -120,7 +142,10 @@ final class PrinterConnections: ObservableObject {
                 throw ConnectionError.flashforgeCredentials
             }
             guard !name.isEmpty else { throw ConnectionError.invalidName }
-            guard let url = PrinterConnection.validatedURL(address) else { throw ConnectionError.invalidAddress }
+            guard let url = PrinterConnection.validatedAddress(address, kind: kind) else {
+                if kind == "Flashforge TCP" { throw ConnectionError.invalidTCPAddress }
+                throw ConnectionError.invalidAddress
+            }
             let address = url.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             let existing = printers.firstIndex { $0.address == address && $0.kind == kind }
             let printer = PrinterConnection(id: existing.map { printers[$0].id } ?? UUID(),
@@ -144,7 +169,10 @@ final class PrinterConnections: ObservableObject {
         do {
             let trimmed = address.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !enabled || !trimmed.isEmpty else { throw ConnectionError.invalidAddress }
-            guard trimmed.isEmpty || PrinterConnection.validatedURL(trimmed) != nil else { throw ConnectionError.invalidAddress }
+            guard trimmed.isEmpty || PrinterConnection.validatedAddress(trimmed, kind: printers[index].kind) != nil else {
+                if printers[index].kind == "Flashforge TCP" { throw ConnectionError.invalidTCPAddress }
+                throw ConnectionError.invalidAddress
+            }
             var updated = printers
             updated[index].remoteAddress = trimmed.isEmpty ? nil : trimmed
             updated[index].useRemote = enabled

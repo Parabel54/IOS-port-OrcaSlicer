@@ -169,6 +169,14 @@ struct FlashforgeClient {
         let job: FlashforgeUploadedJob
     }
 
+    static func uploadFilename(for source: URL) -> String {
+        let name = source.lastPathComponent.isEmpty ? "print.gcode" : source.lastPathComponent
+        return name.unicodeScalars.map { scalar -> String in
+            let ascii = scalar.value
+            return (48...57).contains(ascii) || (65...90).contains(ascii) || (97...122).contains(ascii) || "._-".unicodeScalars.contains(scalar) ? String(scalar) : "_"
+        }.joined()
+    }
+
     func prepareUpload(source: URL, leveling: Bool, useStation: Bool,
                        slots: [FlashforgeSlot], toolSlots: [Int]) throws -> Upload {
         let body = FileManager.default.temporaryDirectory.appendingPathComponent("orca-flashforge-\(UUID().uuidString)")
@@ -179,10 +187,7 @@ struct FlashforgeClient {
         defer { try? input.close() }
         let output = try FileHandle(forWritingTo: body)
         defer { try? output.close() }
-        let filename = source.lastPathComponent.unicodeScalars.map { scalar -> String in
-            let ascii = scalar.value
-            return (48...57).contains(ascii) || (65...90).contains(ascii) || (97...122).contains(ascii) || "._-".unicodeScalars.contains(scalar) ? String(scalar) : "_"
-        }.joined()
+        let filename = Self.uploadFilename(for: source)
         let boundary = "OrcaFlashforge\(UUID().uuidString)"
         try output.write(contentsOf: Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"gcodeFile\"; filename=\"\(filename)\"\r\nContent-Type: application/octet-stream\r\n\r\n".utf8))
         let toolCommand = try NSRegularExpression(pattern: #"^\s*(?:N\d+\s+)?T(\d+)(?:\s|;|\*|$)"#, options: [.caseInsensitive])

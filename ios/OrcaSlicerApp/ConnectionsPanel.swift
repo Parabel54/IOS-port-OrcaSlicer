@@ -99,7 +99,11 @@ struct RemotePrinterRoutePanel: View {
                     Toggle("Use remote route", isOn: $enabled)
                 }
                 Section("Access from other networks") {
-                    Text("Use a VPN such as Tailscale or WireGuard on this device and your home network, or enter a reachable HTTPS relay URL. The printer must be reachable through that route.")
+                    if printer.kind == "Flashforge TCP" {
+                        Text("Enable Tailscale or WireGuard on this device and your home network. Enter the printer’s reachable VPN address, such as tcp://printer.home:8899. An HTTP relay cannot carry this TCP connection.")
+                    } else {
+                        Text("Use a VPN such as Tailscale or WireGuard on this device and your home network, or enter a reachable HTTPS relay URL. The printer must be reachable through that route.")
+                    }
                     Text("Orca Cloud preset sync does not provide a tunnel to LAN printers. Your saved printer credentials are also used for the remote route.")
                 }
                 if !connections.message.isEmpty { Text(connections.message) }

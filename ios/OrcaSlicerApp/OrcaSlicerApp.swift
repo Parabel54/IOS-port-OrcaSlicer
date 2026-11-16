@@ -604,6 +604,7 @@ struct OrcaRootView: View {
         case octoprint = "OctoPrint"
         case prusalink = "PrusaLink"
         case flashforge = "Flashforge"
+        case flashforgeTCP = "Flashforge TCP"
         var id: String { rawValue }
     }
 
@@ -613,6 +614,7 @@ struct OrcaRootView: View {
     @State private var flashforgeSerial = ""
     @State private var flashforgeStatus: FlashforgeStatus?
     @State private var flashforgeUploadedJob: FlashforgeUploadedJob?
+    @State private var flashforgeTCPUploadedJob: FlashforgeTCPUploadedJob?
     @State private var flashforgeUseStation = false
     @State private var flashforgeLeveling = true
     @State private var flashforgeToolSlots = [1, 2, 3, 4]
@@ -680,7 +682,7 @@ struct OrcaRootView: View {
                 }
 
                 PrinterConnectionsPanel(account: cloudAccount, engine: engine, connections: connections, address: printerHost,
-                                        kind: hostType.rawValue, apiKey: octoApiKey,
+                                        kind: hostType.rawValue, apiKey: hostType == .flashforgeTCP ? "" : octoApiKey,
                                         serialNumber: hostType == .flashforge ? flashforgeSerial : nil) { printer in
                     selectPrinterConnection(printer)
                 }
@@ -787,13 +789,14 @@ struct OrcaRootView: View {
                         Text(t.rawValue).tag(t)
                     }
                 }
-                .pickerStyle(.segmented)
+                .pickerStyle(.menu)
                 .disabled(isConnecting || isJobBusy)
                 .onChange(of: hostType) { _ in resetPrinterConnection() }
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text(
                         hostType == .flashforge ? "Flashforge AD5X / Adventurer 5M host (port 8898)"
+                            : hostType == .flashforgeTCP ? "Flashforge legacy TCP host (port 8899)"
                             : hostType == .moonraker ? "Moonraker / Klipper host"
                             : hostType == .prusalink ? "PrusaLink host"
                             : "OctoPrint host"
@@ -802,6 +805,7 @@ struct OrcaRootView: View {
                         .foregroundStyle(OrcaTheme.muted)
                     TextField(
                         hostType == .flashforge ? "http://192.168.1.100:8898"
+                            : hostType == .flashforgeTCP ? "tcp://printer.local:8899"
                             : hostType == .moonraker ? "http://printer.local"
                             : hostType == .prusalink ? "http://prusa.local"
                             : "http://octopi.local",
@@ -820,7 +824,7 @@ struct OrcaRootView: View {
                         .padding(12)
                         .background(OrcaTheme.elevated)
                         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    if PrinterConnection.validatedURL(printerHost) != nil {
+                    if hostType != .flashforgeTCP, PrinterConnection.validatedURL(printerHost) != nil {
                         SecureField(
                             hostType == .flashforge ? "Flashforge LAN access code" : "API key (optional)",
                             text: Binding(get: { octoApiKey }, set: { resetPrinterConnection(); octoApiKey = $0 })
@@ -837,6 +841,10 @@ struct OrcaRootView: View {
                 }
 
                 if hostType == .flashforge { flashforgeConnectionOptions }
+                if hostType == .flashforgeTCP {
+                    Text("Use this for Flashforge firmware with the desktop TCP protocol enabled. Upload and Start print are separate actions. For AD5X material mapping, live temperatures and Cancel, use Flashforge with its LAN access code. TCP can also use your saved Tailscale or WireGuard route.")
+                        .font(.caption).foregroundStyle(OrcaTheme.muted)
+                }
 
                 HStack(spacing: 10) {
                     Button {
@@ -853,7 +861,7 @@ struct OrcaRootView: View {
                         .foregroundStyle(.white)
                         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     }
-                    .disabled(isConnecting)
+                    .disabled(isConnecting || isJobBusy)
                     .buttonStyle(.plain)
 
                     Button {
@@ -867,7 +875,7 @@ struct OrcaRootView: View {
                             .foregroundStyle(engine.gcodeURL != nil ? OrcaTheme.accent : OrcaTheme.muted)
                             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     }
-                    .disabled(engine.gcodeURL == nil || isConnecting)
+                    .disabled(engine.gcodeURL == nil || isConnecting || isJobBusy)
                     .buttonStyle(.plain)
                 }
 
@@ -927,7 +935,7 @@ struct OrcaRootView: View {
                                 .foregroundStyle(OrcaTheme.danger)
                                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         }
-                        .disabled(isJobBusy || isConnecting)
+                        .disabled(isJobBusy || isConnecting || hostType == .flashforgeTCP)
                         .buttonStyle(.plain)
 
                         Button {
@@ -940,6 +948,7 @@ struct OrcaRootView: View {
                                 .foregroundStyle(OrcaTheme.accent)
                                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         }
+                        .disabled(isConnecting || isJobBusy)
                         .buttonStyle(.plain)
                     }
                 }
@@ -1008,6 +1017,10 @@ struct OrcaRootView: View {
     }
 
     private var canStartPrint: Bool {
+        if hostType == .flashforgeTCP {
+            return flashforgeTCPUploadedJob != nil && engine.gcodeURL == flashforgeTCPUploadedJob?.source
+                && PrinterConnection.validatedTCPURL(printerHost) == flashforgeTCPUploadedJob?.endpoint
+        }
         if hostType == .flashforge {
             return flashforgeUploadedJob != nil && engine.gcodeURL == flashforgeUploadedJob?.source
         }
@@ -1041,6 +1054,7 @@ struct OrcaRootView: View {
         printerStatus = "Not connected"
         lastUploadedFilename = nil
         flashforgeUploadedJob = nil
+        flashforgeTCPUploadedJob = nil
         flashforgeStatus = nil
         jobState = ""
         jobMessage = ""
@@ -1077,6 +1091,7 @@ struct OrcaRootView: View {
         switch hostType {
         case .moonraker: await connectMoonraker()
         case .flashforge: await connectFlashforge()
+        case .flashforgeTCP: await connectFlashforgeTCP()
         case .octoprint, .prusalink: await connectOctoPrint() // PrusaLink speaks OctoPrint-compatible API
         }
     }
@@ -1086,6 +1101,7 @@ struct OrcaRootView: View {
         switch hostType {
         case .moonraker: await uploadGCodeToMoonraker()
         case .flashforge: await uploadGCodeToFlashforge()
+        case .flashforgeTCP: await uploadGCodeToFlashforgeTCP()
         case .octoprint, .prusalink: await uploadGCodeToOctoPrint()
         }
     }
@@ -1095,6 +1111,7 @@ struct OrcaRootView: View {
         switch hostType {
         case .moonraker: await startMoonrakerPrint()
         case .flashforge: await startFlashforgePrint()
+        case .flashforgeTCP: await startFlashforgeTCPPrint()
         case .octoprint, .prusalink: await startOctoPrint()
         }
     }
@@ -1104,14 +1121,17 @@ struct OrcaRootView: View {
         switch hostType {
         case .moonraker: await cancelMoonrakerPrint()
         case .flashforge: await cancelFlashforgePrint()
+        case .flashforgeTCP: return
         case .octoprint, .prusalink: await cancelOctoPrint()
         }
     }
 
     private func refreshHostJobStatus() async {
+        guard !isConnecting, !isJobBusy else { return }
         switch hostType {
         case .moonraker: await refreshMoonrakerJobStatus()
         case .flashforge: await refreshFlashforgeStatus()
+        case .flashforgeTCP: await connectFlashforgeTCP()
         case .octoprint, .prusalink: await refreshOctoPrintJobStatus()
         }
     }
@@ -1153,6 +1173,7 @@ struct OrcaRootView: View {
 
     private func invalidateFlashforgeUpload() {
         flashforgeUploadedJob = nil
+        flashforgeTCPUploadedJob = nil
         lastUploadedFilename = nil
     }
 
@@ -1252,6 +1273,60 @@ struct OrcaRootView: View {
         do {
             try await flashforgeClient().cancel()
             printerStatus = "Print cancel requested"
+        } catch { printerStatus = error.localizedDescription }
+    }
+
+    private func connectFlashforgeTCP() async {
+        guard !isConnecting, !isJobBusy else { return }
+        isConnecting = true
+        defer { isConnecting = false }
+        do {
+            let client = try FlashforgeTCPClient(address: printerHost)
+            let klipper = (engine.getOption("gcode_flavor") ?? "").lowercased() == "klipper"
+            let lines = try await client.connect(klipper: klipper)
+            try Task.checkCancellation()
+            printerStatus = String(localized: "Connected to Flashforge TCP")
+            jobMessage = lines.joined(separator: "\n")
+        } catch { printerStatus = error.localizedDescription }
+    }
+
+    private func uploadGCodeToFlashforgeTCP() async {
+        guard let source = engine.gcodeURL else { printerStatus = String(localized: "Slice first to produce G-code"); return }
+        guard engine.selectedPrinter.lowercased().hasPrefix("flashforge") else {
+            printerStatus = String(localized: "Select the matching Flashforge slicing profile before uploading")
+            return
+        }
+        isConnecting = true
+        invalidateFlashforgeUpload()
+        defer { isConnecting = false }
+        do {
+            let client = try FlashforgeTCPClient(address: printerHost)
+            let klipper = (engine.getOption("gcode_flavor") ?? "").lowercased() == "klipper"
+            let job = try await client.upload(source: source, klipper: klipper)
+            try Task.checkCancellation()
+            guard engine.gcodeURL == source, PrinterConnection.validatedTCPURL(printerHost) == job.endpoint else {
+                throw FlashforgeTCPError.wrongPrinter
+            }
+            flashforgeTCPUploadedJob = job
+            lastUploadedFilename = job.filename
+            printerStatus = String(localized: "Uploaded \(job.filename) · ready to start")
+            jobMessage = ""
+            engine.recordHostJob(host: printerHost, file: job.filename, hostType: PrinterHostType.flashforgeTCP.rawValue)
+        } catch { printerStatus = error.localizedDescription }
+    }
+
+    private func startFlashforgeTCPPrint() async {
+        guard let job = flashforgeTCPUploadedJob, engine.gcodeURL == job.source else {
+            printerStatus = FlashforgeTCPError.wrongPrinter.localizedDescription
+            return
+        }
+        isJobBusy = true
+        defer { isJobBusy = false }
+        do {
+            try await FlashforgeTCPClient(address: printerHost).start(job)
+            try Task.checkCancellation()
+            invalidateFlashforgeUpload()
+            printerStatus = String(localized: "Print start requested")
         } catch { printerStatus = error.localizedDescription }
     }
 
@@ -1614,6 +1689,7 @@ struct OrcaRootView: View {
     /// Poll live nozzle/bed temps when host supports it.
     private func refreshLiveTemps() async {
         switch hostType {
+        case .flashforgeTCP: return
         case .flashforge: await refreshFlashforgeStatus()
         case .moonraker:
             // Temps already folded into refreshMoonrakerJobStatus; also allow standalone poll

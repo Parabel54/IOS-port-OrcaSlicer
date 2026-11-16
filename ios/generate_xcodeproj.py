@@ -36,7 +36,7 @@ def uid(key):
 
 IDs = {k: uid(k) for k in [
     "project", "target", "sources", "resources", "frameworks", "product",
-    "swift_app", "swift_engine", "swift_plate", "swift_process", "swift_connections", "swift_connections_panel", "swift_startup", "swift_documentimport", "swift_nativedocumentpicker", "swift_orcacloudapi", "swift_nativecloudsignin", "swift_orcacloudaccount", "swift_cloudaccountpanel", "swift_flashforge", "swift_postprocessing", "swift_startup_view", "logo", "assets",
+    "swift_app", "swift_engine", "swift_plate", "swift_process", "swift_connections", "swift_connections_panel", "swift_startup", "swift_documentimport", "swift_nativedocumentpicker", "swift_orcacloudapi", "swift_nativecloudsignin", "swift_orcacloudaccount", "swift_cloudaccountpanel", "swift_flashforge", "swift_flashforge_tcp", "swift_postprocessing", "swift_startup_view", "logo", "assets",
     "process_profile", "process_profile_fine", "profiles_folder", "calib_folder", "scenekit_fw",
     "config_list_proj", "config_list_tgt",
     "debug_proj", "release_proj", "debug_tgt", "release_tgt",
@@ -218,6 +218,7 @@ pbx = f'''// !$*UTF8*$!
 		{IDs["swift_process"]} /* ProcessOptions.swift in Sources */ = {{isa = PBXBuildFile; fileRef = A1000000000000000000000C /* ProcessOptions.swift */; }};
 		{IDs["swift_postprocessing"]} /* NativePostProcessing.swift in Sources */ = {{isa = PBXBuildFile; fileRef = A1000000000000000000001A /* NativePostProcessing.swift */; }};
 		{IDs["swift_flashforge"]} /* FlashforgeClient.swift in Sources */ = {{isa = PBXBuildFile; fileRef = A10000000000000000000018 /* FlashforgeClient.swift */; }};
+		{IDs["swift_flashforge_tcp"]} /* FlashforgeTCPClient.swift in Sources */ = {{isa = PBXBuildFile; fileRef = A1000000000000000000001B /* FlashforgeTCPClient.swift */; }};
 		{IDs["swift_cloudaccountpanel"]} /* CloudAccountPanel.swift in Sources */ = {{isa = PBXBuildFile; fileRef = A10000000000000000000017 /* CloudAccountPanel.swift */; }};
 		{IDs["swift_orcacloudaccount"]} /* OrcaCloudAccount.swift in Sources */ = {{isa = PBXBuildFile; fileRef = A10000000000000000000016 /* OrcaCloudAccount.swift */; }};
 		{IDs["swift_nativecloudsignin"]} /* NativeCloudSignIn.swift in Sources */ = {{isa = PBXBuildFile; fileRef = A10000000000000000000015 /* NativeCloudSignIn.swift */; }};
@@ -247,6 +248,7 @@ pbx = f'''// !$*UTF8*$!
 		A1000000000000000000000C /* ProcessOptions.swift */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessOptions.swift; sourceTree = "<group>"; }};
 		A1000000000000000000001A /* NativePostProcessing.swift */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativePostProcessing.swift; sourceTree = "<group>"; }};
 		A10000000000000000000018 /* FlashforgeClient.swift */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FlashforgeClient.swift; sourceTree = "<group>"; }};
+		A1000000000000000000001B /* FlashforgeTCPClient.swift */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FlashforgeTCPClient.swift; sourceTree = "<group>"; }};
 		A10000000000000000000017 /* CloudAccountPanel.swift */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudAccountPanel.swift; sourceTree = "<group>"; }};
 		A10000000000000000000016 /* OrcaCloudAccount.swift */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrcaCloudAccount.swift; sourceTree = "<group>"; }};
 		A10000000000000000000015 /* NativeCloudSignIn.swift */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeCloudSignIn.swift; sourceTree = "<group>"; }};
@@ -282,6 +284,7 @@ pbx = f'''// !$*UTF8*$!
 				A1000000000000000000000C /* ProcessOptions.swift */,
 				A1000000000000000000001A /* NativePostProcessing.swift */,
 				A10000000000000000000018 /* FlashforgeClient.swift */,
+				A1000000000000000000001B /* FlashforgeTCPClient.swift */,
 				A10000000000000000000017 /* CloudAccountPanel.swift */,
 				A10000000000000000000016 /* OrcaCloudAccount.swift */,
 				A10000000000000000000015 /* NativeCloudSignIn.swift */,
@@ -397,6 +400,7 @@ pbx = f'''// !$*UTF8*$!
 				{IDs["swift_process"]} /* ProcessOptions.swift in Sources */,
 				{IDs["swift_postprocessing"]} /* NativePostProcessing.swift in Sources */,
 				{IDs["swift_flashforge"]} /* FlashforgeClient.swift in Sources */,
+				{IDs["swift_flashforge_tcp"]} /* FlashforgeTCPClient.swift in Sources */,
 				{IDs["swift_cloudaccountpanel"]} /* CloudAccountPanel.swift in Sources */,
 				{IDs["swift_orcacloudaccount"]} /* OrcaCloudAccount.swift in Sources */,
 				{IDs["swift_nativecloudsignin"]} /* NativeCloudSignIn.swift in Sources */,

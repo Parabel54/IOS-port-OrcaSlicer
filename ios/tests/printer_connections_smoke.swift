@@ -60,6 +60,21 @@ struct PrinterConnectionsSmoke {
         for valid in ["http://printer.local", "https://printer.local/path", "http://[::1]:7125"] {
             precondition(PrinterConnection.validatedURL(valid) != nil, valid)
         }
+        for invalid in ["", "http://printer.local", "https://printer.local", "tcp://user:password@printer.local", "tcp://printer.local/path", "tcp://printer.local?key=x", "tcp://printer.local/#fragment", "tcp://printer.local:0", "tcp://printer.local:70000"] {
+            precondition(PrinterConnection.validatedTCPURL(invalid) == nil, invalid)
+        }
+        for valid in ["printer.local", "printer.local:8899", "tcp://printer.local", "tcp://[::1]:8899"] {
+            precondition(PrinterConnection.validatedTCPURL(valid)?.port == 8899, valid)
+        }
+        store.save(name: "Legacy", address: "tcp://PRINTER.local/", kind: "Flashforge TCP", apiKey: "")
+        let legacy = store.printers.last!
+        precondition(legacy.kind == "Flashforge TCP" && legacy.address == "tcp://printer.local:8899")
+        store.setRemoteRoute(for: legacy, address: "tcp://printer.tailnet.test:8899", enabled: true)
+        precondition(store.printers.last!.connectionAddress == "tcp://printer.tailnet.test:8899")
+        store.setRemoteRoute(for: legacy, address: "https://printer.tailnet.test", enabled: true)
+        precondition(store.printers.last!.remoteAddress == "tcp://printer.tailnet.test:8899")
+        let withTCP = PrinterConnections(defaults: defaults, credentials: credentials)
+        precondition(withTCP.printers == store.printers)
         let corrupt = Data("invalid json".utf8)
         defaults.set(corrupt, forKey: "orca.ios.printer-connections.v1")
         let damaged = PrinterConnections(defaults: defaults, credentials: credentials)

@@ -27,6 +27,7 @@ xcrun --sdk "$SDK" swiftc -typecheck -parse-as-library -swift-version 5 \
   "$ROOT/ios/OrcaSlicerApp/OrcaCloudAccount.swift" \
   "$ROOT/ios/OrcaSlicerApp/CloudAccountPanel.swift" \
   "$ROOT/ios/OrcaSlicerApp/FlashforgeClient.swift" \
+  "$ROOT/ios/OrcaSlicerApp/FlashforgeTCPClient.swift" \
   "$ROOT/ios/OrcaSlicerApp/NativePostProcessing.swift"
 
 python3 -m unittest discover -s "$ROOT/scripts/tests" -p test_ios_settings_catalog.py -v
@@ -69,8 +70,16 @@ xcrun --sdk macosx swiftc -parse-as-library -swift-version 5 \
 xcrun --sdk macosx swiftc -parse-as-library -swift-version 5 \
   "$ROOT/ios/OrcaSlicerApp/PrinterConnections.swift" \
   "$ROOT/ios/OrcaSlicerApp/FlashforgeClient.swift" \
+  "$ROOT/ios/OrcaSlicerApp/FlashforgeTCPClient.swift" \
   "$ROOT/ios/tests/flashforge_smoke.swift" -o "$TEST_DIR/flashforge"
 "$TEST_DIR/flashforge"
+
+xcrun --sdk macosx swiftc -parse-as-library -swift-version 5 \
+  "$ROOT/ios/OrcaSlicerApp/PrinterConnections.swift" \
+  "$ROOT/ios/OrcaSlicerApp/FlashforgeClient.swift" \
+  "$ROOT/ios/OrcaSlicerApp/FlashforgeTCPClient.swift" \
+  "$ROOT/ios/tests/flashforge_tcp_smoke.swift" -o "$TEST_DIR/flashforge-tcp"
+"$TEST_DIR/flashforge-tcp" "$ROOT/ios/tests/flashforge_tcp_server.py"
 xcrun --sdk macosx swiftc -parse-as-library -swift-version 5 \
   "$ROOT/ios/OrcaSlicerApp/PrinterConnections.swift" \
   "$ROOT/ios/OrcaSlicerApp/OrcaCloudAPI.swift" \
