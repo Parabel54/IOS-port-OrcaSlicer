@@ -22,7 +22,7 @@ session was unavailable. A matching label is not evidence of interaction parity.
 | Views / Home | Six-face camera cube, Home, direct View menu, orbit/pan/zoom, persistent perspective/orthographic choice; optional Auto Perspective with manual overrides; additional desktop preferences remain incomplete |
 | Global / Objects | Explicit target tabs; initial object layer height, walls, infill and filament overrides with reset to Global |
 | Filament colors | Native color pickers, project slots, object display colors and Filament preview default; persistent painted facet colors remain attached during live transforms; each physical slot has a grouped material preset picker; full per-slot parameter editing remains incomplete |
-| Mixed Filament | Native FilamentMixer color blending, 2/3 physical components, positive percentages totaling 100, linear height gradient/direction/per-object option |
+| Mixed Filament | Native FilamentMixer color blending, 2/3 physical components, positive percentages totaling 100, linear height gradient/direction/per-part option |
 | Mixed editing / custom curves | Existing slots expose proportion and linear-gradient editing with stable slot IDs. Imported custom curves and untouched ratio precision are preserved. Component replacement, curve editing and deletion remain incomplete |
 | Plugin manager | General desktop plugin runtime remains missing. Native Zmod processing is not compatibility with the 18 reported plugins |
 

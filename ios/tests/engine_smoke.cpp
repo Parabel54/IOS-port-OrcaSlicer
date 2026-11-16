@@ -576,7 +576,7 @@ int main(int argc, char **argv)
     if (!require(orca_session_add_mixed_filament(reopened.get(), mix_ids, bad_ratios, 2, 0, 0, 0) != 0,
                  "reject invalid mixed ratios") ||
         !require(orca_session_add_mixed_filament(reopened.get(), mix_ids, mix_ratios, 2, 1, 0, 1) == 0,
-                 "native mixed filament with per-object gradient") ||
+                 "native mixed filament with per-part gradient") ||
         !require(orca_session_get_option(reopened.get(), "filament_mixed_components", restored_value, sizeof(restored_value)) == 0 &&
                  std::string(restored_value).find("1,2") != std::string::npos, "mixed physical component metadata") ||
         !require(orca_session_get_option(reopened.get(), "filament_mixed_gradient_range", restored_value, sizeof(restored_value)) == 0 &&

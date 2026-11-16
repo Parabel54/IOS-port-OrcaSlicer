@@ -741,7 +741,7 @@ private struct MixedFilamentEditor: View {
                         Toggle("Blend along height", isOn: $gradient)
                         if gradient {
                             Toggle("Reverse direction", isOn: $reverse)
-                            Toggle("Restart for each object", isOn: $perPart)
+                            Toggle("Restart for each part", isOn: $perPart)
                             Text("The linear blend changes from 90/10 to 10/90 along the model height.")
                                 .font(.caption)
                         }
