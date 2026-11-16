@@ -114,6 +114,7 @@ struct FlashforgeTCPSmoke {
         let empty = try FlashforgeTCPClient(address: "printer.local", makeChannel: { preconditionFailure("Empty file opened a connection") })
         do { _ = try await empty.upload(source: source, klipper: false); preconditionFailure("Empty file accepted") }
         catch FlashforgeError.emptyFile {}
+        print("PASS: Flashforge TCP injected command, binary-transfer, failure and cancellation fixtures")
 
         // Exercise Foundation's actual TCP stream API against an independently
         // implemented loopback peer, including orderly close before M29/start.
@@ -127,8 +128,18 @@ struct FlashforgeTCPSmoke {
         server.standardOutput = output
         try server.run()
         defer { if server.isRunning { server.terminate() } }
-        let portLine = try output.fileHandleForReading.read(upToCount: 128) ?? Data()
-        let port = Int(String(decoding: portLine, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))!
+        try output.fileHandleForWriting.close()
+        // FileHandle may wait for the whole requested length on a pipe. Read
+        // the delimited port rather than waiting for bytes the peer never sends.
+        var portLine = Data()
+        while portLine.last != 10 {
+            let byte = try output.fileHandleForReading.read(upToCount: 1) ?? Data()
+            guard !byte.isEmpty, portLine.count < 8 else { throw FlashforgeTCPError.response }
+            portLine.append(byte)
+        }
+        guard let port = Int(String(decoding: portLine, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            throw FlashforgeTCPError.response
+        }
         let live = try FlashforgeTCPClient(address: "tcp://127.0.0.1:\(port)", waitForSave: {})
         let liveJob = try await live.upload(source: loopbackSource, klipper: false)
         try await live.start(liveJob)

@@ -373,6 +373,18 @@ ORCA_API int orca_session_model_info(
  */
 ORCA_API int orca_session_duplicate_object(orca_session_t *s, int index);
 
+/** Number of instances of one object, or <0 for an invalid object. */
+ORCA_API int orca_session_object_instance_count(orca_session_t *s, int index);
+
+/**
+ * Set the selected object's total instances (desktop Copies, 0..1000).
+ * Zero removes the object. Added instances share its mesh, settings and paint,
+ * retain the last instance's transform, and receive a diagonal bed-sized offset.
+ * Invalid input/failures leave the model and preview unchanged. Success returns
+ * 0; an unchanged count is a no-op. Independent objects use duplicate_object.
+ */
+ORCA_API int orca_session_set_object_instances(orca_session_t *s, int index, int count);
+
 /**
  * Export mesh for a single object (world space after instances).
  * Same layout as orca_session_export_mesh; free with orca_free.

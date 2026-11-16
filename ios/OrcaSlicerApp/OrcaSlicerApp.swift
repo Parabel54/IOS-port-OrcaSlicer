@@ -2266,6 +2266,8 @@ struct OrcaRootView: View {
                 toolChip("Duplicate", "plus.square.on.square") {
                     engine.duplicateSelected(); status = engine.lastMessage
                 }
+                toolChip("Copies", "square.stack.3d.up") { showMeshTools = true }
+                    .disabled(!engine.objectNames.indices.contains(engine.selectedObjectIndex))
                 toolChip("Delete", "trash") {
                     engine.deleteSelected(); status = engine.lastMessage
                 }
@@ -2291,6 +2293,30 @@ struct OrcaRootView: View {
                 )
         }
         .buttonStyle(.plain)
+    }
+
+    private var copiesMenu: some View {
+        let index = engine.selectedObjectIndex
+        let count = engine.objectInstanceCounts.indices.contains(index) ? engine.objectInstanceCounts[index] : 0
+        return Menu {
+            Button("Add instance") { setObjectCopies(count + 1) }.disabled(count >= 1000)
+            Button("Fewer instances") { setObjectCopies(count - 1) }.disabled(count < 1)
+            Button("Set number of copies…") { showMeshTools = true }
+        } label: {
+            Label("Copies", systemImage: "square.stack.3d.up")
+                .font(.system(size: 12, weight: .semibold))
+                .padding(.horizontal, 12).padding(.vertical, 8)
+                .foregroundStyle(OrcaTheme.text).background(OrcaTheme.elevated, in: Capsule())
+        }
+        .disabled(!engine.objectNames.indices.contains(index) || engine.sessionBusy || engine.sliceRunning || engine.presetsLoading)
+        .accessibilityIdentifier("object-copies-menu")
+    }
+
+    private func setObjectCopies(_ count: Int) {
+        Task { @MainActor in
+            if await engine.editMesh(.copies(count)) == false { operationError = engine.lastMessage }
+            status = engine.lastMessage
+        }
     }
 
     private var plateTabsRow: some View {
@@ -2581,6 +2607,7 @@ struct OrcaRootView: View {
                             if mainTab == .prepare {
                                 toolChip("Add", "plus") { showModelLibrary = true }.accessibilityIdentifier("model-library-shortcut")
                                 toolChip("Transform", "slider.horizontal.3") { showPlateInspector = true }
+                                copiesMenu
                                 toolChip("Mesh tools", "cube.transparent") { showMeshTools = true }
                                     .disabled(!engine.hasModel).accessibilityIdentifier("mesh-tools-shortcut")
                                 toolChip("Layer height", "slider.vertical.3") { showLayerHeights = true }
@@ -3964,8 +3991,12 @@ private struct MeshToolsPanel: View {
     @State private var partNames: [String] = []
     @State private var selectedPart = 0
     @State private var dropSplitObjects = true
+    @State private var copyCount = "1"
 
     private var hasSelection: Bool { engine.objectNames.indices.contains(engine.selectedObjectIndex) }
+    private var currentCopies: Int {
+        engine.objectInstanceCounts.indices.contains(engine.selectedObjectIndex) ? engine.objectInstanceCounts[engine.selectedObjectIndex] : 0
+    }
     private var secondObject: Int {
         if engine.objectNames.indices.contains(otherObject), otherObject != engine.selectedObjectIndex { return otherObject }
         return engine.objectNames.indices.first(where: { $0 != engine.selectedObjectIndex }) ?? -1
@@ -3980,6 +4011,25 @@ private struct MeshToolsPanel: View {
                 }
                 if !hasSelection { Text("Select one object for split, simplify, cut and boolean operations.").font(.caption) }
             }
+            Section("Copies") {
+                LabeledContent("Current copies", value: currentCopies.formatted())
+                HStack {
+                    Button("Add instance") { run(.copies(currentCopies + 1)) }
+                        .disabled(currentCopies >= 1000).accessibilityIdentifier("add-instance")
+                    Spacer()
+                    Button("Fewer instances") { run(.copies(currentCopies - 1)) }
+                        .disabled(currentCopies < 1).accessibilityIdentifier("fewer-instances")
+                }.buttonStyle(.bordered)
+                TextField("Total copies (0–1000)", text: $copyCount).keyboardType(.numberPad)
+                Button("Set number of copies") {
+                    guard let count = Int(copyCount), (0...1000).contains(count) else {
+                        failure = String(localized: "Choose a copy count between 0 and 1000"); return
+                    }
+                    run(.copies(count))
+                }.accessibilityIdentifier("set-object-copies")
+                Text("Copies share this object's parts, paint and settings. Use Duplicate for an independent object. A count of 0 removes the object; Undo restores it. Arrange positions the copies on the bed.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }.disabled(!hasSelection)
             Section("Repair") {
                 Button(hasSelection ? "Repair selected object" : "Repair all objects") { run(.repair) }.accessibilityIdentifier("repair-mesh")
                 Text("Repair uses the engine's mesh repair tools. It cannot reconstruct every damaged model.").font(.caption).foregroundStyle(.secondary)
@@ -4046,9 +4096,10 @@ private struct MeshToolsPanel: View {
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
             }
         }
-        .onAppear { setCutMiddle(); refreshParts() }
+        .onAppear { setCutMiddle(); refreshParts(); copyCount = String(currentCopies) }
         .onChange(of: cutAxis) { _ in setCutMiddle() }
-        .onChange(of: engine.selectedObjectIndex) { _ in setCutMiddle(); refreshParts() }
+        .onChange(of: engine.selectedObjectIndex) { _ in setCutMiddle(); refreshParts(); copyCount = String(currentCopies) }
+        .onChange(of: engine.objectInstanceCounts) { _ in copyCount = String(currentCopies) }
         .onChange(of: engine.sessionBusy) { busy in if !busy { refreshParts() } }
         .alert("Mesh operation failed", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("OK", role: .cancel) {}

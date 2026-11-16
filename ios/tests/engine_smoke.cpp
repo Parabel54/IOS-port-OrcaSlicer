@@ -109,6 +109,85 @@ int main(int argc, char **argv)
                      std::string(value) == "1", "3MF snapshot retains object overrides")) return 4;
         std::printf("PASS: native object setting ownership, isolation, strict edits, reset and 3MF persistence\n");
     }
+    {
+        std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+            copies(orca_session_create(argv[2]), orca_session_destroy);
+        diagnostic_session = copies.get();
+        if (!require(orca_session_set_printable_area(copies.get(), 200, 200, 200) == 0 &&
+                     orca_session_add_primitive(copies.get(), 0, 12, 8, 6) == 0 &&
+                     orca_session_add_primitive(copies.get(), 0, 3, 3, 3) == 1 &&
+                     orca_session_scale_object_axes(copies.get(), 0, 1.5f, 0.75f, 1.25f) == 0 &&
+                     orca_session_rotate_object_axis(copies.get(), 0, 2, 29) == 0 &&
+                     orca_session_set_object_option(copies.get(), 0, "wall_loops", "5") == 0 &&
+                     orca_session_paint_fill(copies.get(), 0, 2, 1) > 0,
+                     "transformed painted instance fixture")) return 4;
+        auto mesh = [&] {
+            float *positions = nullptr; uint32_t *indices = nullptr;
+            size_t vertices = 0, count = 0;
+            std::pair<std::vector<float>, std::vector<uint32_t>> result;
+            if (orca_session_export_object_mesh(copies.get(), 0, &positions, &vertices, &indices, &count) == 0) {
+                result.first.assign(positions, positions + 3 * vertices);
+                result.second.assign(indices, indices + count);
+            }
+            orca_free(positions); orca_free(indices);
+            return result;
+        };
+        auto same_mesh = [&](const auto &expected) {
+            const auto actual = mesh();
+            if (actual.first.size() != expected.first.size() || actual.second != expected.second)
+                return false;
+            for (size_t i = 0; i < actual.first.size(); ++i)
+                if (std::fabs(actual.first[i] - expected.first[i]) > 0.001f)
+                    return false;
+            return true;
+        };
+        const auto single = mesh();
+        int painted = 0, after_paint = 0;
+        if (!require(!single.first.empty() && orca_session_object_instance_count(copies.get(), 0) == 1 &&
+                     orca_session_paint_stats(copies.get(), 0, 2, 1, &painted) == 0,
+                     "single instance mesh and shared paint") ||
+            !require(orca_session_set_object_instances(copies.get(), 0, 3) == 0 &&
+                     orca_session_object_count(copies.get()) == 2 &&
+                     orca_session_object_instance_count(copies.get(), 0) == 3 &&
+                     orca_session_object_instance_count(copies.get(), 1) == 1,
+                     "copies add instances without independent objects or neighbor changes")) return 4;
+        const auto triple = mesh();
+        if (!require(triple.first.size() == single.first.size() * 3 && triple.second.size() == single.second.size() * 3,
+                     "instance mesh export includes every copy")) return 4;
+        for (size_t instance = 0; instance < 3; ++instance)
+            for (size_t i = 0; i < single.first.size(); ++i) {
+                const float offset = i % 3 == 2 ? 0 : float(instance) * 10;
+                if (!require(std::fabs(triple.first[instance * single.first.size() + i] - single.first[i] - offset) < 0.001f,
+                             "copies preserve rotated/scaled mesh and original height with desktop bed offset")) return 4;
+            }
+        char override_value[32]{};
+        const std::string instance_snapshot = directory + "/instances.3mf";
+        if (!require(orca_session_paint_stats(copies.get(), 0, 2, 1, &after_paint) == 0 && after_paint == painted &&
+                     orca_session_get_object_option(copies.get(), 0, "wall_loops", override_value, sizeof(override_value)) == 0 &&
+                     std::string(override_value) == "5" &&
+                     orca_session_snapshot(copies.get(), instance_snapshot.c_str()) == 0,
+                     "instance edits retain shared object overrides and painting")) return 4;
+        for (const auto &bad : std::vector<std::pair<int, int>>{{-1, 2}, {2, 2}, {0, -1}, {0, 1001}})
+            if (!require(orca_session_set_object_instances(copies.get(), bad.first, bad.second) < 0 && mesh() == triple,
+                         "invalid instance edit preserves transformed geometry")) return 4;
+        if (!require(orca_session_set_object_instances(copies.get(), 0, 1) == 0 && mesh() == single,
+                     "fewer instances retains the original transform") ||
+            !require(orca_session_restore_snapshot(copies.get(), instance_snapshot.c_str()) == 0 && same_mesh(triple) &&
+                     orca_session_object_instance_count(copies.get(), 0) == 3,
+                     "3MF restores instance transforms/counts") ||
+            !require(orca_session_set_object_instances(copies.get(), 0, 0) == 0 &&
+                     orca_session_object_count(copies.get()) == 1 && orca_session_object_instance_count(copies.get(), 0) == 1 &&
+                     orca_session_set_object_instances(copies.get(), 0, 0) == 0 && orca_session_object_count(copies.get()) == 0,
+                     "zero copies removes only the selected object and supports empty plates") ||
+            !require(orca_session_restore_snapshot(copies.get(), instance_snapshot.c_str()) == 0 && same_mesh(triple),
+                     "snapshot restores copies after deleting the final object")) return 4;
+        if (!require(orca_session_set_object_instances(copies.get(), 0, 1000) == 0 &&
+                     orca_session_object_instance_count(copies.get(), 0) == 1000 &&
+                     orca_session_object_instance_count(copies.get(), 1) == 1,
+                     "desktop maximum copy count remains valid and isolated")) return 4;
+        std::printf("PASS: native object instances, desktop offsets, retained transform/settings/paint, strict edits, fewer/zero copies and 3MF restore\n");
+    }
+    diagnostic_session = session.get();
     if (!require(orca_option_tooltip("layer_height") && std::string(orca_option_tooltip("layer_height")).size() > 20 &&
                  !orca_option_tooltip("not_a_setting") && !orca_option_tooltip(nullptr),
                  "settings help comes from native definitions with explicit missing-key results")) return 4;
@@ -721,6 +800,21 @@ int main(int argc, char **argv)
             orca_session_last_slice_stats(viewer.get(), &taken_seconds, &taken_volume, &taken_layers) != 0;
         orca_free(opened);
         if (!require(imported_invalidated, "successful config import invalidates prior paths and statistics")) return 11;
+        if (!require(orca_session_load_gcode(viewer.get(), output.c_str()) == 0 &&
+                     orca_session_set_object_instances(viewer.get(), 0, -1) < 0 &&
+                     orca_session_set_object_instances(viewer.get(), 0, 1) == 0,
+                     "invalid and unchanged copy counts preserve a loaded preview")) return 11;
+        opened = nullptr; opened_count = 0; opened_total = 0;
+        const bool copies_preserved = orca_session_export_preview(viewer.get(), &opened, &opened_count, &opened_total) == 0 &&
+            opened_count == retained_count;
+        orca_free(opened);
+        if (!require(copies_preserved && orca_session_set_object_instances(viewer.get(), 0, 2) == 0,
+                     "valid copy edit follows preserved preview")) return 11;
+        opened = nullptr; opened_count = 0; opened_total = 0;
+        const bool copies_invalidated = orca_session_export_preview(viewer.get(), &opened, &opened_count, &opened_total) != 0 &&
+            orca_session_last_slice_stats(viewer.get(), &taken_seconds, &taken_volume, &taken_layers) != 0;
+        orca_free(opened);
+        if (!require(copies_invalidated, "accepted copy edit invalidates old toolpaths/statistics")) return 11;
         diagnostic_session = session.get();
         viewer.reset();
         if (!require(owned_records[0].end_x == first_endpoint && owned_records[owned_count - 1].end_z == last_endpoint,

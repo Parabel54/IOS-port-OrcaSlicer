@@ -2397,6 +2397,66 @@ int orca_session_duplicate_object(orca_session_t *s, int index)
     }
 }
 
+int orca_session_object_instance_count(orca_session_t *s, int index)
+{
+    if (!s || !s->has_model || index < 0 || index >= int(s->model.objects.size()))
+        return -1;
+    const ModelObject *object = s->model.objects[size_t(index)];
+    return object ? int(object->instances.size()) : -1;
+}
+
+int orca_session_set_object_instances(orca_session_t *s, int index, int count)
+{
+    if (!s)
+        return -1;
+    s->clear_error();
+    if (!s->has_model || index < 0 || index >= int(s->model.objects.size()) || count < 0 || count > 1000) {
+        s->set_error(_u8L("Choose an object and a copy count between 0 and 1000."));
+        return -2;
+    }
+    try {
+        const ModelObject *source = s->model.objects[size_t(index)];
+        if (!source || source->instances.empty()) {
+            s->set_error(_u8L("The selected object has no instances to copy."));
+            return -2;
+        }
+        if (size_t(count) == source->instances.size())
+            return 0;
+        // Stage the model as with split/3MF edits: allocation failure must not
+        // leave a partially increased copy count or disturb processed preview.
+        Model staged = s->model;
+        ModelObject *object = staged.objects[size_t(index)];
+        if (count == 0) {
+            staged.delete_object(size_t(index));
+        } else {
+            float width = 0, depth = 0, height = 0;
+            const double spacing = orca_session_bed_size(s, &width, &depth, &height) == 0 &&
+                std::isfinite(width) && std::isfinite(depth) && width > 0 && depth > 0 ?
+                0.05 * std::max(width, depth) : 15.0;
+            const ModelInstance *last = object->instances.back();
+            const size_t initial_count = object->instances.size();
+            for (size_t i = initial_count; i < size_t(count); ++i) {
+                const double offset = spacing * double(i - initial_count + 1);
+                object->add_instance(last->get_offset() + Vec3d(offset, offset, 0),
+                    last->get_scaling_factor(), last->get_rotation(), last->get_mirror());
+            }
+            while (object->instances.size() > size_t(count))
+                object->delete_last_instance();
+            object->invalidate_bounding_box();
+        }
+        s->model = std::move(staged);
+        s->has_model = !s->model.objects.empty();
+        invalidate_object_slice(s);
+        return 0;
+    } catch (const std::exception &ex) {
+        s->set_error(std::string("set_object_instances: ") + ex.what());
+        return -3;
+    } catch (...) {
+        s->set_error("set_object_instances: unknown error");
+        return -3;
+    }
+}
+
 int orca_session_export_object_mesh(
     orca_session_t *s,
     int index,

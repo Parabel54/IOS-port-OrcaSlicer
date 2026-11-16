@@ -49,6 +49,7 @@ final class OrcaEngine: ObservableObject {
     }
     @Published var objectCount: Int = 0
     @Published var objectNames: [String] = []
+    @Published private(set) var objectInstanceCounts: [Int] = []
     @Published var selectedObjectIndex: Int = -1 // -1 = all / none
     @Published var boundsText: String = ""
     /// Model AABB Z (mm) for cut mid-height default
@@ -981,6 +982,7 @@ final class OrcaEngine: ObservableObject {
         guard let s = session, hasModel else {
             objectNames = []
             objectCount = 0
+            objectInstanceCounts = []
             return
         }
         let n = Int(orca_session_object_count(s))
@@ -995,6 +997,7 @@ final class OrcaEngine: ObservableObject {
             }
         }
         objectNames = names
+        objectInstanceCounts = (0..<n).map { max(0, Int(orca_session_object_instance_count(s, Int32($0)))) }
         if selectedObjectIndex >= n {
             selectedObjectIndex = n > 0 ? 0 : -1
         }
@@ -1999,6 +2002,7 @@ final class OrcaEngine: ObservableObject {
             if !hasModel {
                 modelName = nil
                 objectNames = []
+                objectInstanceCounts = []
                 objectCount = 0
                 modelVolumeMm3 = 0
                 selectedObjectIndex = -1
@@ -2034,6 +2038,7 @@ final class OrcaEngine: ObservableObject {
         modelName = nil
         objectNames = []
         objectCount = 0
+        objectInstanceCounts = []
         modelVolumeMm3 = 0
         selectedObjectIndex = -1
         refreshMesh()
@@ -3382,6 +3387,7 @@ final class OrcaEngine: ObservableObject {
         case split(toObjects: Bool, part: Int, dropToBed: Bool)
         case layOnFace(SIMD3<Float>)
         case layerHeights(LayerHeightEdit)
+        case copies(Int)
         case simplify(Int)
         case cut(position: Float, axis: Int, upper: Bool, lower: Bool)
         case boolean(other: Int, operation: Int, removeOther: Bool)
@@ -3392,6 +3398,7 @@ final class OrcaEngine: ObservableObject {
             case .split(let objects, _, _): return objects ? String(localized: "Split to objects") : String(localized: "Split to parts")
             case .layOnFace: return String(localized: "Lay on face")
             case .layerHeights: return String(localized: "Variable layer height")
+            case .copies: return String(localized: "Set number of copies")
             case .simplify: return String(localized: "Simplify mesh")
             case .cut: return String(localized: "Cut model")
             case .boolean: return String(localized: "Boolean operation")
@@ -3400,7 +3407,7 @@ final class OrcaEngine: ObservableObject {
 
         var preservesModelOnFailure: Bool {
             switch self {
-            case .split, .layOnFace, .layerHeights: return true
+            case .split, .layOnFace, .layerHeights, .copies: return true
             default: return false
             }
         }
@@ -3420,6 +3427,9 @@ final class OrcaEngine: ObservableObject {
             lastMessage = "Select one object first"; return false
         }
         switch edit {
+        case .copies(let count):
+            guard (0...1000).contains(count) else { lastMessage = String(localized: "Choose a copy count between 0 and 1000"); return false }
+            if objectInstanceCounts.indices.contains(index), objectInstanceCounts[index] == count { return true }
         case .simplify(let target):
             guard target >= 0 && target <= Int(Int32.max) else { lastMessage = "Invalid triangle count"; return false }
         case .cut(let position, let axis, let upper, let lower):
@@ -3455,6 +3465,7 @@ final class OrcaEngine: ObservableObject {
             }
             let code: Int32
             switch edit {
+            case .copies(let count): code = orca_session_set_object_instances(s, Int32(index), Int32(count))
             case .repair: code = orca_session_repair_mesh(s, Int32(index))
             case .split(let objects, let part, let drop):
                 code = orca_session_split_model(s, Int32(index), Int32(part), objects ? 1 : 0, drop ? 1 : 0)
@@ -3497,6 +3508,7 @@ final class OrcaEngine: ObservableObject {
         else if result.0 >= 0, case .split(let objects, _, _) = edit, objects { selectedObjectIndex = -1 }
         refreshObjectList()
         hasModel = objectCount > 0
+        if !hasModel { modelName = nil; selectedObjectIndex = -1; clearPaintOverlay() }
         refreshMesh(); refreshBounds(); refreshModelInfo()
         if result.0 < 0 {
             lastMessage = result.1 + (result.2 ? " The previous model could not be restored; its snapshot is available in Undo." : "")
@@ -3509,6 +3521,7 @@ final class OrcaEngine: ObservableObject {
             lastMessage = "Split into \(result.0) \(objects ? "objects" : "parts")"
         }
         if case .layOnFace = edit { explodeFactor = 0; lastMessage = "Placed selected face on the bed" }
+        if case .copies = edit { lastMessage = String(localized: "Updated object copies") }
         return true
         #else
         lastMessage = "Engine not linked"; return false

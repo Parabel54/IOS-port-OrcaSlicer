@@ -43,6 +43,17 @@ algorithms. Heavy model/profile operations prepare a 3MF undo snapshot and run
 outside the UI thread. Staged failures preserve the original model/preview.
 Successful edits invalidate derived slicing. Undo, Redo and public project saving
 honor the same gate, including keyboard-triggered actions.
+
+Copies uses native instances of one object rather than independent duplicated
+objects. Add instance, Fewer instances and a total count from 0 to 1000 retain
+the last instance's scale/rotation/mirror and height, with desktop's diagonal
+offset proportional to the bed size. Zero removes the selected object. Meshes,
+parts, paint and object settings remain shared. Instance changes stage a model
+copy, invalidate processed slicing only after commit and use the asynchronous
+snapshot/undo dispatcher. Unchanged counts preserve preview and undo history.
+Counts and transforms persist in native 3MF; individual-instance tree selection
+and gizmos remain distinct from this object-level count editor.
+
 Synchronous model, painting, plate, calibration and global-setting entry points
 also check import/slice/preset ownership themselves. Disabled controls alone do
 not serialize keyboard commands or notification handlers. Accepted global edits
