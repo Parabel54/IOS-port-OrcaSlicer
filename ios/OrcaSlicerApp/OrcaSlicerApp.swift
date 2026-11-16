@@ -237,7 +237,7 @@ struct OrcaRootView: View {
                             }
                             VStack(spacing: 0) {
                                 // Bound the scene and inspector to the space left by the
-                                // tabs and footer. Their content must not displace Files
+                                // tabs and footer. Their content must not displace actions
                                 // on short phones or in a compact landscape window.
                                 GeometryReader { workspace in
                                     VStack(spacing: 0) {
@@ -253,8 +253,10 @@ struct OrcaRootView: View {
                                         }
                                     }.frame(width: workspace.size.width, height: workspace.size.height).clipped()
                                 }
+                                // Clipping drawing alone does not bound SwiftUI hit testing.
+                                .contentShape(Rectangle())
                                 compactControls.padding(.vertical, 4).background(OrcaTheme.panel)
-                                    .fixedSize(horizontal: false, vertical: true).layoutPriority(2)
+                                    .fixedSize(horizontal: false, vertical: true).layoutPriority(2).zIndex(1)
                             }
                         }
                     }
@@ -461,7 +463,7 @@ struct OrcaRootView: View {
 
     private func headerBar(inlineInspector: Bool) -> AnyView {
         AnyView(HStack(spacing: 8) {
-            OrcaLogoMark().frame(width: 26, height: 26).accessibilityHidden(true)
+            fileProjectMenu
             Text("OrcaSlicer").font(.headline).lineLimit(1).minimumScaleFactor(0.75)
                 .foregroundStyle(OrcaTheme.text)
             Spacer(minLength: 8)
@@ -1949,26 +1951,29 @@ struct OrcaRootView: View {
         }
     }
 
+    private var fileProjectMenu: AnyView {
+        AnyView(Menu {
+            Button("Open model…") { requestDocumentPicker(.model(append: false)) }
+            Button("Add model…") { requestDocumentPicker(.model(append: true)) }
+            Button("Add primitive or handy model…") { showModelLibrary = true }.accessibilityIdentifier("model-library")
+            Divider()
+            Button("Import process preset…") { requestDocumentPicker(.settings(preset: 0)) }
+            Button("Import filament preset…") { requestDocumentPicker(.settings(preset: 1)) }
+            Button("Import configuration…") { requestDocumentPicker(.settings(preset: nil)) }
+            Button("Export user presets…") { exportUserPresetsZip() }
+            Button("Export configuration…") { exportShareURL = engine.exportConfigJSON() }
+            if let exportShareURL { ShareLink(item: exportShareURL) { Text("Share configuration") } }
+            Divider()
+            Button("Save project…") { projectURL = engine.saveProject3MF(); status = engine.lastMessage }
+                .disabled(!engine.hasModel)
+            if let projectURL { ShareLink(item: projectURL) { Text("Share project") } }
+            Button("Calibration…") { showCalibration = true }
+        } label: { Image(systemName: "folder").frame(width: 44, height: 44) }
+            .accessibilityLabel(Text("File and project actions")))
+    }
+
     private var compactControls: AnyView {
         AnyView(HStack(spacing: 8) {
-            Menu {
-                Button("Open model…") { requestDocumentPicker(.model(append: false)) }
-                Button("Add model…") { requestDocumentPicker(.model(append: true)) }
-                Button("Add primitive or handy model…") { showModelLibrary = true }.accessibilityIdentifier("model-library")
-                Divider()
-                Button("Import process preset…") { requestDocumentPicker(.settings(preset: 0)) }
-                Button("Import filament preset…") { requestDocumentPicker(.settings(preset: 1)) }
-                Button("Import configuration…") { requestDocumentPicker(.settings(preset: nil)) }
-                Button("Export user presets…") { exportUserPresetsZip() }
-                Button("Export configuration…") { exportShareURL = engine.exportConfigJSON() }
-                if let exportShareURL { ShareLink(item: exportShareURL) { Text("Share configuration") } }
-                Divider()
-                Button("Save project…") { projectURL = engine.saveProject3MF(); status = engine.lastMessage }
-                    .disabled(!engine.hasModel)
-                if let projectURL { ShareLink(item: projectURL) { Text("Share project") } }
-                Button("Calibration…") { showCalibration = true }
-            } label: { Image(systemName: "folder").frame(width: 44, height: 44) }
-                .accessibilityLabel(Text("File and project actions"))
             Button {
                 if mainTab == .preview { showPreviewControls.toggle() } else { showPlateInspector = true }
             } label: {
