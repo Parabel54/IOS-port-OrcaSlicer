@@ -435,7 +435,9 @@ struct ProcessSettingsBrowser: View {
                     }
                 }
             }
-            Button("Add filament") { engine.addProjectFilament(); applyError = engine.lastMessage }
+            Button("Add filament") {
+                applyError = engine.addProjectFilament() ? nil : engine.lastMessage
+            }
                 .disabled(engine.projectFilamentColors.count >= engine.maximumProjectFilaments)
             NavigationLink("Add mixed filament…") { MixedFilamentEditor(engine: engine) }
                 .disabled(engine.physicalFilamentIndices.count < 2 || engine.projectFilamentColors.count >= engine.maximumPaintFilaments)

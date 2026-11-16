@@ -1538,13 +1538,17 @@ final class OrcaEngine: ObservableObject {
         return ok
     }
 
-    func addProjectFilament() {
+    @discardableResult
+    func addProjectFilament() -> Bool {
         #if ORCA_LINKED
-        guard let session else { return }
+        guard let session else { return false }
         let result = orca_session_add_project_filament(session)
         lastMessage = result == 0 ? "Filament added" :
             (orca_session_last_error(session).map { String(cString: $0) } ?? "Cannot add filament")
         if result == 0 { refreshObjectFilamentColors(); invalidateSlice() }
+        return result == 0
+        #else
+        return false
         #endif
     }
 
