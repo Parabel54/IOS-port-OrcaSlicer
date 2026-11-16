@@ -9,6 +9,18 @@ HELPER = Path(__file__).resolve().parents[2] / 'scripts/ios_simulator_helpers.sh
 
 
 class SimulatorRuntimeTests(unittest.TestCase):
+    def test_bounded_command_preserves_stdin_and_failure_status(self):
+        for code, status, marker in (("print('child-script-ran')", 0, 'child-script-ran'),
+                                     ("raise SystemExit(7)", 1, '')):
+            with self.subTest(code=code):
+                result = subprocess.run(['bash', '-c', 'source "$1"; ios_test_run 5 python3 -',
+                                         'stdin-test', str(HELPER)], input=code, capture_output=True, text=True)
+                if status == 0:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(marker, result.stdout)
+                else:
+                    self.assertNotEqual(result.returncode, 0, 'Child validation failure must fail the phase')
+
     def select(self, sdk, runtimes):
         with tempfile.TemporaryDirectory() as directory:
             fixture = Path(directory) / 'runtimes.json'

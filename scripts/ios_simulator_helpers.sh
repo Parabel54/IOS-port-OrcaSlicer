@@ -3,7 +3,8 @@
 # CoreSimulator commands can stall without returning a diagnostic. Bound each
 # phase so a failed install/launch cannot block subsequent validation builds.
 ios_test_run() {
-  python3 - "$@" <<'PYRUN'
+  # Keep the caller's stdin separate from the Python wrapper's own source.
+  python3 - "$@" 3<&0 <<'PYRUN'
 from pathlib import Path
 import subprocess
 import sys
@@ -13,7 +14,7 @@ command = sys.argv[2:]
 print('Simulator phase: ' + ' '.join(command[:4]), file=sys.stderr, flush=True)
 started = time.time()
 try:
-    subprocess.run(command, timeout=seconds, check=True)
+    subprocess.run(command, stdin=3, timeout=seconds, check=True)
 except subprocess.TimeoutExpired:
     # CoreSimulator can lose a cold launch request before starting any process.
     # Never retry an app that is running, crashed, or returned an actual error.
@@ -26,7 +27,7 @@ except subprocess.TimeoutExpired:
     if status.returncode or command[4] in status.stdout or crashed:
         raise
     print('CoreSimulator did not start Orca; retrying its launch request once', file=sys.stderr, flush=True)
-    subprocess.run(command, timeout=seconds, check=True)
+    subprocess.run(command, stdin=3, timeout=seconds, check=True)
 PYRUN
 }
 

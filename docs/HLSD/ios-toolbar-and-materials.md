@@ -229,3 +229,20 @@ cannot establish native slicing, full-app UI or physical-device compatibility.
 The first renderer SDK attempts exposed two metadata attachment errors (SCNNode
 has no userData; an instance method must qualify the static association key).
 Both are corrected in source; new SDK/runtime results remain separate evidence.
+
+Progressive visibility retains the original job arrays and compact merged cursor
+intervals, rather than retaining a second filtered path tree. Partial edges are
+sampled from the original route and clipped to those intervals; hidden travel or
+features cannot reappear in the partial overlay. Regression cases exercise
+filtered original-source reuse and inclined endpoints. Dense-device memory
+acceptance remains separate from this ownership correction.
+
+The first standalone graphics job returned green without copying its receipt:
+its timeout wrapper consumed the stdin intended for the child validation script.
+Artifact inspection found no receipt and app logs showed progressive GPU failure,
+despite primitive-range/static geometry checks passing. The wrapper now forwards
+caller stdin through a separate descriptor, with a regression that also requires
+child failures to fail the phase. Empty prefix batches are explicitly hidden;
+the GPU check now also exercises a nonempty prefix and logs pixel measurements.
+That earlier green job is not accepted as a graphics pass. Fresh results are
+required for these fixes.

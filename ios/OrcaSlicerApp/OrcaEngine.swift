@@ -1195,7 +1195,7 @@ final class OrcaEngine: ObservableObject {
         let work = Task.detached(priority: .userInitiated) {
             let filtered = geo.filtered(minZ: lo, maxZ: hi, hiddenFeatures: hidden,
                 enabledMoves: moves, hiddenTools: tools, hiddenFilaments: filaments, throughMove: through, cancelled: { Task.isCancelled })
-            return filtered.makeNode(color: .white, colorMode: mode, showToolMarker: toolMarker, showCenterOfGravity: cog, lightweight: lightweight, trackCursor: true, cancelled: { Task.isCancelled })
+            return filtered.makeNode(color: .white, colorMode: mode, showToolMarker: toolMarker, showCenterOfGravity: cog, lightweight: lightweight, trackCursor: true, cursorSource: geo, cancelled: { Task.isCancelled })
         }
         previewBuildTask = work
         Task { @MainActor [weak self] in
