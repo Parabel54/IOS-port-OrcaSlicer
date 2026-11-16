@@ -1952,24 +1952,40 @@ struct OrcaRootView: View {
     }
 
     private var fileProjectMenu: AnyView {
-        AnyView(Menu {
-            Button("Open model…") { requestDocumentPicker(.model(append: false)) }
-            Button("Add model…") { requestDocumentPicker(.model(append: true)) }
-            Button("Add primitive or handy model…") { showModelLibrary = true }.accessibilityIdentifier("model-library")
-            Divider()
-            Button("Import process preset…") { requestDocumentPicker(.settings(preset: 0)) }
-            Button("Import filament preset…") { requestDocumentPicker(.settings(preset: 1)) }
-            Button("Import configuration…") { requestDocumentPicker(.settings(preset: nil)) }
-            Button("Export user presets…") { exportUserPresetsZip() }
-            Button("Export configuration…") { exportShareURL = engine.exportConfigJSON() }
-            if let exportShareURL { ShareLink(item: exportShareURL) { Text("Share configuration") } }
-            Divider()
-            Button("Save project…") { projectURL = engine.saveProject3MF(); status = engine.lastMessage }
-                .disabled(!engine.hasModel)
-            if let projectURL { ShareLink(item: projectURL) { Text("Share project") } }
-            Button("Calibration…") { showCalibration = true }
-        } label: { Image(systemName: "folder").frame(width: 44, height: 44) }
-            .accessibilityLabel(Text("File and project actions")))
+        AnyView(NativeProjectMenu { button in
+            let models = UIMenu(options: .displayInline, children: [
+                UIAction(title: "Open model…") { _ in requestDocumentPicker(.model(append: false)) },
+                UIAction(title: "Add model…") { _ in requestDocumentPicker(.model(append: true)) },
+                UIAction(title: "Add primitive or handy model…") { _ in showModelLibrary = true }
+            ])
+            var presets: [UIMenuElement] = [
+                UIAction(title: "Import process preset…") { _ in requestDocumentPicker(.settings(preset: 0)) },
+                UIAction(title: "Import filament preset…") { _ in requestDocumentPicker(.settings(preset: 1)) },
+                UIAction(title: "Import configuration…") { _ in requestDocumentPicker(.settings(preset: nil)) },
+                UIAction(title: "Export user presets…") { [weak button] _ in
+                    if let button { exportUserPresetsZip(from: button) }
+                },
+                UIAction(title: "Export configuration…") { _ in exportShareURL = engine.exportConfigJSON() }
+            ]
+            if let url = exportShareURL {
+                presets.append(UIAction(title: "Share configuration") { [weak button] _ in
+                    if let button { NativeProjectMenu.share(url, from: button) }
+                })
+            }
+            var project: [UIMenuElement] = [
+                UIAction(title: "Save project…", attributes: engine.hasModel ? [] : .disabled) { _ in
+                    projectURL = engine.saveProject3MF(); status = engine.lastMessage
+                }
+            ]
+            if let url = projectURL {
+                project.append(UIAction(title: "Share project") { [weak button] _ in
+                    if let button { NativeProjectMenu.share(url, from: button) }
+                })
+            }
+            project.append(UIAction(title: "Calibration…") { _ in showCalibration = true })
+            return UIMenu(children: [models, UIMenu(options: .displayInline, children: presets),
+                                    UIMenu(options: .displayInline, children: project)])
+        }.frame(width: 44, height: 44))
     }
 
     private var compactControls: AnyView {
@@ -3546,18 +3562,12 @@ struct OrcaRootView: View {
         }
     }
 
-    private func exportUserPresetsZip() {
+    private func exportUserPresetsZip(from source: UIView) {
         // Prefer store-only ZIP of Documents/OrcaSlicer/user_presets (portable bundle)
         if let zipURL = engine.exportPresetBundleZip() {
             presetBundleShareURL = zipURL
             status = engine.lastMessage
-            #if canImport(UIKit)
-            if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-               let root = scene.windows.first?.rootViewController {
-                let av = UIActivityViewController(activityItems: [zipURL], applicationActivities: nil)
-                root.present(av, animated: true)
-            }
-            #endif
+            NativeProjectMenu.share(zipURL, from: source)
             return
         }
         // Fallback: NSFileCoordinator package zip of the directory
@@ -3573,13 +3583,7 @@ struct OrcaRootView: View {
         if FileManager.default.fileExists(atPath: zipURL.path) {
             presetBundleShareURL = zipURL
             status = "Preset bundle ready: \(zipURL.lastPathComponent)"
-            #if canImport(UIKit)
-            if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-               let root = scene.windows.first?.rootViewController {
-                let av = UIActivityViewController(activityItems: [zipURL], applicationActivities: nil)
-                root.present(av, animated: true)
-            }
-            #endif
+            NativeProjectMenu.share(zipURL, from: source)
         } else {
             status = err?.localizedDescription ?? engine.lastMessage
         }

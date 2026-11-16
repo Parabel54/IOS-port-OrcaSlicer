@@ -2,6 +2,39 @@ import SwiftUI
 import UniformTypeIdentifiers
 import UIKit
 
+// Dynamic SwiftUI menus containing sharing actions exposed nested, unhittable
+// accessibility elements in the compact workspace. UIKit owns this tap target
+// and its menu, including VoiceOver activation and iPad sharing anchors.
+struct NativeProjectMenu: UIViewRepresentable {
+    let makeMenu: (UIButton) -> UIMenu
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeUIView(context: Context) -> UIButton {
+        let button = UIButton(type: .system)
+        button.setImage(UIImage(systemName: "folder"), for: .normal)
+        button.showsMenuAsPrimaryAction = true
+        button.isAccessibilityElement = true
+        button.accessibilityLabel = "File and project actions"
+        return button
+    }
+
+    func updateUIView(_ button: UIButton, context: Context) {
+        button.isEnabled = isEnabled
+        button.menu = makeMenu(button)
+    }
+
+    static func share(_ url: URL, from source: UIView) {
+        DispatchQueue.main.async { [weak source] in
+            guard let source, var presenter = source.window?.rootViewController else { return }
+            while let presented = presenter.presentedViewController { presenter = presented }
+            let activity = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+            activity.popoverPresentationController?.sourceView = source
+            activity.popoverPresentationController?.sourceRect = source.bounds
+            presenter.present(activity, animated: true)
+        }
+    }
+}
+
 struct NativeDocumentPicker: UIViewControllerRepresentable {
     let settingsOnly: Bool
     let onPick: (URL) -> Void
