@@ -154,8 +154,7 @@ without changing component or slot IDs, model painting, preset identity or other
 process/printer/material values. Invalid edits retain the previous configuration.
 The editor preserves original ratio text when only gradient settings change and
 skips a no-op save. Imported custom curves/nonstandard ranges stay intact and
-are not replaced by the linear controls. Changing components, custom-curve
-editing and deletion remain separate work. Native cases cover invalid edit
+are not replaced by the linear controls. Custom-curve editing and deletion remain separate work. Native cases cover invalid edit
 isolation, ratio/reverse-gradient updates, identity/process preservation and
 byte-identical retained custom curves; native execution is pending.
 
