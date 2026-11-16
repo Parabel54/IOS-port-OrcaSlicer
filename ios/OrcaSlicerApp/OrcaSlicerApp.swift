@@ -236,18 +236,25 @@ struct OrcaRootView: View {
                                 Divider()
                             }
                             VStack(spacing: 0) {
-                                plateStage
-                                    .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity).clipped()
-                                    .allowsHitTesting(!isSlicing && !engine.presetsLoading && !engine.sessionBusy)
-                                if mainTab == .preview && !engine.previewLayerHeights.isEmpty {
-                                    previewLayerBar.padding(.horizontal, 12).padding(.vertical, 6)
-                                        .background(OrcaTheme.panel)
-                                }
-                                if mainTab == .preview && showPreviewControls {
-                                    previewControlsPanel.frame(height: min(320, geo.size.height * 0.4))
+                                // Bound the scene and inspector to the space left by the
+                                // tabs and footer. Their content must not displace Files
+                                // on short phones or in a compact landscape window.
+                                GeometryReader { workspace in
+                                    VStack(spacing: 0) {
+                                        plateStage
+                                            .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity).clipped()
+                                            .allowsHitTesting(!isSlicing && !engine.presetsLoading && !engine.sessionBusy)
+                                        if mainTab == .preview && !engine.previewLayerHeights.isEmpty {
+                                            previewLayerBar.padding(.horizontal, 12).padding(.vertical, 6)
+                                                .background(OrcaTheme.panel)
+                                        }
+                                        if mainTab == .preview && showPreviewControls {
+                                            previewControlsPanel.frame(height: min(320, workspace.size.height * 0.4))
+                                        }
+                                    }.frame(width: workspace.size.width, height: workspace.size.height).clipped()
                                 }
                                 compactControls.padding(.vertical, 4).background(OrcaTheme.panel)
-                                    .fixedSize(horizontal: false, vertical: true).layoutPriority(1)
+                                    .fixedSize(horizontal: false, vertical: true).layoutPriority(2)
                             }
                         }
                     }
@@ -2418,6 +2425,7 @@ struct OrcaRootView: View {
                             }
                         }.padding(8)
                     }
+                    modelInformationMenu
                     toolChip("Home", "house") { fitCameraRequest = UUID() }
                         .accessibilityIdentifier("camera-home").padding(.trailing, 8)
                     }
@@ -2441,24 +2449,6 @@ struct OrcaRootView: View {
                     }.padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
                 }
             }
-            .overlay(alignment: .topLeading) {
-                Menu {
-                    if mainTab == .preview && engine.previewFromFile {
-                        if let url = engine.gcodeURL { Text(url.lastPathComponent) }
-                        Text("G-code preview")
-                    } else {
-                        if let name = engine.modelName { Text(name) }
-                        if !engine.boundsText.isEmpty { Text(engine.boundsText) }
-                        if !engine.selectedPrinter.isEmpty { Text(engine.selectedPrinter) }
-                    }
-                    if !status.isEmpty { Text(status) }
-                    Text(engine.lastSliceStatsText)
-                    Button("Fit model") { fitCameraRequest = UUID() }
-                } label: {
-                    Image(systemName: "info.circle").frame(width: 44, height: 44)
-                        .background(.ultraThinMaterial, in: Circle())
-                }.accessibilityLabel(Text("Model and slice information")).padding(8)
-            }
             .overlay(alignment: .topTrailing) {
                 gizmoStatusBadges.padding(12)
             }
@@ -2468,6 +2458,24 @@ struct OrcaRootView: View {
                 }
             }
         })
+    }
+
+    private var modelInformationMenu: some View {
+        Menu {
+            if mainTab == .preview && engine.previewFromFile {
+                if let url = engine.gcodeURL { Text(url.lastPathComponent) }
+                Text("G-code preview")
+            } else {
+                if let name = engine.modelName { Text(name) }
+                if !engine.boundsText.isEmpty { Text(engine.boundsText) }
+                if !engine.selectedPrinter.isEmpty { Text(engine.selectedPrinter) }
+            }
+            if !status.isEmpty { Text(status) }
+            Text(engine.lastSliceStatsText)
+            Button("Fit model") { fitCameraRequest = UUID() }
+        } label: {
+            Image(systemName: "info.circle").frame(width: 44, height: 44)
+        }.accessibilityLabel(Text("Model and slice information"))
     }
 
     @ViewBuilder

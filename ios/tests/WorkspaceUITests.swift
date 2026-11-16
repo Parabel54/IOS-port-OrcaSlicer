@@ -35,10 +35,17 @@ final class WorkspaceUITests: XCTestCase {
         app.buttons["camera-home"].tap()
         app.buttons["Preview controls"].tap()
         XCTAssertTrue(app.buttons["Hide preview controls"].waitForExistence(timeout: 10))
+        let information = app.buttons["Model and slice information"]
+        XCTAssertTrue(information.isHittable)
+        XCTAssertFalse(information.frame.intersects(app.otherElements["Navigation cube"].frame),
+                       "The information action must not cover the navigation cube")
         for title in ["Prepare", "Preview", "Device"] {
             XCTAssertTrue(app.buttons[title].isHittable, "Main tabs must remain visible above Preview controls")
         }
-        app.buttons["File and project actions"].tap()
+        let files = app.buttons["File and project actions"]
+        XCTAssertTrue(files.isHittable, "Preview controls must leave the Files action reachable")
+        XCTAssertTrue(app.buttons["Export G-code"].isHittable, "Preview controls must leave Export reachable")
+        files.tap()
         XCTAssertTrue(app.buttons["Open model…"].waitForExistence(timeout: 10))
         app.buttons["Open model…"].tap()
         openSlicedPreview(app)
