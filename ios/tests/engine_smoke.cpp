@@ -546,6 +546,17 @@ int main(int argc, char **argv)
     if (!require(orca_session_export_config(session.get(),
                  (data_dir + "/user_presets/filament/Legacy Full Filament.json").c_str()) == 0,
                  "write legacy full-snapshot filament fixture")) return 17;
+    {
+        std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+            variants(orca_session_create(argv[2]), orca_session_destroy);
+        diagnostic_session = variants.get();
+        if (!require(orca_session_set_data_dir(variants.get(), data_dir.c_str()) == 0 &&
+                     orca_session_set_option(variants.get(), "filament_type", "PLA") == 0 &&
+                     orca_session_set_option(variants.get(), "filament_extruder_variant", "Direct Drive Standard;Direct Drive High Flow") == 0 &&
+                     orca_session_set_option(variants.get(), "nozzle_temperature", "220,230") == 0 &&
+                     orca_session_save_user_filament(variants.get(), "Variant Slot") == 0,
+                     "single material with two nozzle variants")) return 17;
+    }
     std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
         reopened(orca_session_create(argv[2]), orca_session_destroy);
     if (!require(orca_session_set_data_dir(reopened.get(), data_dir.c_str()) == 0 &&
@@ -571,6 +582,44 @@ int main(int argc, char **argv)
         !require(orca_session_get_option(reopened.get(), "filament_mixed_gradient_range", restored_value, sizeof(restored_value)) == 0 &&
                  std::string(restored_value).find("0.9000,0.1000") != std::string::npos, "desktop linear gradient metadata")) return 17;
     std::printf("PASS: native mixed filament ratios, validation and gradient metadata\n");
+    diagnostic_session = reopened.get();
+    if (!require(orca_session_set_option(reopened.get(), "nozzle_temperature", "245,211,240") == 0 &&
+                 orca_session_save_user_filament(reopened.get(), "Slot Target") == 0 &&
+                 orca_session_select_filament(reopened.get(), "Legacy Full Filament") == 0 &&
+                 orca_session_set_option(reopened.get(), "nozzle_temperature", "235,211,240") == 0 &&
+                 orca_session_set_option(reopened.get(), "layer_height", "0.13") == 0,
+                 "slot assignment fixture and unsaved process edit")) return 17;
+    char colors_before[4096]{};
+    orca_session_get_option(reopened.get(), "filament_colour", colors_before, sizeof(colors_before));
+    if (!require(orca_session_set_filament_slot(reopened.get(), 1, "Slot Target") == 0,
+                 "assign personal profile to second physical slot") ||
+        !require(std::string(orca_session_selected_filament(reopened.get())) == "Legacy Full Filament" &&
+                 std::string(orca_session_filament_slot_name(reopened.get(), 1)) == "Slot Target",
+                 "second-slot assignment does not steal first-slot selection") ||
+        !require(orca_session_get_option(reopened.get(), "nozzle_temperature", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value) == "235,245,240", "only the selected physical slot changes") ||
+        !require(orca_session_get_option(reopened.get(), "layer_height", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value) == "0.13", "slot assignment preserves unsaved process edits") ||
+        !require(orca_session_get_option(reopened.get(), "filament_colour", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value) == colors_before, "slot assignment preserves project colors") ||
+        !require(orca_session_set_filament_slot(reopened.get(), 1, "missing profile") < 0 &&
+                 orca_session_set_filament_slot(reopened.get(), 99, "Slot Target") < 0 &&
+                 orca_session_set_filament_slot(reopened.get(), 2, "Slot Target") < 0,
+                 "reject missing profiles, invalid slots and direct mixed-slot assignment")) return 17;
+    if (!require(orca_session_set_option(reopened.get(), "nozzle_temperature", "235,213,240") == 0 &&
+                 orca_session_set_filament_slot(reopened.get(), 0, "Slot Target") == 0,
+                 "assign first physical slot and its derived mix") ||
+        !require(orca_session_get_option(reopened.get(), "nozzle_temperature", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value) == "245,213,245", "update dependent mix while retaining other slot edits") ||
+        !require(orca_session_set_filament_slot(reopened.get(), 1, "Variant Slot") == 0 &&
+                 orca_session_get_option(reopened.get(), "nozzle_temperature", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value) == "245,220,230,245", "material assignment retains both nozzle variants") ||
+        !require(orca_session_set_filament_slot(reopened.get(), 1, "Slot Target") == 0 &&
+                 orca_session_get_option(reopened.get(), "nozzle_temperature", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value) == "245,245,245", "variant removal keeps other filament values aligned") ||
+        !require(orca_session_get_option(reopened.get(), "filament_mixed_gradient_range", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value).find("0.9000,0.1000") != std::string::npos, "preset changes retain mixing metadata")) return 17;
+    std::printf("PASS: per-slot personal materials, process/color isolation, dependent mixes and nozzle-variant alignment\n");
     std::printf("PASS: independent process/filament persistence, canonical names and native filament addition\n");
     std::printf("PASS: primitives, centered axis scaling, flush matrix repair and processed preview height\n");
     std::printf("PASS: native preset bundle, cloud printer/filament catalog, selection and profile export\n");

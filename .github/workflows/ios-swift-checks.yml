@@ -14,7 +14,8 @@ permissions:
   contents: read
 jobs:
   check:
-    runs-on: macos-15
+    # SDK type checks cross-compile arm64; host fixtures run on this Mac's CPU.
+    runs-on: macos-15-intel
     timeout-minutes: 15
     strategy:
       fail-fast: false

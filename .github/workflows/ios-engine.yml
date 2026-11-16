@@ -21,7 +21,8 @@ permissions:
   contents: read
 jobs:
   build:
-    runs-on: macos-15
+    # Device builds cross-compile arm64; arm64 simulator execution needs ARM.
+    runs-on: ${{ matrix.sdk == 'iphoneos' && 'macos-15-intel' || 'macos-15' }}
     timeout-minutes: 360
     env:
       CCACHE_DIR: ${{ github.workspace }}/.cache/ios-ccache-${{ matrix.sdk }}

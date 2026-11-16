@@ -18,6 +18,7 @@
 #include <exception>
 #include <fstream>
 #include <iterator>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <nlohmann/json.hpp>
@@ -1475,6 +1476,10 @@ const char *orca_session_filament_slot_name(orca_session_t *s, int slot)
     if (!s || !s->preset_bundle || slot < 0)
         return empty.c_str();
     try {
+        if (slot == 0 && s->active_filament_from_user) {
+            empty = s->selected_filament_cache;
+            return empty.c_str();
+        }
         const auto &fps = s->preset_bundle->filament_presets;
         if (size_t(slot) >= fps.size())
             return empty.c_str();
@@ -1591,24 +1596,193 @@ int orca_session_add_mixed_filament(orca_session_t *s, const int *components, co
     }
 }
 
+static void normalize_first_filament(DynamicPrintConfig &config, const DynamicPrintConfig &source)
+{
+    // Older mobile saves could contain vectors for the whole project. A
+    // material profile represents its first filament, with that filament's
+    // nozzle variants; never treat the other slots as additional variants.
+    const auto *diameters = source.option<ConfigOptionFloats>("filament_diameter");
+    const size_t slots = diameters ? std::max(size_t(1), diameters->size()) : 1;
+    const auto *variants = source.option<ConfigOptionStrings>("filament_extruder_variant");
+    const auto *self = source.option<ConfigOptionInts>("filament_self_index");
+    std::vector<size_t> first_variants;
+    if (self && variants && self->size() == variants->size()) {
+        for (size_t i = 0; i < self->size(); ++i) if (self->values[i] == 1) first_variants.push_back(i);
+    } else {
+        if (variants && variants->size() % slots != 0)
+            throw std::runtime_error("Legacy filament profile has ambiguous nozzle variants");
+        const size_t count = variants ? std::max(size_t(1), variants->size() / slots) : 1;
+        for (size_t i = 0; i < count; ++i) first_variants.push_back(i);
+    }
+    if (first_variants.empty()) throw std::runtime_error("Filament profile has no first-filament nozzle variant");
+    for (const auto &key : Preset::filament_options()) {
+        if (key == "compatible_printers" || key == "compatible_prints") continue;
+        auto *values = dynamic_cast<ConfigOptionVectorBase *>(config.option(key));
+        if (!values || values->empty()) continue;
+        const bool variant = key == "filament_extruder_variant" || filament_options_with_variant.count(key);
+        if (filament_dev_options.count(key) && slots == 1) continue;
+        if (filament_dev_options.count(key) && values->size() != slots)
+            throw std::runtime_error("Legacy filament device settings cannot be assigned to one slot");
+        std::unique_ptr<ConfigOption> original(values->clone());
+        const size_t count = variant ? first_variants.size() : 1;
+        values->resize(count);
+        for (size_t i = 0; i < count; ++i) {
+            const auto *from = static_cast<const ConfigOptionVectorBase *>(original.get());
+            values->set_at(from, i, variant && from->size() != slots ? std::min(first_variants[i], from->size() - 1) : 0);
+        }
+    }
+}
+
+static Preset slot_filament_preset(orca_session_t *s, const std::string &name)
+{
+    auto &collection = s->preset_bundle->filaments;
+    if (std::find(s->user_filament_names.begin(), s->user_filament_names.end(), name) == s->user_filament_names.end()) {
+        const Preset *preset = collection.find_preset(name, false);
+        if (!preset) throw std::runtime_error("Filament preset not found: " + name);
+        return *preset;
+    }
+    const fs::path path = s->user_filament_dir() / (name + ".json");
+    DynamicPrintConfig loaded;
+    std::map<std::string, std::string> values;
+    std::string reason;
+    ConfigSubstitutionContext substitutions(ForwardCompatibilitySubstitutionRule::Enable);
+    if (loaded.load_from_json(path.string(), substitutions, true, values, reason) != 0)
+        throw std::runtime_error(reason.empty() ? "Cannot read filament preset" : reason);
+    Preset preset(Preset::TYPE_FILAMENT, name, false);
+    preset.config = collection.default_preset().config;
+    preset.config.apply_only(loaded, Preset::filament_options(), true);
+    normalize_first_filament(preset.config, loaded);
+    preset.config.option<ConfigOptionStrings>("filament_settings_id", true)->values = {name};
+    preset.file = path.string();
+    preset.loaded = true;
+    return preset;
+}
+
 int orca_session_set_filament_slot(orca_session_t *s, int slot, const char *filament_name)
 {
-    if (!s || !s->preset_bundle || !filament_name || slot < 0)
-        return -1;
+    if (!s || !s->preset_bundle || !filament_name) return -1;
+    s->clear_error();
     try {
-        // Grow filament_presets if needed
-        auto &fps = s->preset_bundle->filament_presets;
-        if (size_t(slot) >= fps.size())
-            fps.resize(size_t(slot) + 1, fps.empty() ? std::string() : fps.front());
-        if (!s->preset_bundle->filaments.select_preset_by_name(filament_name, true)) {
-            s->set_error(std::string("filament not found: ") + filament_name);
-            return -2;
+        ensure_default_config(s);
+        const DynamicPrintConfig old = s->config;
+        const auto *colors = old.option<ConfigOptionStrings>("filament_colour");
+        const auto *mixed = old.option<ConfigOptionBools>("filament_is_mixed");
+        if (!colors || slot < 0 || size_t(slot) >= colors->values.size() ||
+            (mixed && size_t(slot) < mixed->size() && mixed->values[size_t(slot)]))
+            throw std::runtime_error("Choose an existing physical filament slot");
+        auto &bundle = *s->preset_bundle;
+        const size_t count = colors->size();
+        std::vector<Preset> materials;
+        for (size_t i = 0; i < count; ++i) {
+            const std::string name = i == 0 && s->active_filament_from_user ? s->selected_filament_cache :
+                i < bundle.filament_presets.size() ? bundle.filament_presets[i] : bundle.filaments.get_selected_preset_name();
+            materials.emplace_back(slot_filament_preset(s, name));
         }
-        s->preset_bundle->set_filament_preset(size_t(slot), filament_name);
-        if (slot == 0)
-            s->sync_selected_caches();
-        s->config = s->preset_bundle->full_config(true);
+        const std::vector<Preset> previous = materials;
+        materials[size_t(slot)] = slot_filament_preset(s, filament_name);
+        std::set<size_t> changed{size_t(slot)};
+        const auto *components = old.option<ConfigOptionStrings>("filament_mixed_components");
+        for (size_t i = 0; mixed && components && i < count && i < mixed->size() && i < components->size(); ++i) {
+            if (!mixed->values[i]) continue;
+            const auto ids = parse_mixed_components(components->values[i]);
+            std::string type;
+            for (unsigned id : ids) {
+                if (id == 0 || id > count) throw std::runtime_error("Mixed filament has an invalid component");
+                const auto *material_type = materials[id - 1].config.option<ConfigOptionStrings>("filament_type");
+                const std::string current = material_type && !material_type->empty() ? material_type->values.front() : "";
+                if (!type.empty() && current != type) throw std::runtime_error("Mixed filament components must use the same material type");
+                type = current;
+            }
+            if (!ids.empty() && ids.front() == unsigned(slot + 1)) {
+                materials[i] = materials[size_t(slot)];
+                changed.insert(i);
+            }
+        }
+        Preset printer = bundle.printers.get_edited_preset(), process = bundle.prints.get_edited_preset();
+        DynamicPrintConfig project = bundle.project_config;
+        project.apply_only(old, project.keys(), true);
+        // Compose only a few selected presets, not a copy of the full catalog.
+        // Retain native variant IDs/strings; slicing resolves them for the printer.
+        DynamicPrintConfig updated = PresetBundle::construct_full_config(printer, process, project, materials, false, std::nullopt);
+        const auto &ids = updated.option<ConfigOptionInts>("filament_self_index")->values;
+        const auto &variants = updated.option<ConfigOptionStrings>("filament_extruder_variant")->values;
+        std::vector<int> per_slot;
+        for (size_t i = 0; i < count; ++i) per_slot.push_back(int(i + 1));
+        const auto *old_ids = old.option<ConfigOptionInts>("filament_self_index");
+        const auto *old_variants = old.option<ConfigOptionStrings>("filament_extruder_variant");
+        const auto old_map = old_ids && old_variants && old_ids->size() == old_variants->size() &&
+            !old_ids->empty() && *std::max_element(old_ids->values.begin(), old_ids->values.end()) == int(count) ?
+            map_variant_indices(variants, ids, old_variants->values, old_ids->values) :
+            map_variant_indices(variants, ids, {}, per_slot);
+        const auto slot_map = map_variant_indices(variants, ids, {}, per_slot);
+        for (const auto &key : Preset::filament_options()) {
+            if (key == "filament_extruder_variant" || key == "filament_settings_id") continue;
+            const auto *from = dynamic_cast<const ConfigOptionVectorBase *>(old.option(key));
+            auto *to = dynamic_cast<ConfigOptionVectorBase *>(updated.option(key));
+            if (!from || !to) {
+                if (slot != 0 && old.option(key)) updated.set_key_value(key, old.option(key)->clone());
+                continue;
+            }
+            if (from->empty() && !filament_dev_options.count(key)) continue;
+            if (filament_dev_options.count(key)) {
+                // Device options have variable-length chunks per filament.
+                std::vector<size_t> lengths;
+                size_t total = 0;
+                for (size_t i = 0; i < count; ++i) {
+                    const auto &cfg = previous[i].config;
+                    const auto *part = dynamic_cast<const ConfigOptionVectorBase *>(cfg.option(key));
+                    size_t length = 0;
+                    if (from->size() == 1 || from->size() == count) length = 1;
+                    else if (!from->empty() && part) length = part->size();
+                    lengths.push_back(length);
+                    total += lengths.back();
+                }
+                if (total != from->size() && from->size() != 1)
+                    throw std::runtime_error("Cannot map existing filament device settings: " + key);
+                to->clear();
+                size_t offset = 0, target = 0;
+                for (size_t i = 0; i < count; ++i) {
+                    const auto *part = dynamic_cast<const ConfigOptionVectorBase *>(materials[i].config.option(key));
+                    const size_t length = changed.count(i) ? (part ? part->size() : 0) : lengths[i];
+                    for (size_t j = 0; j < length; ++j)
+                        to->set_at(changed.count(i) ? part : from, target++, changed.count(i) ? j : std::min(offset + j, from->size() - 1));
+                    offset += lengths[i];
+                }
+            } else if (filament_options_with_variant.count(key) && to->size() == ids.size()) {
+                const auto &mapping = from->size() == count || from->size() == 1 ? slot_map : old_map;
+                for (size_t i = 0; i < ids.size(); ++i)
+                    if (ids[i] > 0 && !changed.count(size_t(ids[i] - 1)) && mapping[i] >= 0)
+                        to->set_at(from, i, std::min(size_t(mapping[i]), from->size() - 1));
+            } else if (to->size() == count) {
+                for (size_t i = 0; i < count; ++i)
+                    if (!changed.count(i)) to->set_at(from, i, std::min(i, from->size() - 1));
+            }
+        }
+        updated.apply_only(old, Preset::print_options(), true);
+        updated.apply_only(old, Preset::printer_options(), true);
+        updated.apply_only(project, project.keys(), true);
+        // Register legacy personal profiles with the native collection so later
+        // full_config calls can resolve these slot names too.
+        for (const auto &material : materials)
+            if (std::find(s->user_filament_names.begin(), s->user_filament_names.end(), material.name) != s->user_filament_names.end())
+                bundle.filaments.load_preset(material.file, material.name, material.config, false);
+        bundle.project_config = std::move(project);
+        bundle.set_num_filaments(unsigned(count), colors->values.back());
+        for (size_t i = 0; i < count; ++i) bundle.set_filament_preset(i, materials[i].name);
+        if (slot == 0) {
+            bundle.filaments.select_preset_by_name(filament_name, true);
+            s->selected_filament_cache = filament_name;
+            s->active_filament_from_user = std::find(s->user_filament_names.begin(), s->user_filament_names.end(), filament_name) != s->user_filament_names.end();
+        }
+        s->config = std::move(updated);
         s->has_config = true;
+        s->has_slice_stats = false;
+        s->preview_segments.clear();
+        s->preview_total_segments = 0;
+        s->preview_metadata.clear();
+        s->role_names.clear();
+        s->role_meters.clear();
+        s->role_grams.clear();
         return 0;
     } catch (const std::exception &ex) {
         s->set_error(std::string("set_filament_slot: ") + ex.what());
@@ -2401,6 +2575,7 @@ int orca_session_save_user_filament(orca_session_t *s, const char *name)
         fs::path path = dir / (safe + ".json");
         DynamicPrintConfig scoped;
         scoped.apply_only(s->config, Preset::filament_options(), true);
+        normalize_first_filament(scoped, s->config);
         scoped.save_to_json(path.string(), safe, "User", SoftFever_VERSION);
         s->scan_user_filament_presets();
         s->refresh_name_caches();

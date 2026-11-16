@@ -266,7 +266,9 @@ ORCA_API int orca_session_extruder_count(orca_session_t *s);
 ORCA_API const char *orca_session_filament_slot_name(orca_session_t *s, int slot);
 
 /**
- * Assign system/user filament preset to extruder slot, then apply_presets.
+ * Assign a system/cloud/personal profile to an existing physical project slot.
+ * Preserves process/printer/project settings and other slot values; resolves
+ * native nozzle variants and updates mixes derived from this physical slot.
  */
 ORCA_API int orca_session_set_filament_slot(
     orca_session_t *s, int slot, const char *filament_name);

@@ -21,7 +21,7 @@ session was unavailable. A matching label is not evidence of interaction parity.
 | Assembly view/tools | Explode/assembly-related operations are partial; full desktop assembly workflow missing |
 | Views / Home | Six-face camera cube, Home, direct View menu, orbit/pan/zoom, persistent perspective/orthographic choice; optional Auto Perspective with manual overrides; additional desktop preferences remain incomplete |
 | Global / Objects | Explicit target tabs; initial object layer height, walls, infill and filament overrides with reset to Global |
-| Filament colors | Native color pickers, project slots, object display colors and Filament preview default; persistent painted facet colors remain attached during live transforms; full per-slot preset editor remains incomplete |
+| Filament colors | Native color pickers, project slots, object display colors and Filament preview default; persistent painted facet colors remain attached during live transforms; each physical slot has a grouped material preset picker; full per-slot parameter editing remains incomplete |
 | Mixed Filament | Native FilamentMixer color blending, 2/3 physical components, positive percentages totaling 100, linear height gradient/direction/per-object option |
 | Mixed custom curves | Existing core data retained on import; desktop custom curve and existing-slot editing/deletion are not exposed on mobile yet |
 | Plugin manager | General desktop plugin runtime remains missing. Native Zmod processing is not compatibility with the 18 reported plugins |
@@ -98,3 +98,20 @@ tools chip reaches the panel without expanding the workspace. Per-part transform
 selection is still separate work. Regression coverage uses disconnected solids,
 nonuniform scale/rotation/translation, bounds, overrides, paint, snapshot restore
 and failed-split preview retention. Native compile/runtime results remain pending.
+
+Physical filament slots now select system/cloud/personal profiles through the
+shared grouped picker. Native construct_full_config and map_variant_indices
+compose nozzle variants while retaining other slots' edited values; process,
+printer, project colors and mixing metadata are reapplied independently. Mixed
+slots derived from a changed first component follow its profile; incompatible
+component material types are rejected before applying configuration. Legacy
+project-wide filament saves are scoped to their first material and variants on
+read; new saves use that scope. Ambiguous device/variant layouts return errors
+instead of guessing. Full per-slot parameter editing remains separate work.
+
+CI runner annotations for source 9bf56cfefec7 report hosted ARM capacity failures
+without executed steps. SDK checks and device cross-builds now use the standard
+macos-15-intel image; simulator execution retains macos-15 ARM. Device artifacts
+still target arm64 and retain the binary/SDK audit. Host architecture remains
+part of dependency/compiler/engine cache keys. This changes job scheduling,
+not the app's supported iOS architectures.

@@ -170,6 +170,7 @@ extension OrcaEngine {
 private struct PresetSelectionList: View {
     @ObservedObject var engine: OrcaEngine
     let scope: Int
+    var filamentSlot: Int? = nil
     var onChanged: () -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var search = ""
@@ -179,7 +180,8 @@ private struct PresetSelectionList: View {
         scope == 2 ? engine.printerNames : scope == 1 ? engine.filamentNames : engine.processNames
     }
     private var selected: String {
-        scope == 2 ? engine.selectedPrinter : scope == 1 ? engine.selectedFilament : engine.selectedProcess
+        if let filamentSlot { return engine.filamentSlotName(filamentSlot) }
+        return scope == 2 ? engine.selectedPrinter : scope == 1 ? engine.selectedFilament : engine.selectedProcess
     }
     private func origin(_ name: String) -> Int { engine.presetOrigins[scope]?[name] ?? 0 }
     private func matching(_ group: Int) -> [String] {
@@ -204,8 +206,11 @@ private struct PresetSelectionList: View {
                         Section(group == 2 ? "Orca Cloud" : group == 1 ? "User presets" : "System presets") {
                             ForEach(rows, id: \.self) { name in
                                 Button {
-                                    let ok = scope == 2 ? engine.selectPrinter(name) :
-                                        scope == 1 ? engine.selectFilament(name) : engine.selectProcess(name)
+                                    let ok: Bool
+                                    if let filamentSlot { ok = engine.setFilamentSlot(filamentSlot, name: name) }
+                                    else if scope == 2 { ok = engine.selectPrinter(name) }
+                                    else if scope == 1 { ok = engine.selectFilament(name) }
+                                    else { ok = engine.selectProcess(name) }
                                     if ok { onChanged(); dismiss() } else { selectionFailed = true }
                                 } label: {
                                     HStack {
@@ -427,6 +432,14 @@ struct ProcessSettingsBrowser: View {
                 ColorPicker("Filament \(index + 1)", selection: Binding(get: { colorValue(hex) }, set: {
                     if !engine.setProjectFilamentColor(index, hex: colorHex($0)) { applyError = engine.lastMessage }
                 }), supportsOpacity: false)
+                NavigationLink {
+                    PresetSelectionList(engine: engine, scope: 1, filamentSlot: index) { reload(); onChanged?() }
+                } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Material preset")
+                        Text(engine.filamentSlotName(index)).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                    }
+                }
                 } else {
                     HStack {
                         Text("Mixed filament \(index + 1)")

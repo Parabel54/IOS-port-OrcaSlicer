@@ -1616,10 +1616,13 @@ final class OrcaEngine: ObservableObject {
     @discardableResult
     func setFilamentSlot(_ slot: Int, name: String) -> Bool {
         #if ORCA_LINKED
-        guard let s = session else { return false }
+        guard let s = session, !sessionBusy, !sliceRunning, !presetsLoading else { return false }
         let rc = name.withCString { orca_session_set_filament_slot(s, Int32(slot), $0) }
         if rc == 0 {
             if slot == 0 { selectedFilament = name }
+            invalidateSlice()
+            refreshPresetLists()
+            if slot == 0 { persistSelection() }
             lastMessage = "Slot \(slot + 1): \(name)"
             return true
         }
