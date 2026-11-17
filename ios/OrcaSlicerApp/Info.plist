@@ -17,7 +17,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>2.5.0</string>
+	<string>$(MARKETING_VERSION)</string>
+	<key>OrcaProfileRevision</key>
+	<string>$(ORCA_PROFILE_REVISION)</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>LSRequiresIPhoneOS</key>
@@ -26,8 +28,6 @@
 	<true/>
 	<key>NSAppTransportSecurity</key>
 	<dict>
-		<key>NSAllowsArbitraryLoadsInLocalNetwork</key>
-		<true/>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
@@ -38,7 +38,7 @@
 		<string>_moonraker._tcp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>OrcaSlicer discovers and connects to Moonraker / OctoPrint / PrusaLink printers on your local network to upload G-code and read live temperatures.</string>
+	<string>OrcaSlicer connects to Flashforge, Moonraker, OctoPrint and PrusaLink printers on your local network to upload G-code and read printer status.</string>
 	<key>UIFileSharingEnabled</key>
 	<true/>
 	<key>UILaunchScreen</key>
@@ -51,7 +51,7 @@
 		<true/>
 	</dict>
 	<key>UIRequiresFullScreen</key>
-	<true/>
+	<false/>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
@@ -59,5 +59,240 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>UTImportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.orcaslicer.ios.stl</string>
+			<key>UTTypeDescription</key>
+			<string>STL model</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>stl</string>
+				</array>
+				<key>public.mime-type</key>
+				<string>model/stl</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.orcaslicer.ios.obj</string>
+			<key>UTTypeDescription</key>
+			<string>OBJ model</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>obj</string>
+				</array>
+				<key>public.mime-type</key>
+				<string>model/obj</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.orcaslicer.ios.3mf</string>
+			<key>UTTypeDescription</key>
+			<string>3MF model</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>3mf</string>
+				</array>
+				<key>public.mime-type</key>
+				<string>model/3mf</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.orcaslicer.ios.amf</string>
+			<key>UTTypeDescription</key>
+			<string>AMF model</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>amf</string>
+				</array>
+				<key>public.mime-type</key>
+				<string>application/amf+xml</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.orcaslicer.ios.orca-printer</string>
+			<key>UTTypeDescription</key>
+			<string>Orca printer presets</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.zip-archive</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>orca_printer</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.orcaslicer.ios.orca-filament</string>
+			<key>UTTypeDescription</key>
+			<string>Orca filament presets</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.zip-archive</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>orca_filament</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.orcaslicer.ios.orca-bundle</string>
+			<key>UTTypeDescription</key>
+			<string>Orca bundle presets</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.zip-archive</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>orca_bundle</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.orcaslicer.ios.gcode</string>
+			<key>UTTypeDescription</key>
+			<string>G-code toolpaths</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.plain-text</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>gcode</string>
+					<string>gco</string>
+					<string>g</string>
+				</array>
+				<key>public.mime-type</key>
+				<string>text/x-gcode</string>
+			</dict>
+		</dict>
+	</array>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>3D models and Orca settings</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>com.orcaslicer.ios.stl</string>
+				<string>com.orcaslicer.ios.obj</string>
+				<string>com.orcaslicer.ios.3mf</string>
+				<string>com.orcaslicer.ios.amf</string>
+				<string>public.json</string>
+				<string>public.standard-tesselated-geometry-format</string>
+				<string>org.3mfconsortium.3mf</string>
+				<string>public.geometry-definition-format</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Orca printer presets</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>com.orcaslicer.ios.orca-printer</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Orca filament presets</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>com.orcaslicer.ios.orca-filament</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Orca bundle presets</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>com.orcaslicer.ios.orca-bundle</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Orca preset ZIP archive</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.zip-archive</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>G-code Preview</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>com.orcaslicer.ios.gcode</string>
+			</array>
+		</dict>
+	</array>
+	<key>OrcaBuildRevision</key>
+	<string>$(ORCA_BUILD_REVISION)</string>
 </dict>
 </plist>

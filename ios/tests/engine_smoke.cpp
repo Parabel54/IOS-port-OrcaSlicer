@@ -1,0 +1,1314 @@
+// Exercise import -> slice -> processed preview -> export through the mobile ABI.
+#include "orca_slice_c_api.h"
+
+#include <algorithm>
+#include <cmath>
+#include <array>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <iterator>
+#include <limits>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+int main(int argc, char **argv)
+{
+    // Preserve completed fixture results even if a later test stalls or aborts.
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
+    std::printf("RUN: native mobile ABI integration fixtures\n");
+    if (argc != 3)
+        return 2;
+    const std::string directory = argv[1];
+    const std::string project = directory + "/cube.3mf";
+    const std::string output = directory + "/cube.gcode";
+    std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+        session(orca_session_create(argv[2]), orca_session_destroy);
+    if (!session)
+        return 3;
+    orca_session_t *diagnostic_session = session.get();
+    auto require = [&](bool condition, const char *message) {
+        if (!condition)
+            std::fprintf(stderr, "%s: %s\n", message, orca_session_last_error(diagnostic_session));
+        return condition;
+    };
+    {
+        const double automatic = std::numeric_limits<double>::quiet_NaN();
+        orca_gradient_anchor_t points[]{{0, 0.1, automatic, 0}, {1, 0.9, 0, automatic}};
+        const char *encoded = orca_gradient_curve_encode(points, 2);
+        if (!require(encoded != nullptr, "encode native custom curve with one-sided tangents")) return 4;
+        const std::string custom_curve = encoded;
+        const char *info = orca_gradient_curve_json(custom_curve.c_str());
+        if (!require(info && std::string(info).find("\"incoming\":null") != std::string::npos &&
+                     std::string(info).find("\"samples\":[") != std::string::npos,
+                     "native curve inspector exposes automatic tangents and preview samples") ||
+            !require(std::fabs(orca_gradient_curve_sample(custom_curve.c_str(), 0.25) - 0.225) < 1e-9,
+                     "custom Hermite tangents bend the native sampled curve") ||
+            !require(std::fabs(orca_gradient_curve_sample(custom_curve.c_str(), -1) - 0.1) < 1e-9 &&
+                     std::fabs(orca_gradient_curve_sample(custom_curve.c_str(), 2) - 0.9) < 1e-9,
+                     "native curve clamps samples outside its height interval")) return 4;
+        points[0].m_out = automatic; points[1].m_in = automatic;
+        encoded = orca_gradient_curve_encode(points, 2);
+        if (!require(encoded && std::fabs(orca_gradient_curve_sample(encoded, 0.25) - 0.3) < 1e-9,
+                     "automatic two-point curve uses native linear PCHIP defaults")) return 4;
+        points[1].x = 0;
+        if (!require(!orca_gradient_curve_encode(points, 2), "reject overlapping curve anchors")) return 4;
+        points[1].x = 0.00001;
+        if (!require(!orca_gradient_curve_encode(points, 2), "reject anchors collapsing in native four-decimal encoding")) return 4;
+        points[1].x = 1; points[0].y = 0;
+        if (!require(!orca_gradient_curve_encode(points, 2), "reject pure-color anchors outside native blend band")) return 4;
+        points[0].y = 0.1; points[0].m_out = std::numeric_limits<double>::infinity();
+        if (!require(!orca_gradient_curve_encode(points, 2), "reject infinite curve tangent") ||
+            !require(!orca_gradient_curve_json("0,0.5") && !orca_gradient_curve_encode(nullptr, 2) &&
+                     std::isnan(orca_gradient_curve_sample("", 0.5)) &&
+                     std::isnan(orca_gradient_curve_sample(custom_curve.c_str(), automatic)),
+                     "invalid curve helper inputs have explicit failure results")) return 4;
+        std::printf("PASS: native gradient curve encoding, inspection, Hermite/PCHIP samples and invalid-input rejection\n");
+    }
+    {
+        std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+            objects(orca_session_create(argv[2]), orca_session_destroy);
+        diagnostic_session = objects.get();
+        char value[256]{}, global[256]{};
+        if (!require(orca_object_option_supported("enable_support") == 1 &&
+                     orca_object_option_supported("support_type") == 1 &&
+                     orca_object_option_supported("wall_loops") == 1 &&
+                     orca_object_option_supported("extruder") == 1,
+                     "object settings use native object/region ownership") ||
+            !require(orca_object_option_supported("nozzle_diameter") == 0 &&
+                     orca_object_option_supported("post_process") == 0 &&
+                     orca_object_option_supported("not_a_setting") == 0 &&
+                     orca_object_option_supported(nullptr) == 0,
+                     "global/printer-only settings cannot become object overrides") ||
+            !require(orca_session_add_primitive(objects.get(), 0, 10, 10, 10) == 0 &&
+                     orca_session_add_primitive(objects.get(), 0, 10, 10, 10) == 1 &&
+                     orca_session_set_option(objects.get(), "wall_loops", "2") == 0 &&
+                     orca_session_set_object_option(objects.get(), 0, "wall_loops", "5") == 0 &&
+                     orca_session_set_object_option(objects.get(), 0, "enable_support", "1") == 0 &&
+                     orca_session_set_object_option(objects.get(), 0, "support_type", "tree(auto)") == 0,
+                     "object overrides cover numeric, boolean and enum editors") ||
+            !require(orca_session_get_option(objects.get(), "wall_loops", global, sizeof(global)) == 0 &&
+                     std::string(global) == "2" &&
+                     orca_session_get_object_option(objects.get(), 1, "wall_loops", value, sizeof(value)) != 0,
+                     "object edits leave global and neighboring object unchanged") ||
+            !require(orca_session_set_object_option(objects.get(), 0, "wall_loops", "invalid") != 0 &&
+                     orca_session_set_object_option(objects.get(), 0, "support_type", "not_a_support_type") != 0 &&
+                     orca_session_set_object_option(objects.get(), 0, "nozzle_diameter", "0.8") != 0 &&
+                     orca_session_get_object_option(objects.get(), 0, "wall_loops", value, sizeof(value)) == 0 &&
+                     std::string(value) == "5" &&
+                     orca_session_get_object_option(objects.get(), 0, "support_type", value, sizeof(value)) == 0 &&
+                     std::string(value) == "tree(auto)", "invalid edits preserve existing object values")) return 4;
+        const std::string object_snapshot = directory + "/object-settings.3mf";
+        if (!require(orca_session_set_option(objects.get(), "layer_height", "0.17") == 0 &&
+                     orca_session_snapshot(objects.get(), object_snapshot.c_str()) == 0 &&
+                     orca_session_set_option(objects.get(), "layer_height", "0.29") == 0 &&
+                     orca_session_erase_object_option(objects.get(), 0, "wall_loops") == 0 &&
+                     orca_session_get_object_option(objects.get(), 0, "wall_loops", value, sizeof(value)) != 0,
+                     "reset object setting removes the override") ||
+            !require(orca_session_restore_snapshot(objects.get(), object_snapshot.c_str()) == 0 &&
+                     orca_session_get_object_option(objects.get(), 0, "wall_loops", value, sizeof(value)) == 0 &&
+                     std::string(value) == "5" &&
+                     orca_session_get_object_option(objects.get(), 0, "enable_support", value, sizeof(value)) == 0 &&
+                     std::string(value) == "1" &&
+                     orca_session_get_object_option(objects.get(), 0, "support_type", value, sizeof(value)) == 0 &&
+                     std::string(value) == "tree(auto)" &&
+                     orca_session_get_option(objects.get(), "layer_height", value, sizeof(value)) == 0 &&
+                     std::fabs(std::strtod(value, nullptr) - 0.17) < 1e-6 &&
+                     orca_session_get_object_option(objects.get(), 1, "wall_loops", value, sizeof(value)) != 0,
+                     "3MF snapshot retains global and isolated object overrides")) return 4;
+        std::printf("PASS: native object setting ownership, isolation, strict edits, reset and 3MF persistence\n");
+    }
+    {
+        std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+            copies(orca_session_create(argv[2]), orca_session_destroy);
+        diagnostic_session = copies.get();
+        if (!require(orca_session_set_printable_area(copies.get(), 200, 200, 200) == 0 &&
+                     orca_session_add_primitive(copies.get(), 0, 12, 8, 6) == 0 &&
+                     orca_session_add_primitive(copies.get(), 0, 3, 3, 3) == 1 &&
+                     orca_session_scale_object_axes(copies.get(), 0, 1.5f, 0.75f, 1.25f) == 0 &&
+                     orca_session_rotate_object_axis(copies.get(), 0, 2, 29) == 0 &&
+                     orca_session_translate_object(copies.get(), 0, 0, 0, 5) == 0 &&
+                     orca_session_set_object_option(copies.get(), 0, "wall_loops", "5") == 0 &&
+                     orca_session_paint_fill(copies.get(), 0, 2, 1) > 0,
+                     "transformed painted instance fixture")) return 4;
+        auto mesh = [&] {
+            float *positions = nullptr; uint32_t *indices = nullptr;
+            size_t vertices = 0, count = 0;
+            std::pair<std::vector<float>, std::vector<uint32_t>> result;
+            if (orca_session_export_object_mesh(copies.get(), 0, &positions, &vertices, &indices, &count) == 0) {
+                result.first.assign(positions, positions + 3 * vertices);
+                result.second.assign(indices, indices + count);
+            }
+            orca_free(positions); orca_free(indices);
+            return result;
+        };
+        auto same_mesh = [&](const auto &expected) {
+            const auto actual = mesh();
+            if (actual.first.size() != expected.first.size() || actual.second != expected.second)
+                return false;
+            for (size_t i = 0; i < actual.first.size(); ++i)
+                if (std::fabs(actual.first[i] - expected.first[i]) > 0.001f)
+                    return false;
+            return true;
+        };
+        auto paint_mesh = [&](int state) {
+            float *positions = nullptr; uint32_t *indices = nullptr;
+            size_t vertices = 0, count = 0;
+            std::pair<std::vector<float>, std::vector<uint32_t>> result;
+            if (orca_session_export_paint_mesh(copies.get(), 0, 2, state, &positions, &vertices, &indices, &count) == 0 && vertices) {
+                result.first.assign(positions, positions + 3 * vertices);
+                result.second.assign(indices, indices + count);
+            }
+            orca_free(positions); orca_free(indices);
+            return result;
+        };
+        const auto single = mesh();
+        const auto single_paint = paint_mesh(1);
+        int painted = 0, after_paint = 0;
+        if (!require(!single.first.empty() && orca_session_object_instance_count(copies.get(), 0) == 1 &&
+                     orca_session_paint_stats(copies.get(), 0, 2, 1, &painted) == 0,
+                     "single instance mesh and shared paint") ||
+            !require(orca_session_set_object_instances(copies.get(), 0, 3) == 0 &&
+                     orca_session_object_count(copies.get()) == 2 &&
+                     orca_session_object_instance_count(copies.get(), 0) == 3 &&
+                     orca_session_object_instance_count(copies.get(), 1) == 1,
+                     "copies add instances without independent objects or neighbor changes")) return 4;
+        const auto triple = mesh();
+        const auto triple_paint = paint_mesh(1);
+        if (!require(triple.first.size() == single.first.size() * 3 && triple.second.size() == single.second.size() * 3,
+                     "instance mesh export includes every copy") ||
+            !require(!single_paint.first.empty() && triple_paint.first.size() == single_paint.first.size() * 3 &&
+                     triple_paint.second.size() == single_paint.second.size() * 3,
+                     "painted colors render on every instance")) return 4;
+        for (size_t instance = 0; instance < 3; ++instance)
+            for (size_t i = 0; i < single.first.size(); ++i) {
+                const float offset = i % 3 == 2 ? 0 : float(instance) * 10;
+                if (!require(std::fabs(triple.first[instance * single.first.size() + i] - single.first[i] - offset) < 0.001f,
+                             "copies preserve rotated/scaled mesh and original height with desktop bed offset")) return 4;
+            }
+        for (size_t instance = 0; instance < 3; ++instance)
+            for (size_t i = 0; i < single_paint.first.size(); ++i) {
+                const float offset = i % 3 == 2 ? 0 : float(instance) * 10;
+                if (!require(std::fabs(triple_paint.first[instance * single_paint.first.size() + i] - single_paint.first[i] - offset) < 0.001f,
+                             "paint overlays follow every transformed copy")) return 4;
+            }
+        std::array<float, 3> hit{};
+        for (int axis = 0; axis < 3; ++axis)
+            for (int vertex = 0; vertex < 3; ++vertex)
+                hit[axis] += triple.first[3 * triple.second[2 * single.second.size() + size_t(vertex)] + size_t(axis)] / 3;
+        for (int selected : {0, -1}) {
+            const int color = orca_max_paint_filaments();
+            int shared_faces = 0, neighbor_faces = 0;
+            if (!require(orca_session_paint_fill(copies.get(), 0, 2, 1) > 0 &&
+                         orca_session_paint_at(copies.get(), selected, hit[0], hit[1], hit[2], 2, color, 0.01f) > 0 &&
+                         orca_session_paint_stats(copies.get(), 0, 2, color, &shared_faces) == 0 && shared_faces > 0 &&
+                         orca_session_paint_stats(copies.get(), 1, 2, color, &neighbor_faces) == 0 && neighbor_faces == 0,
+                         "brush on a later copy paints its shared volume for selected and automatic picks") ||
+                !require(paint_mesh(color).second.size() == size_t(shared_faces) * 3 * 3,
+                         "one shared annotation renders on all three copies")) return 4;
+        }
+        if (!require(orca_session_paint_fill(copies.get(), 0, 2, 1) > 0, "restore shared fixture colors")) return 4;
+        char override_value[32]{};
+        const std::string instance_snapshot = directory + "/instances.3mf";
+        if (!require(orca_session_paint_stats(copies.get(), 0, 2, 1, &after_paint) == 0 && after_paint == painted &&
+                     orca_session_get_object_option(copies.get(), 0, "wall_loops", override_value, sizeof(override_value)) == 0 &&
+                     std::string(override_value) == "5" &&
+                     orca_session_snapshot(copies.get(), instance_snapshot.c_str()) == 0,
+                     "instance edits retain shared object overrides and painting")) return 4;
+        for (const auto &bad : std::vector<std::pair<int, int>>{{-1, 2}, {2, 2}, {0, -1}, {0, 1001}})
+            if (!require(orca_session_set_object_instances(copies.get(), bad.first, bad.second) < 0 && mesh() == triple,
+                         "invalid instance edit preserves transformed geometry")) return 4;
+        if (!require(orca_session_set_object_instances(copies.get(), 0, 1) == 0 && mesh() == single,
+                     "fewer instances retains the original transform") ||
+            !require(orca_session_restore_snapshot(copies.get(), instance_snapshot.c_str()) == 0 && same_mesh(triple) &&
+                     orca_session_object_instance_count(copies.get(), 0) == 3,
+                     "3MF restores instance transforms/counts") ||
+            !require(orca_session_set_object_instances(copies.get(), 0, 0) == 0 &&
+                     orca_session_object_count(copies.get()) == 1 && orca_session_object_instance_count(copies.get(), 0) == 1 &&
+                     orca_session_set_object_instances(copies.get(), 0, 0) == 0 && orca_session_object_count(copies.get()) == 0,
+                     "zero copies removes only the selected object and supports empty plates") ||
+            !require(orca_session_restore_snapshot(copies.get(), instance_snapshot.c_str()) == 0 && same_mesh(triple),
+                     "snapshot restores copies after deleting the final object")) return 4;
+        const std::string sunk_snapshot = directory + "/sunk-instances.3mf";
+        if (!require(orca_session_translate_object(copies.get(), 0, 0, 0, -8) == 0,
+                     "place shared copies partly below the bed")) return 4;
+        const auto sunk = mesh();
+        if (!require(orca_session_snapshot(copies.get(), sunk_snapshot.c_str()) == 0 &&
+                     orca_session_translate_object(copies.get(), 0, 0, 0, 20) == 0 &&
+                     orca_session_restore_snapshot(copies.get(), sunk_snapshot.c_str()) == 0 && same_mesh(sunk) &&
+                     orca_session_restore_snapshot(copies.get(), instance_snapshot.c_str()) == 0 && same_mesh(triple),
+                     "snapshot restoration retains exact sunk and raised instance heights")) return 4;
+        if (!require(orca_session_set_object_instances(copies.get(), 0, 1000) == 0 &&
+                     orca_session_object_instance_count(copies.get(), 0) == 1000 &&
+                     orca_session_object_instance_count(copies.get(), 1) == 1,
+                     "desktop maximum copy count remains valid and isolated")) return 4;
+        std::printf("PASS: native object instances, desktop offsets, retained transform/settings/paint, strict edits, fewer/zero copies and 3MF restore\n");
+    }
+    diagnostic_session = session.get();
+    if (!require(orca_option_tooltip("layer_height") && std::string(orca_option_tooltip("layer_height")).size() > 20 &&
+                 !orca_option_tooltip("not_a_setting") && !orca_option_tooltip(nullptr),
+                 "settings help comes from native definitions with explicit missing-key results")) return 4;
+    {
+        std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+            layers(orca_session_create(argv[2]), orca_session_destroy);
+        diagnostic_session = layers.get();
+        auto profile = [&](int object) {
+            orca_layer_profile_info_t info{};
+            orca_layer_height_point_t *points = nullptr;
+            std::vector<orca_layer_height_point_t> values;
+            if (orca_session_export_layer_profile(layers.get(), object, &info, &points) == 0 && points)
+                values.assign(points, points + info.point_count);
+            orca_free(points);
+            return std::make_pair(info, std::move(values));
+        };
+        if (!require(orca_session_add_primitive(layers.get(), 2, 20, 20, 20) == 0 &&
+                     orca_session_add_primitive(layers.get(), 0, 5, 5, 5) == 1 &&
+                     orca_session_translate_object(layers.get(), 1, 30, 0, 0) == 0 &&
+                     orca_session_set_option(layers.get(), "layer_height", "0.2") == 0 &&
+                     orca_session_set_option(layers.get(), "initial_layer_print_height", "0.2") == 0,
+                     "variable-layer sphere and independent neighbor fixture")) return 4;
+        const auto baseline = profile(0);
+        if (!require(!baseline.second.empty() && !baseline.first.is_custom && baseline.first.min_height > 0 &&
+                     baseline.first.max_height >= baseline.first.min_height && baseline.first.object_height > 0,
+                     "effective default profile comes from real native slicing parameters") ||
+            !require(orca_session_edit_layer_profile(layers.get(), 0, 0, 0, 0, 0) == 0,
+                     "native adaptive variable-layer algorithm")) return 4;
+        const auto adaptive = profile(0);
+        if (!require(adaptive.first.is_custom && adaptive.second.size() > baseline.second.size() &&
+                     !profile(1).first.is_custom, "adaptive profile affects only the chosen object")) return 4;
+        double previous_z = -1;
+        for (const auto &point : adaptive.second) {
+            if (!require(std::isfinite(point.z) && std::isfinite(point.height) && point.z >= previous_z &&
+                         point.height >= adaptive.first.min_height - 1e-5 && point.height <= adaptive.first.max_height + 1e-5,
+                         "adaptive heights remain ordered and within native nozzle limits")) return 4;
+            previous_z = point.z;
+        }
+        if (!require(std::fabs(previous_z - adaptive.first.object_height) < 0.001,
+                     "adaptive profile reaches the top of the object") ||
+            !require(orca_session_edit_layer_profile(layers.get(), 0, 0, std::numeric_limits<float>::quiet_NaN(), 0, 0) != 0 &&
+                     orca_session_edit_layer_profile(layers.get(), 0, 1, 0, 0, 0) != 0 &&
+                     orca_session_edit_layer_profile(layers.get(), 0, 99, 0, 5, 0) != 0,
+                     "invalid layer-profile operations are rejected")) return 4;
+        const auto unchanged = profile(0);
+        if (!require(unchanged.second.size() == adaptive.second.size() &&
+                     std::equal(unchanged.second.begin(), unchanged.second.end(), adaptive.second.begin(),
+                         [](const auto &a, const auto &b) { return a.z == b.z && a.height == b.height; }),
+                     "rejected profile edits preserve the prior curve") ||
+            !require(orca_session_edit_layer_profile(layers.get(), 0, 1, 0, 5, 1) == 0,
+                     "native profile smoothing with preserved minimums")) return 4;
+        const auto smoothed = profile(0);
+        const std::string saved_profile = directory + "/variable-layers.3mf";
+        if (!require(smoothed.first.is_custom && !smoothed.second.empty() &&
+                     orca_session_snapshot(layers.get(), saved_profile.c_str()) == 0 &&
+                     orca_session_edit_layer_profile(layers.get(), 0, 2, 0, 0, 0) == 0 && !profile(0).first.is_custom &&
+                     orca_session_restore_snapshot(layers.get(), saved_profile.c_str()) == 0,
+                     "profile reset and 3MF snapshot restoration")) return 4;
+        const auto restored = profile(0);
+        if (!require(restored.first.is_custom && restored.second.size() == smoothed.second.size() &&
+                     std::equal(restored.second.begin(), restored.second.end(), smoothed.second.begin(),
+                         [](const auto &a, const auto &b) { return std::fabs(a.z-b.z) < 1e-5 && std::fabs(a.height-b.height) < 1e-5; }),
+                     "3MF preserves the native variable-layer curve") ||
+            !require(orca_session_slice_to_gcode(layers.get(), (directory + "/variable-layers.gcode").c_str()) == 0,
+                     "slice using the restored adaptive profile")) return 4;
+        orca_preview_segment_t *moves = nullptr;
+        size_t count = 0, total = 0;
+        const int exported = orca_session_export_preview(layers.get(), &moves, &count, &total);
+        std::unique_ptr<orca_preview_segment_t, decltype(&orca_free)> owned(moves, orca_free);
+        bool variable_height = false;
+        for (size_t i = 0; i < count; ++i)
+            if (moves[i].move_type == 10 && moves[i].height > 0 && std::fabs(moves[i].height - 0.2f) > 0.01f)
+                variable_height = true;
+        if (!require(exported == 0 && moves && total == count && variable_height,
+                     "processed toolpaths contain the actual variable bead heights")) return 4;
+        char global[64]{};
+        if (!require(orca_session_get_option(layers.get(), "layer_height", global, sizeof(global)) == 0 &&
+                     std::fabs(std::strtod(global, nullptr) - 0.2) < 1e-6, "adaptive editing leaves global layer height unchanged")) return 4;
+        std::printf("PASS: native adaptive/smooth/reset layers, limits, isolation, 3MF restore and actual sliced bead heights\n");
+    }
+    // All desktop primitives must be real, bed-placed engine objects.
+    for (int kind = 0; kind < 6; ++kind) {
+        std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+            shape(orca_session_create(argv[2]), orca_session_destroy);
+        diagnostic_session = shape.get();
+        float b[6]{};
+        if (!require(orca_session_add_primitive(shape.get(), kind, 20, 8, 12) == 0, "add primitive") ||
+            !require(orca_session_model_bounds(shape.get(), b, b+1, b+2, b+3, b+4, b+5) == 0,
+                     "primitive bounds") ||
+            !require(std::fabs(b[2]) < 0.01 && b[3] > b[0] && b[4] > b[1] && b[5] > b[2],
+                     "primitive is a positive solid on the bed")) return 4;
+    }
+    {
+        std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+            shape(orca_session_create(argv[2]), orca_session_destroy);
+        diagnostic_session = shape.get();
+        float b[6]{};
+        if (!require(orca_session_add_primitive(shape.get(), 0, 20, 10, 8) == 0, "scale fixture") ||
+            !require(orca_session_translate_object(shape.get(), 0, 15, -7, 0) == 0, "off-center fixture") ||
+            !require(orca_session_model_bounds(shape.get(), b, b+1, b+2, b+3, b+4, b+5) == 0, "initial off-center bounds")) return 4;
+        const float center_x = (b[0]+b[3])*0.5f, center_y = (b[1]+b[4])*0.5f;
+        if (!require(orca_session_scale_object_axes(shape.get(), 0, 2, 3, 0.5) == 0, "axis scale") ||
+            !require(orca_session_model_bounds(shape.get(), b, b+1, b+2, b+3, b+4, b+5) == 0, "scaled bounds") ||
+            !require(std::fabs(b[3]-b[0]-40) < 0.01 && std::fabs(b[4]-b[1]-30) < 0.01 &&
+                     std::fabs(b[5]-4) < 0.01 && std::fabs((b[0]+b[3])*0.5-center_x) < 0.01 &&
+                     std::fabs((b[1]+b[4])*0.5-center_y) < 0.01, "scaled dimensions and stable center") ||
+            !require(orca_session_scale_object_axes(shape.get(), 0, -1, 1, 1) != 0, "reject negative scale")) return 4;
+        if (!require(orca_session_rotate_object_axis(shape.get(), 0, 0, 29) == 0 &&
+                     orca_session_rotate_object_axis(shape.get(), 0, 1, 17) == 0 &&
+                     orca_session_rotate_object_axis(shape.get(), 0, 2, 37) == 0 &&
+                     orca_session_paint_fill(shape.get(), 0, 2, 1) > 0, "transformed painted face fixture")) return 4;
+        const std::string face_snapshot = directory + "/lay-face-snapshot.3mf";
+        if (!require(orca_session_model_bounds(shape.get(), b, b+1, b+2, b+3, b+4, b+5) == 0 &&
+                     orca_session_snapshot(shape.get(), face_snapshot.c_str()) == 0, "snapshot before laying a face")) return 4;
+        const std::array<float, 6> original_face_bounds{b[0], b[1], b[2], b[3], b[4], b[5]};
+        float *positions = nullptr; uint32_t *indices = nullptr;
+        size_t vertices = 0, index_count = 0;
+        int painted_before = 0, painted_after = 0;
+        if (!require(orca_session_export_object_mesh(shape.get(), 0, &positions, &vertices, &indices, &index_count) == 0 &&
+                     vertices > 0 && index_count >= 3, "export transformed face pick") ||
+            !require(orca_session_paint_stats(shape.get(), 0, 2, 1, &painted_before) == 0, "painted face count before lay")) return 4;
+        std::array<double, 3> hit{}, u{}, v{}, normal{};
+        for (int axis = 0; axis < 3; ++axis) {
+            for (int vertex = 0; vertex < 3; ++vertex) hit[axis] += positions[3 * indices[vertex] + axis] / 3.0;
+            u[axis] = positions[3 * indices[1] + axis] - positions[3 * indices[0] + axis];
+            v[axis] = positions[3 * indices[2] + axis] - positions[3 * indices[0] + axis];
+        }
+        normal = {u[1]*v[2]-u[2]*v[1], u[2]*v[0]-u[0]*v[2], u[0]*v[1]-u[1]*v[0]};
+        const double length = std::sqrt(normal[0]*normal[0] + normal[1]*normal[1] + normal[2]*normal[2]);
+        double minimum = std::numeric_limits<double>::infinity(), maximum = -minimum;
+        for (size_t vertex = 0; vertex < vertices; ++vertex) {
+            double projection = 0;
+            for (int axis = 0; axis < 3; ++axis) projection += positions[3 * vertex + axis] * normal[axis] / length;
+            minimum = std::min(minimum, projection); maximum = std::max(maximum, projection);
+        }
+        orca_free(positions); orca_free(indices);
+        if (!require(orca_session_lay_on_face(shape.get(), 0, float(hit[0]), float(hit[1]), float(hit[2])) == 0,
+                     "native picked face with nonuniform scale and compound rotation") ||
+            !require(orca_session_model_bounds(shape.get(), b, b+1, b+2, b+3, b+4, b+5) == 0 &&
+                     std::fabs(b[2]) < 0.001 && std::fabs(b[5] - (maximum - minimum)) < 0.01,
+                     "chosen face points down and drops to bed with correct thickness") ||
+            !require(orca_session_paint_stats(shape.get(), 0, 2, 1, &painted_after) == 0 && painted_before == painted_after,
+                     "lay on face preserves facet annotations")) return 4;
+        const std::array<float, 6> before_failed_pick{b[0], b[1], b[2], b[3], b[4], b[5]};
+        if (!require(orca_session_lay_on_face(shape.get(), 0, 100000, 100000, 100000) < 0 &&
+                     orca_session_lay_on_face(shape.get(), 0, NAN, 0, 0) < 0,
+                     "reject missed and non-finite face picks") ||
+            !require(orca_session_model_bounds(shape.get(), b, b+1, b+2, b+3, b+4, b+5) == 0 &&
+                     std::equal(before_failed_pick.begin(), before_failed_pick.end(), b),
+                     "rejected face picks retain model bounds")) return 4;
+        if (!require(orca_session_restore_snapshot(shape.get(), face_snapshot.c_str()) == 0 &&
+                     orca_session_model_bounds(shape.get(), b, b+1, b+2, b+3, b+4, b+5) == 0,
+                     "restore lay-on-face undo snapshot")) return 4;
+        for (size_t axis = 0; axis < original_face_bounds.size(); ++axis)
+            if (!require(std::fabs(b[axis] - original_face_bounds[axis]) < 0.001,
+                         "face snapshot retains original world-space placement")) return 4;
+        std::printf("PASS: native Lay on Face, transformed hit coordinates, bed contact and painting retention\n");
+    }
+    {
+        std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+            small(orca_session_create(argv[2]), orca_session_destroy);
+        diagnostic_session = small.get();
+        float b[6]{};
+        if (!require(orca_session_add_primitive(small.get(), 0, 0.2f, 0.3f, 0.4f) == 0, "small primitive cube") ||
+            !require(orca_session_model_bounds(small.get(), b, b+1, b+2, b+3, b+4, b+5) == 0, "small cube bounds") ||
+            !require(std::fabs(b[3]-b[0]-0.2f) < 0.001f && std::fabs(b[4]-b[1]-0.3f) < 0.001f &&
+                     std::fabs(b[5]-b[2]-0.4f) < 0.001f, "primitive dimensions are not clamped by legacy text plate limits")) return 4;
+    }
+    {
+        std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+            painted(orca_session_create(argv[2]), orca_session_destroy);
+        diagnostic_session = painted.get();
+        if (!require(orca_session_add_primitive(painted.get(), 0, 20, 20, 20) == 0 &&
+                     orca_session_paint_fill(painted.get(), 0, 2, 1) > 0, "two-color Prepare fixture")) return 4;
+        float *positions = nullptr;
+        uint32_t *indices = nullptr;
+        size_t vertices = 0, count = 0;
+        if (!require(orca_session_export_object_mesh(painted.get(), 0, &positions, &vertices, &indices, &count) == 0 &&
+                     count >= 3, "export paint hit location")) return 4;
+        float hit[3]{};
+        for (int axis = 0; axis < 3; ++axis)
+            for (int vertex = 0; vertex < 3; ++vertex)
+                hit[axis] += positions[3 * indices[vertex] + axis] / 3.f;
+        orca_free(positions); orca_free(indices);
+        if (!require(orca_session_paint_at(painted.get(), 0, hit[0], hit[1], hit[2], 2,
+                     orca_max_paint_filaments(), 0.1f) > 0, "paint highest native filament state")) return 4;
+        size_t total = 0;
+        for (int state : {1, orca_max_paint_filaments(), -1, 2}) {
+            positions = nullptr; indices = nullptr; vertices = 0; count = 0;
+            const int result = orca_session_export_paint_mesh(painted.get(), 0, 2, state, &positions, &vertices, &indices, &count);
+            orca_free(positions); orca_free(indices);
+            if (!require(result == 0, "export individual filament regions")) return 4;
+            if (state > 0 && state != 2) {
+                if (!require(count > 0, "both painted colors survive independently")) return 4;
+                total += count;
+            } else if (state == -1) {
+                if (!require(count == total, "individual colors partition combined paint topology")) return 4;
+            } else if (!require(count == 0, "unused filament has no painted faces")) return 4;
+        }
+        std::printf("PASS: separate Prepare filament regions through highest native paint state\n");
+    }
+    for (const char *file : {"3DBenchy.drc", "calicat.drc", "OrcaCube_v2.drc", "OrcaPlug_v2.drc",
+             "OrcaSliced.3mf", "OrcaBadge.3mf", "OrcaToleranceTest.drc", "ksr_fdmtest_v4.drc",
+             "Voron_Design_Cube_v7.drc", "Stanford_Bunny.drc", "Orca_stringhell.drc"}) {
+        std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+            handy(orca_session_create(argv[2]), orca_session_destroy);
+        diagnostic_session = handy.get();
+        const std::string path = std::string(argv[2]) + "/handy_models/" + file;
+        char height[64]{};
+        if (!require(orca_session_set_option(handy.get(), "layer_height", "0.16") == 0, "handy model settings fixture") ||
+            !require(orca_session_add_model_geometry(handy.get(), path.c_str()) == 0, file) ||
+            !require(orca_session_get_option(handy.get(), "layer_height", height, sizeof(height)) == 0 &&
+                     std::fabs(std::strtof(height, nullptr) - 0.16f) < 0.001f, "handy model preserves settings") ||
+            !require(orca_session_object_count(handy.get()) > 0, "handy model contains geometry")) return 4;
+    }
+    {
+        std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+            edited(orca_session_create(argv[2]), orca_session_destroy);
+        diagnostic_session = edited.get();
+        int facets = 0, edges = 0, parts = 0;
+        float volume = 0;
+        if (!require(orca_session_add_primitive(edited.get(), 1, 20, 20, 20) == 0, "simplify fixture") ||
+            !require(orca_session_mesh_stats(edited.get(), 0, &facets, &edges, &parts, &volume) == 0, "initial cylinder facets")) return 4;
+        if (!require(facets > 64, "cylinder exposes its actual topology count")) return 4;
+        const int before = facets;
+        const int paint_states[] = {2, 1, 3, 1};
+        for (int kind = 0; kind < 4; ++kind)
+            if (!require(orca_session_paint_fill(edited.get(), 0, kind, paint_states[kind]) > 0, "paint simplify fixture")) return 4;
+        if (!require(orca_session_simplify_mesh(edited.get(), 0, 64) > 0, "simplify native mesh") ||
+            !require(orca_session_mesh_stats(edited.get(), 0, &facets, &edges, &parts, &volume) == 0 && facets < before,
+                     "simplify reduces the actual mesh")) return 4;
+        auto surface_area = [](const float *positions, size_t vertices, const uint32_t *indices, size_t count) {
+            double area = 0;
+            for (size_t i = 0; i < count; i += 3) {
+                if (i + 2 >= count || indices[i] >= vertices || indices[i+1] >= vertices || indices[i+2] >= vertices)
+                    return -1.0;
+                const float *a = positions + 3 * indices[i], *b = positions + 3 * indices[i+1], *c = positions + 3 * indices[i+2];
+                const double ux = b[0]-a[0], uy = b[1]-a[1], uz = b[2]-a[2];
+                const double vx = c[0]-a[0], vy = c[1]-a[1], vz = c[2]-a[2];
+                const double x = uy*vz-uz*vy, y = uz*vx-ux*vz, z = ux*vy-uy*vx;
+                const double triangle_area = 0.5 * std::sqrt(x*x+y*y+z*z);
+                if (!std::isfinite(triangle_area)) return -1.0;
+                area += triangle_area;
+            }
+            return area;
+        };
+        float *base_positions = nullptr;
+        uint32_t *base_indices = nullptr;
+        size_t base_vertices = 0, base_count = 0;
+        if (!require(orca_session_export_object_mesh(edited.get(), 0, &base_positions, &base_vertices, &base_indices, &base_count) == 0,
+                     "export simplified topology")) return 4;
+        std::unique_ptr<float, decltype(&orca_free)> base_vertex_owner(base_positions, orca_free);
+        std::unique_ptr<uint32_t, decltype(&orca_free)> base_index_owner(base_indices, orca_free);
+        const double base_area = surface_area(base_positions, base_vertices, base_indices, base_count);
+        if (!require(base_area > 0 && base_count / 3 == size_t(facets), "mesh statistics match actual exported topology")) return 4;
+        for (int kind = 0; kind < 4; ++kind) {
+            int painted = 0;
+            const int stats = orca_session_paint_stats(edited.get(), 0, kind, paint_states[kind], &painted);
+            std::printf("Simplify painting kind=%d before=%d after=%d painted=%d\n", kind, before, facets, painted);
+            if (!require(stats == 0 && painted > 0, "simplify retains painting")) return 4;
+            float *positions = nullptr;
+            uint32_t *indices = nullptr;
+            size_t vertices = 0, count = 0;
+            if (!require(orca_session_export_paint_mesh(edited.get(), 0, kind, paint_states[kind], &positions, &vertices, &indices, &count) == 0,
+                         "export remapped painting")) return 4;
+            std::unique_ptr<float, decltype(&orca_free)> vertex_owner(positions, orca_free);
+            std::unique_ptr<uint32_t, decltype(&orca_free)> index_owner(indices, orca_free);
+            const double painted_area = surface_area(positions, vertices, indices, count);
+            std::printf("Simplify painting area=%.4f mesh area=%.4f\n", painted_area, base_area);
+            // Painting has its own sub-triangulation and can legitimately exceed
+            // the base face count. Validate topology and coverage, not that count.
+            if (!require(count / 3 == size_t(painted) && painted_area > 0 &&
+                         std::fabs(painted_area - base_area) / base_area < 0.01,
+                         "remapped full painting covers the simplified mesh")) return 4;
+        }
+    }
+    {
+        std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+            edited(orca_session_create(argv[2]), orca_session_destroy);
+        diagnostic_session = edited.get();
+        if (!require(orca_session_add_primitive(edited.get(), 0, 20, 20, 20) == 0, "cut fixture") ||
+            !require(orca_session_cut_object_plane(edited.get(), 0, 0, 0, 10, 0, 0, 1, 1, 1) == 2,
+                     "plane cut retains two halves") ||
+            !require(orca_session_object_count(edited.get()) == 2, "cut output object count")) return 4;
+    }
+    {
+        std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+            edited(orca_session_create(argv[2]), orca_session_destroy);
+        diagnostic_session = edited.get();
+        if (!require(orca_session_add_primitive(edited.get(), 0, 20, 20, 20) == 0, "boolean A") ||
+            !require(orca_session_add_primitive(edited.get(), 0, 20, 20, 20) == 1, "boolean B") ||
+            !require(orca_session_rotate_object_z(edited.get(), 1, 15) == 0, "boolean rotated operand") ||
+            !require(orca_session_translate_object(edited.get(), 1, 8, 0, 4) == 0, "boolean overlapping operand")) return 4;
+        float before_bounds[6] = {}, after_bounds[6] = {};
+        if (!require(orca_session_model_bounds(edited.get(), &before_bounds[0], &before_bounds[1], &before_bounds[2],
+                                              &before_bounds[3], &before_bounds[4], &before_bounds[5]) == 0,
+                     "boolean world bounds before union") ||
+            !require(orca_session_mesh_boolean(edited.get(), 0, 1, 0, 1) == 0, "native mesh union") ||
+            !require(orca_session_object_count(edited.get()) == 1, "boolean removes the chosen operand") ||
+            !require(orca_session_model_bounds(edited.get(), &after_bounds[0], &after_bounds[1], &after_bounds[2],
+                                              &after_bounds[3], &after_bounds[4], &after_bounds[5]) == 0,
+                     "boolean world bounds after union")) return 4;
+        for (int axis = 0; axis < 6; ++axis)
+            if (!require(std::fabs(before_bounds[axis] - after_bounds[axis]) < 0.001f,
+                         "union preserves the operands' world bounds")) return 4;
+    }
+    std::printf("PASS: native simplify, plane cut and overlapping mesh union\n");
+    {
+        // One STL volume, two disconnected solids at different heights. This
+        // distinguishes native Parts (one object) from Objects (independent).
+        const std::string path = directory + "/disconnected.stl";
+        std::ofstream fixture(path);
+        const std::array<std::array<float, 3>, 4> vertices{{{0,0,0}, {10,0,0}, {0,10,0}, {0,0,10}}};
+        const int faces[4][3] = {{0,2,1}, {0,1,3}, {0,3,2}, {1,2,3}};
+        fixture << "solid disconnected\n";
+        for (int part = 0; part < 2; ++part)
+            for (const auto &face : faces) {
+                fixture << "facet normal 0 0 0\nouter loop\n";
+                for (int vertex : face)
+                    fixture << "vertex " << vertices[vertex][0] + part * 25 << ' '
+                            << vertices[vertex][1] << ' ' << vertices[vertex][2] + part * 12 << '\n';
+                fixture << "endloop\nendfacet\n";
+            }
+        fixture << "endsolid disconnected\n";
+        fixture.close();
+        std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+            split(orca_session_create(argv[2]), orca_session_destroy);
+        diagnostic_session = split.get();
+        if (!require(orca_session_load_model(split.get(), path.c_str()) == 0 &&
+                     orca_session_model_part_count(split.get(), 0) == 1, "single-volume disconnected fixture") ||
+            !require(orca_session_scale_object_axes(split.get(), 0, 1.1f, 0.8f, 1.2f) == 0 &&
+                     orca_session_rotate_object_z(split.get(), 0, 17) == 0 &&
+                     orca_session_translate_object(split.get(), 0, 17, -9, 6) == 0 &&
+                     orca_session_set_object_option(split.get(), 0, "layer_height", "0.12") == 0 &&
+                     orca_session_paint_fill(split.get(), 0, 2, 1) > 0, "split preserves transforms/settings/painting")) return 4;
+        float before[6]{}, after[6]{};
+        if (!require(orca_session_model_bounds(split.get(), before, before+1, before+2, before+3, before+4, before+5) == 0,
+                     "split initial bounds") ||
+            !require(orca_session_split_model(split.get(), 0, 99, 0, 0) < 0 &&
+                     orca_session_model_part_count(split.get(), 0) == 1, "invalid part does not alter model") ||
+            !require(orca_session_split_model(split.get(), 0, 0, 0, 0) == 2 &&
+                     orca_session_object_count(split.get()) == 1 && orca_session_model_part_count(split.get(), 0) == 2,
+                     "Split to parts retains one object with two volumes") ||
+            !require(orca_session_model_part_name(split.get(), 0, 1) != nullptr &&
+                     orca_session_model_part_name(split.get(), 0, 2) == nullptr, "part-name query bounds") ||
+            !require(orca_session_model_bounds(split.get(), after, after+1, after+2, after+3, after+4, after+5) == 0,
+                     "split parts bounds")) return 4;
+        for (int axis = 0; axis < 6; ++axis)
+            if (!require(std::fabs(before[axis] - after[axis]) < 0.001f, "parts preserve world bounds")) return 4;
+        const std::string snapshot = directory + "/split-parts.3mf";
+        if (!require(orca_session_snapshot(split.get(), snapshot.c_str()) == 0, "snapshot split parts") ||
+            !require(orca_session_split_model(split.get(), 0, 0, 1, 0) == 2 &&
+                     orca_session_object_count(split.get()) == 2, "Split to objects creates independent objects") ||
+            !require(orca_session_model_bounds(split.get(), after, after+1, after+2, after+3, after+4, after+5) == 0,
+                     "split objects bounds")) return 4;
+        for (int axis = 0; axis < 6; ++axis)
+            if (!require(std::fabs(before[axis] - after[axis]) < 0.001f, "objects preserve XY/Z when Drop is off")) return 4;
+        for (int object = 0; object < 2; ++object) {
+            char value[64]{};
+            int painted = 0;
+            if (!require(orca_session_get_object_option(split.get(), object, "layer_height", value, sizeof(value)) == 0 &&
+                         std::string(value) == "0.12", "split objects preserve object overrides") ||
+                !require(orca_session_paint_stats(split.get(), object, 2, 1, &painted) == 0 && painted > 0,
+                         "split objects retain native paint annotations")) return 4;
+        }
+        if (!require(orca_session_restore_snapshot(split.get(), snapshot.c_str()) == 0 &&
+                     orca_session_object_count(split.get()) == 1 && orca_session_model_part_count(split.get(), 0) == 2,
+                     "split snapshot restores multipart object") ||
+            !require(orca_session_split_model(split.get(), 0, 0, 1, 1) == 2 &&
+                     orca_session_model_bounds(split.get(), after, after+1, after+2, after+3, after+4, after+5) == 0 &&
+                     std::fabs(after[2]) < 0.001f, "optional split auto-drop places results on bed")) return 4;
+        const int count = orca_session_object_count(split.get());
+        if (!require(orca_session_split_model(split.get(), 0, 0, 1, 0) < 0 &&
+                     orca_session_object_count(split.get()) == count, "unsplittable object leaves the original intact")) return 4;
+        std::printf("PASS: native Split to parts/objects, world placement, overrides, painting, snapshot and failure recovery\n");
+    }
+    diagnostic_session = session.get();
+    int scope = -1;
+    if (!require(orca_session_option_presentation("layer_height", &scope) >= 0 && scope == 0, "process option ownership") ||
+        !require(orca_session_option_presentation("filament_type", &scope) >= 0 && scope == 1, "filament option ownership") ||
+        !require(orca_session_option_presentation("nozzle_diameter", &scope) >= 0 && scope == 2, "printer option ownership") ||
+        !require(orca_session_option_presentation("missing_option", &scope) == -1, "unknown option is hidden"))
+        return 4;
+    if (!require(orca_session_set_option(session.get(), "post_process", "zmod-preprocess.py") == 0, "configure post-processing") ||
+        !require(orca_session_post_process_count(session.get()) == 1, "post-processing command count") ||
+        !require(std::string(orca_session_post_process_script(session.get(), 0)) == "zmod-preprocess.py", "desktop post-processing command") ||
+        !require(orca_session_post_process_script(session.get(), 1) == nullptr, "post-processing command bounds") ||
+        !require(orca_session_set_option(session.get(), "post_process", "") == 0, "disable post-processing"))
+        return 4;
+    std::ifstream nozzle_data(std::string(argv[2]) + "/info/nozzle_info.json");
+    if (!require(nozzle_data.good(), "bundled nozzle data is available"))
+        return 4;
+    if (!require(orca_session_set_option(session.get(), "layer_height", "0.16") == 0, "set project layer height"))
+        return 4;
+    if (!require(orca_session_add_box(session.get(), "Smoke cube", 20, 20, 20) >= 0, "create cube") ||
+        !require(orca_session_repair_mesh(session.get(), 0) == 0, "repair cube through current engine API") ||
+        !require(orca_session_save_3mf(session.get(), project.c_str()) == 0, "save project") ||
+        !require(orca_session_load_model(session.get(), project.c_str()) == 0, "import project"))
+        return 4;
+    char loaded_height[64]{};
+    if (!require(orca_session_object_count(session.get()) == 1, "project retains its model") ||
+        !require(orca_session_get_option(session.get(), "layer_height", loaded_height, sizeof(loaded_height)) == 0,
+                 "read restored project setting") ||
+        !require(std::fabs(std::strtof(loaded_height, nullptr) - 0.16f) < 0.0001f,
+                 "project retains its layer height"))
+        return 4;
+    // A real Orca-format project uses the Bambu/Orca reader, unlike our legacy
+    // store_3mf snapshot above. Model loading and project config need explicit flags.
+    if (!require(orca_session_set_option(session.get(), "layer_height", "0.2") == 0, "reset layer height") ||
+        !require(orca_session_load_model(session.get(), (directory + "/orca-project.3mf").c_str()) == 0,
+                 "import Orca-format 3MF geometry") ||
+        !require(orca_session_object_count(session.get()) == 1, "Orca project retains its object") ||
+        !require(orca_session_get_option(session.get(), "layer_height", loaded_height, sizeof(loaded_height)) == 0,
+                 "read Orca project settings") ||
+        !require(std::fabs(std::strtof(loaded_height, nullptr) - 0.16f) < 0.0001f,
+                 "Orca project restores layer height"))
+        return 4;
+    float before[6]{}, after[6]{};
+    if (!require(orca_session_model_bounds(session.get(), &before[0], &before[1], &before[2], &before[3], &before[4], &before[5]) == 0, "read pre-rotation bounds") ||
+        !require(orca_session_rotate_object_axis(session.get(), 0, 2, 90) == 0, "rotate imported object around Z") ||
+        !require(orca_session_model_bounds(session.get(), &after[0], &after[1], &after[2], &after[3], &after[4], &after[5]) == 0, "read rotated bounds") ||
+        !require(std::fabs(before[0] + before[3] - after[0] - after[3]) < 0.001f &&
+                 std::fabs(before[1] + before[4] - after[1] - after[4]) < 0.001f, "rotation preserves the visible object center") ||
+        !require(orca_session_rotate_object_axis(session.get(), 0, 2, -90) == 0, "restore object rotation"))
+        return 4;
+    const char *options[][2] = {
+        {"use_relative_e_distances", "1"}, {"layer_change_gcode", "G92 E0"},
+        {"layer_height", "0.2"}, {"wall_loops", "2"},
+        {"sparse_infill_density", "15%"}, {"filament_diameter", "1.75"},
+        {"nozzle_diameter", "0.4"}, {"printable_area", "0x0,220x0,220x220,0x220"},
+        {"printable_height", "250"},
+        // A stale 2-filament matrix with four active filaments reproduced the
+        // mobile G-code export failure. Preserve its custom 100 mm³ pair.
+        {"filament_colour", "#FF0000;#00FF00;#0000FF;#FFFFFF"},
+        {"filament_diameter", "1.75,1.75,1.75,1.75"},
+        {"flush_volumes_matrix", "0,100,100,0"}
+    };
+    for (const auto &option : options)
+        if (!require(orca_session_set_option(session.get(), option[0], option[1]) == 0, option[0]))
+            return 5;
+    if (!require(orca_session_slice_to_gcode(session.get(), output.c_str()) == 0, "slice"))
+        return 6;
+    char flush[2048]{};
+    if (!require(orca_session_get_option(session.get(), "flush_volumes_matrix", flush, sizeof(flush)) == 0,
+                 "read repaired flush matrix")) return 6;
+    int separators = 0;
+    for (const char *p = flush; *p; ++p) if (*p == ',') ++separators;
+    if (!require(separators == 15, "flush matrix matches four filaments") ||
+        !require(std::string(flush).find("0,100,") == 0, "preserve existing custom purge volume")) return 6;
+    std::ifstream stream(output);
+    const std::string gcode((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+    if (!require(gcode.find(";TYPE:") != std::string::npos, "export contains toolpaths"))
+        return 7;
+    orca_preview_segment_t *segments = nullptr;
+    size_t count = 0, total = 0;
+    if (!require(orca_session_export_preview(session.get(), &segments, &count, &total) == 0,
+                 "export processed preview"))
+        return 8;
+    std::unique_ptr<orca_preview_segment_t, decltype(&orca_free)> preview(segments, orca_free);
+    if (!require(count > 0 && total == count, "preview preserves every processed move"))
+        return 9;
+    float max_z = 0.f;
+    bool has_height = false;
+    bool has_metrics = false;
+    unsigned int previous_gcode_id = 0;
+    for (size_t i = 0; i < count; ++i) {
+        if (!require(std::isfinite(segments[i].end_z), "finite preview coordinates"))
+            return 10;
+        if (!require(segments[i].gcode_id >= previous_gcode_id, "preview keeps G-code order")) return 10;
+        previous_gcode_id = segments[i].gcode_id;
+        if (!segments[i].travel && segments[i].height > 0) {
+            has_height = true;
+            if (segments[i].volumetric_flow > 0 && segments[i].actual_speed > 0 &&
+                segments[i].layer_duration > 0 && segments[i].move_type == 10) has_metrics = true;
+        }
+        if (!segments[i].travel && segments[i].end_z > max_z)
+            max_z = segments[i].end_z;
+    }
+    if (!require(has_metrics, "preview includes desktop speed, flow and layer time") || !require(has_height, "preview includes processed bead height") || !require(max_z > 19.f, "preview reaches the top of the cube"))
+        return 11;
+    {
+        orca_preview_segment_t *retained = nullptr;
+        size_t retained_count = 0, retained_total = 0;
+        if (!require(orca_session_split_model(session.get(), 0, 0, 1, 0) < 0,
+                     "connected cube cannot be split") ||
+            !require(orca_session_lay_on_face(session.get(), 0, 100000, 100000, 100000) < 0,
+                     "failed face pick on an already sliced model") ||
+            !require(orca_session_set_object_option(session.get(), 0, "wall_loops", "invalid") != 0 &&
+                     orca_session_set_object_option(session.get(), 0, "nozzle_diameter", "0.8") != 0,
+                     "reject invalid/global-only override on an already sliced model") ||
+            !require(orca_session_edit_layer_profile(session.get(), 0, 0, std::numeric_limits<float>::quiet_NaN(), 0, 0) != 0,
+                     "reject bad adaptive input on an already sliced model") ||
+            !require(orca_session_set_option(session.get(), "wall_loops", "invalid") != 0,
+                     "reject invalid global setting without replacing the slice") ||
+            !require(orca_session_export_preview(session.get(), &retained, &retained_count, &retained_total) == 0 &&
+                     retained_count == count && retained_total == total,
+                     "unsuccessful staged split/face picks preserve the sliced preview")) {
+            orca_free(retained);
+            return 11;
+        }
+        orca_free(retained);
+    }
+    {
+        std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+            viewer(orca_session_create(argv[2]), orca_session_destroy);
+        diagnostic_session = viewer.get();
+        if (!require(orca_session_add_primitive(viewer.get(), 0, 5, 5, 5) == 0, "G-code viewer preserves plate fixture") ||
+            !require(orca_session_set_option(viewer.get(), "layer_height", "0.16") == 0, "G-code viewer profile fixture") ||
+            !require(orca_session_load_gcode(viewer.get(), output.c_str()) == 0, "open existing G-code") ||
+            !require(orca_session_object_count(viewer.get()) == 1, "G-code opening keeps the prepare model")) return 11;
+        char height[64] = {};
+        if (!require(orca_session_get_option(viewer.get(), "layer_height", height, sizeof(height)) == 0 &&
+                     std::fabs(std::strtof(height, nullptr) - 0.16f) < 0.001f,
+                     "G-code embedded settings do not overwrite the selected presets")) return 11;
+        orca_preview_segment_t *opened = nullptr;
+        size_t opened_count = 0, opened_total = 0;
+        if (!require(orca_session_export_preview(viewer.get(), &opened, &opened_count, &opened_total) == 0 && opened_count > 0,
+                     "opened G-code has processed toolpaths")) return 11;
+        orca_free(opened);
+        const char *metadata = orca_session_preview_metadata_json(viewer.get());
+        if (!require(metadata && std::string(metadata).find("bed_width") != std::string::npos &&
+                     std::string(metadata).find("filament_densities") != std::string::npos,
+                     "preview metadata uses the file's bed and materials")) return 11;
+        const std::string invalid_gcode = directory + "/invalid-preview.gcode";
+        { std::ofstream bad(invalid_gcode); bad << "M117 No extrusion\nG1 X10 Y10\n"; }
+        if (!require(orca_session_load_gcode(viewer.get(), invalid_gcode.c_str()) != 0, "reject G-code without extrusion")) return 11;
+        opened = nullptr;
+        size_t retained_count = 0, retained_total = 0;
+        if (!require(orca_session_export_preview(viewer.get(), &opened, &retained_count, &retained_total) == 0 &&
+                     retained_count == opened_count && orca_session_object_count(viewer.get()) == 1,
+                     "failed G-code open preserves preview and prepare model")) return 11;
+        orca_free(opened);
+        std::ifstream after_open(output);
+        const std::string untouched((std::istreambuf_iterator<char>(after_open)), std::istreambuf_iterator<char>());
+        if (!require(untouched == gcode, "G-code viewer never rewrites the opened file")) return 11;
+        const orca_preview_segment_t *taken = nullptr;
+        size_t taken_count = 0, taken_total = 0;
+        if (!require(!orca_session_take_preview(nullptr, &taken, &taken_count, &taken_total) &&
+                     !taken && taken_count == 0 && taken_total == 0 &&
+                     !orca_session_take_preview(viewer.get(), nullptr, &taken_count, &taken_total),
+                     "invalid transfer arguments leave the valid session cache untouched")) return 11;
+        std::unique_ptr<orca_preview_buffer_t, decltype(&orca_preview_buffer_destroy)> owner(
+            orca_session_take_preview(viewer.get(), &taken, &taken_count, &taken_total), orca_preview_buffer_destroy);
+        if (!require(owner && taken && taken_count == retained_count && taken_total == retained_total,
+                     "ownership transfer retains every processed move without sampling")) return 11;
+        const float first_endpoint = taken[0].end_x, last_endpoint = taken[taken_count - 1].end_z;
+        const auto *owned_records = taken;
+        const size_t owned_count = taken_count;
+        opened = nullptr; opened_count = 0; opened_total = 0;
+        float taken_seconds = 0, taken_volume = 0; int taken_layers = 0;
+        if (!require(orca_session_export_preview(viewer.get(), &opened, &opened_count, &opened_total) != 0 &&
+                     !opened && opened_count == 0 && opened_total == 0,
+                     "transferred records cannot be exported again as an empty success") ||
+            !require(orca_session_last_slice_stats(viewer.get(), &taken_seconds, &taken_volume, &taken_layers) == 0 &&
+                     taken_seconds > 0 && orca_session_preview_metadata_json(viewer.get()),
+                     "ownership transfer preserves statistics and file metadata") ||
+            !require(!orca_session_take_preview(viewer.get(), &taken, &opened_count, &opened_total) &&
+                     !taken && opened_count == 0 && opened_total == 0,
+                     "second transfer fails with cleared outputs")) return 11;
+        if (!require(orca_session_load_gcode(viewer.get(), output.c_str()) == 0,
+                     "reload repopulates session records after transfer") ||
+            !require(orca_session_export_preview(viewer.get(), &opened, &opened_count, &opened_total) == 0 &&
+                     opened && opened_count == taken_count && opened_total == taken_total,
+                     "copying export remains available after reload")) return 11;
+        orca_free(opened);
+        for (int action = 0; action < 2; ++action) {
+            if (!require(orca_session_load_gcode(viewer.get(), output.c_str()) == 0,
+                         "reload preview before object setting edit/reset")) return 11;
+            const int edited = action == 0
+                ? orca_session_set_object_option(viewer.get(), 0, "wall_loops", "4")
+                : orca_session_erase_object_option(viewer.get(), 0, "wall_loops");
+            opened = nullptr; opened_count = 0; opened_total = 0;
+            float seconds = 0, volume = 0; int layers = 0;
+            const bool cleared = edited == 0 &&
+                orca_session_export_preview(viewer.get(), &opened, &opened_count, &opened_total) != 0 &&
+                orca_session_last_slice_stats(viewer.get(), &seconds, &volume, &layers) != 0;
+            orca_free(opened);
+            if (!require(cleared, "object setting edit and reset invalidate previous toolpaths and statistics")) return 11;
+        }
+        if (!require(orca_session_load_gcode(viewer.get(), output.c_str()) == 0 &&
+                     orca_session_set_option(viewer.get(), "layer_height", "invalid") != 0 &&
+                     orca_session_get_option(viewer.get(), "layer_height", height, sizeof(height)) == 0 &&
+                     std::fabs(std::strtof(height, nullptr) - 0.16f) < 0.001f,
+                     "invalid global edit preserves the old configuration")) return 11;
+        const std::string invalid_config = directory + "/invalid-global-edit.ini";
+        { std::ofstream config(invalid_config); config << "layer_height = 0.23\nwall_loops = invalid\n"; }
+        if (!require(orca_session_load_config(viewer.get(), invalid_config.c_str()) != 0 &&
+                     orca_session_get_option(viewer.get(), "layer_height", height, sizeof(height)) == 0 &&
+                     std::fabs(std::strtof(height, nullptr) - 0.16f) < 0.001f,
+                     "partially parsed config failure preserves old values")) return 11;
+        opened = nullptr; opened_count = 0; opened_total = 0;
+        const bool preserved = orca_session_export_preview(viewer.get(), &opened, &opened_count, &opened_total) == 0 &&
+            opened_count == retained_count;
+        orca_free(opened);
+        if (!require(preserved, "invalid global edit preserves processed paths") ||
+            !require(orca_session_set_option(viewer.get(), "layer_height", "0.18") == 0,
+                     "accept new global process height")) return 11;
+        opened = nullptr; opened_count = 0; opened_total = 0;
+        const bool invalidated = orca_session_export_preview(viewer.get(), &opened, &opened_count, &opened_total) != 0 &&
+            orca_session_last_slice_stats(viewer.get(), &taken_seconds, &taken_volume, &taken_layers) != 0;
+        orca_free(opened);
+        if (!require(invalidated, "successful global edit invalidates old toolpaths and statistics before reslicing")) return 11;
+        const std::string valid_config = directory + "/valid-global-edit.ini";
+        { std::ofstream config(valid_config); config << "layer_height = 0.19\n"; }
+        if (!require(orca_session_load_gcode(viewer.get(), output.c_str()) == 0 &&
+                     orca_session_load_config(viewer.get(), valid_config.c_str()) == 0,
+                     "load valid global configuration over an existing preview")) return 11;
+        opened = nullptr; opened_count = 0; opened_total = 0;
+        const bool imported_invalidated = orca_session_export_preview(viewer.get(), &opened, &opened_count, &opened_total) != 0 &&
+            orca_session_last_slice_stats(viewer.get(), &taken_seconds, &taken_volume, &taken_layers) != 0;
+        orca_free(opened);
+        if (!require(imported_invalidated, "successful config import invalidates prior paths and statistics")) return 11;
+        if (!require(orca_session_load_gcode(viewer.get(), output.c_str()) == 0 &&
+                     orca_session_set_object_instances(viewer.get(), 0, -1) < 0 &&
+                     orca_session_set_object_instances(viewer.get(), 0, 1) == 0,
+                     "invalid and unchanged copy counts preserve a loaded preview")) return 11;
+        opened = nullptr; opened_count = 0; opened_total = 0;
+        const bool copies_preserved = orca_session_export_preview(viewer.get(), &opened, &opened_count, &opened_total) == 0 &&
+            opened_count == retained_count;
+        orca_free(opened);
+        if (!require(copies_preserved && orca_session_set_object_instances(viewer.get(), 0, 2) == 0,
+                     "valid copy edit follows preserved preview")) return 11;
+        opened = nullptr; opened_count = 0; opened_total = 0;
+        const bool copies_invalidated = orca_session_export_preview(viewer.get(), &opened, &opened_count, &opened_total) != 0 &&
+            orca_session_last_slice_stats(viewer.get(), &taken_seconds, &taken_volume, &taken_layers) != 0;
+        orca_free(opened);
+        if (!require(copies_invalidated, "accepted copy edit invalidates old toolpaths/statistics")) return 11;
+        for (int action : {0, 1}) {
+            if (!require(orca_session_load_gcode(viewer.get(), output.c_str()) == 0,
+                         "load preview before shared paint mutation")) return 11;
+            const int edited = action == 0 ? orca_session_paint_fill(viewer.get(), 0, 2, 1) :
+                orca_session_paint_clear(viewer.get(), 0, 2);
+            if (!require(action == 0 ? edited > 0 : edited == 0, "accept shared fill/clear paint")) return 11;
+            opened = nullptr; opened_count = 0; opened_total = 0;
+            const bool paint_invalidated = orca_session_export_preview(viewer.get(), &opened, &opened_count, &opened_total) != 0 &&
+                orca_session_last_slice_stats(viewer.get(), &taken_seconds, &taken_volume, &taken_layers) != 0;
+            orca_free(opened);
+            if (!require(paint_invalidated, "accepted painting invalidates old toolpaths/statistics")) return 11;
+        }
+        if (!require(orca_session_load_gcode(viewer.get(), output.c_str()) == 0 &&
+                     orca_session_paint_clear(viewer.get(), 0, 2) == 0 &&
+                     orca_session_paint_fill(viewer.get(), 0, 2, orca_max_paint_filaments() + 1) < 0,
+                     "empty clear and invalid color leave the previous preview intact")) return 11;
+        opened = nullptr; opened_count = 0; opened_total = 0;
+        const bool paint_preserved = orca_session_export_preview(viewer.get(), &opened, &opened_count, &opened_total) == 0 &&
+            opened_count == retained_count;
+        orca_free(opened);
+        if (!require(paint_preserved, "unchanged/rejected painting preserves processed paths")) return 11;
+        for (int action : {0, 1, 2}) {
+            if (!require(orca_session_load_gcode(viewer.get(), output.c_str()) == 0 &&
+                         orca_session_duplicate_object(viewer.get(), 99) < 0 &&
+                         orca_session_delete_object(viewer.get(), 99) < 0,
+                         "invalid duplicate/delete leave an existing preview unchanged")) return 11;
+            opened = nullptr; opened_count = 0; opened_total = 0;
+            const bool edit_preserved = orca_session_export_preview(viewer.get(), &opened, &opened_count, &opened_total) == 0 &&
+                opened_count == retained_count &&
+                orca_session_last_slice_stats(viewer.get(), &taken_seconds, &taken_volume, &taken_layers) == 0;
+            orca_free(opened);
+            if (!require(edit_preserved, "rejected model edit preserves paths and statistics")) return 11;
+            const int edited = action == 0 ? orca_session_duplicate_object(viewer.get(), 0) :
+                action == 1 ? orca_session_delete_object(viewer.get(), 0) : orca_session_clear_model(viewer.get());
+            opened = nullptr; opened_count = 0; opened_total = 0;
+            const bool edit_invalidated = edited >= 0 &&
+                orca_session_export_preview(viewer.get(), &opened, &opened_count, &opened_total) != 0 &&
+                orca_session_last_slice_stats(viewer.get(), &taken_seconds, &taken_volume, &taken_layers) != 0;
+            orca_free(opened);
+            if (!require(edit_invalidated, "successful duplicate/delete/clear invalidate paths and statistics")) return 11;
+        }
+        diagnostic_session = session.get();
+        viewer.reset();
+        if (!require(owned_records[0].end_x == first_endpoint && owned_records[owned_count - 1].end_z == last_endpoint,
+                     "owned records survive later session edits, reloads and destruction")) return 11;
+        orca_preview_buffer_destroy(nullptr);
+        std::printf("PASS: standalone G-code preview, file metadata, preserved model/presets/source and failed-open recovery\n");
+        std::printf("PASS: independent processed-preview buffer ownership and retained metadata/statistics\n");
+    }
+    diagnostic_session = session.get();
+    // A reader failure must leave the existing model/config/preview usable.
+    const std::string broken = directory + "/broken.3mf";
+    { std::ofstream invalid(broken); invalid << "not a 3MF archive"; }
+    if (!require(orca_session_load_model(session.get(), broken.c_str()) != 0, "reject invalid 3MF") ||
+        !require(orca_session_object_count(session.get()) == 1, "failed import preserves the previous model"))
+        return 11;
+    float previous_time = 0.f, previous_filament = 0.f;
+    int previous_layers = 0;
+    if (!require(orca_session_last_slice_stats(session.get(), &previous_time, &previous_filament, &previous_layers) == 0,
+                 "failed import preserves valid slice statistics"))
+        return 11;
+    // A failed next slice must invalidate the prior successful statistics/preview.
+    if (!require(orca_session_set_option(session.get(), "layer_height", "5") == 0, "set invalid layer height") ||
+        !require(orca_session_slice_to_gcode(session.get(), (directory + "/invalid.gcode").c_str()) != 0,
+                 "reject layer height above nozzle diameter"))
+        return 12;
+    orca_preview_segment_t *stale = nullptr;
+    size_t stale_count = 0, stale_total = 0;
+    if (!require(orca_session_export_preview(session.get(), &stale, &stale_count, &stale_total) != 0,
+                 "failed slice cannot export stale preview")) {
+        orca_free(stale);
+        return 13;
+    }
+    if (!require(orca_session_set_option(session.get(), "layer_height", "0.2") == 0, "restore valid layer height"))
+        return 14;
+    orca_session_set_progress_callback(session.get(), [](int percent, const char *, void *user) {
+        if (percent >= 15)
+            orca_session_cancel_slice(static_cast<orca_session_t *>(user));
+    }, session.get());
+    const int cancelled = orca_session_slice_to_gcode(session.get(), (directory + "/cancelled.gcode").c_str());
+    orca_session_set_progress_callback(session.get(), nullptr, nullptr);
+    if (!require(cancelled == -7, "cancel active slice"))
+        return 15;
+    if (!require(orca_session_slice_to_gcode(session.get(), (directory + "/recovered.gcode").c_str()) == 0,
+                 "slice again after cancellation"))
+        return 16;
+    {
+        const std::string supported_gcode = directory + "/support-preview.gcode";
+        std::ofstream fixture(supported_gcode);
+        fixture << "; generated by OrcaSlicer 2.5.1\nG90\nM83\nG92 E0\n"
+                   ";LAYER_CHANGE\n;Z:0.2\n;HEIGHT:0.2\n;WIDTH:0.45\nG1 Z0.2 F1200\n"
+                   ";TYPE:Support\nG1 X10 Y10 F6000\nG1 X20 E1 F1200\n"
+                   ";TYPE:Support interface\nG1 Y20 E1 F1200\n"
+                   ";TYPE:Outer wall\nG1 X10 E1 F1200\n";
+        // An Orca-produced file requires its embedded configuration block.
+        const auto config_start = gcode.find("; CONFIG_BLOCK_START");
+        if (!require(config_start != std::string::npos, "real export contains embedded configuration")) return 16;
+        fixture << gcode.substr(config_start);
+        fixture.close();
+        std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+            supported(orca_session_create(argv[2]), orca_session_destroy);
+        diagnostic_session = supported.get();
+        if (!require(orca_session_load_gcode(supported.get(), supported_gcode.c_str()) == 0, "open support toolpath fixture")) return 16;
+        orca_preview_segment_t *paths = nullptr;
+        size_t count = 0, total = 0;
+        if (!require(orca_session_export_preview(supported.get(), &paths, &count, &total) == 0, "export support paths")) return 16;
+        bool support = false, interface = false;
+        for (size_t i = 0; i < count; ++i) {
+            const auto &path = paths[i];
+            const std::string role = orca_preview_role_name(path.role);
+            if (path.move_type == 10 && !path.travel) {
+                support |= role == "Support";
+                interface |= role == "Support interface";
+            }
+        }
+        orca_free(paths);
+        if (!require(support && interface, "support and interface remain physical extrusion paths")) return 16;
+        std::puts("PASS: support and support-interface paths retained by native preview");
+    }
+    {
+        std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+            dense(orca_session_create(argv[2]), orca_session_destroy);
+        diagnostic_session = dense.get();
+        if (!require(orca_session_add_primitive(dense.get(), 1, 20, 20, 20) == 0, "dense preview cylinder") ||
+            !require(orca_session_set_option(dense.get(), "use_relative_e_distances", "1") == 0, "dense fixture extrusion mode") ||
+            !require(orca_session_set_option(dense.get(), "layer_change_gcode", "G92 E0") == 0, "dense fixture layer reset") ||
+            !require(orca_session_set_option(dense.get(), "min_layer_height", "0.04") == 0, "dense fixture layer limit") ||
+            !require(orca_session_set_option(dense.get(), "resolution", "0.001") == 0, "retain dense fixture curve detail") ||
+            !require(orca_session_set_option(dense.get(), "layer_height", "0.05") == 0, "fine preview layers") ||
+            !require(orca_session_slice_to_gcode(dense.get(), (directory + "/dense-preview.gcode").c_str()) == 0,
+                     "slice complete dense preview")) return 16;
+        orca_preview_segment_t *full = nullptr;
+        size_t full_count = 0, full_total = 0;
+        if (!require(orca_session_export_preview(dense.get(), &full, &full_count, &full_total) == 0,
+                     "export dense preview")) return 16;
+        std::unique_ptr<orca_preview_segment_t, decltype(&orca_free)> full_preview(full, orca_free);
+        if (!require(full_count > 60000 && full_count == full_total, "dense preview keeps every move beyond old sampling limit")) return 16;
+        std::printf("PASS: full dense preview contains %zu moves without sampling\n", full_count);
+    }
+    diagnostic_session = session.get();
+    const std::string data_dir = directory + "/preset-catalog";
+    if (!require(orca_session_set_data_dir(session.get(), data_dir.c_str()) == 0, "set preset data directory") ||
+        !require(orca_session_load_all_presets(session.get()) == 0, "load official preset catalog") ||
+        !require(orca_session_import_preset_catalog(session.get(), (directory + "/mobile-presets.orca_bundle").c_str()) == 2,
+                 "import native printer and filament bundle") ||
+        !require(orca_session_select_printer(session.get(), "iOS imported printer") == 0, "select imported printer") ||
+        !require(orca_session_select_filament(session.get(), "iOS imported PLA") == 0, "select imported filament") ||
+        !require(orca_session_import_cloud_presets(session.get(), (directory + "/cloud-presets.json").c_str(), "fixture-owner") == 3,
+                 "import all cloud preset types") ||
+        !require(orca_session_select_printer(session.get(), "iOS cloud printer") == 0, "select cloud printer") ||
+        !require(orca_session_select_filament(session.get(), "iOS cloud PLA") == 0, "select cloud filament") ||
+        !require(orca_session_select_process(session.get(), "iOS cloud process") == 0, "select cloud process") ||
+        !require(orca_session_export_user_profiles(session.get(), (directory + "/user-profile-export.json").c_str()) >= 5,
+                 "export local and cloud profiles for sync"))
+        return 16;
+    if (!require(orca_session_preset_origin(session.get(), 2, "iOS cloud printer") == 2, "cloud printer ownership") ||
+        !require(orca_session_preset_origin(session.get(), 1, "iOS cloud PLA") == 2, "cloud filament ownership") ||
+        !require(orca_session_preset_origin(session.get(), 0, "iOS cloud process") == 2, "cloud process ownership") ||
+        !require(orca_session_preset_origin(session.get(), 2, "iOS imported printer") == 1, "local printer ownership")) return 16;
+    // A filament snapshot must never overwrite process settings, including after
+    // recreating the session and reading old on-disk user presets.
+    if (!require(orca_session_set_option(session.get(), "layer_height", "0.12") == 0 &&
+                 orca_session_save_user_process(session.get(), "Mobile+ Fine") == 0, "save process with sanitized name") ||
+        !require(std::string(orca_session_selected_process(session.get())) == "Mobile_ Fine", "canonical saved process name") ||
+        !require(orca_session_set_option(session.get(), "layer_height", "0.28") == 0 &&
+                 orca_session_set_option(session.get(), "nozzle_temperature", "235") == 0 &&
+                 orca_session_save_user_filament(session.get(), "Mobile+ PLA") == 0, "save filament independently")) return 17;
+    if (!require(orca_session_export_config(session.get(),
+                 (data_dir + "/user_presets/filament/Legacy Full Filament.json").c_str()) == 0,
+                 "write legacy full-snapshot filament fixture")) return 17;
+    {
+        std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+            variants(orca_session_create(argv[2]), orca_session_destroy);
+        diagnostic_session = variants.get();
+        if (!require(orca_session_set_data_dir(variants.get(), data_dir.c_str()) == 0 &&
+                     orca_session_set_option(variants.get(), "filament_type", "PLA") == 0 &&
+                     orca_session_set_option(variants.get(), "filament_extruder_variant", "Direct Drive Standard;Direct Drive High Flow") == 0 &&
+                     orca_session_set_option(variants.get(), "nozzle_temperature", "220,230") == 0 &&
+                     orca_session_save_user_filament(variants.get(), "Variant Slot") == 0,
+                     "single material with two nozzle variants")) return 17;
+    }
+    std::unique_ptr<orca_session_t, decltype(&orca_session_destroy)>
+        reopened(orca_session_create(argv[2]), orca_session_destroy);
+    if (!require(orca_session_set_data_dir(reopened.get(), data_dir.c_str()) == 0 &&
+                 orca_session_load_all_presets(reopened.get()) == 0 &&
+                 orca_session_select_process(reopened.get(), "Mobile_ Fine") == 0 &&
+                 orca_session_select_filament(reopened.get(), "Legacy Full Filament") == 0 &&
+                 orca_session_apply_presets(reopened.get()) == 0, "restore saved process and filament in fresh session")) return 17;
+    char restored_value[4096] = {};
+    if (!require(orca_session_get_option(reopened.get(), "layer_height", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value) == "0.12", "filament restore preserves process height") ||
+        !require(orca_session_get_option(reopened.get(), "nozzle_temperature", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value) == "235", "process restore preserves filament temperature") ||
+        !require(orca_session_add_project_filament(reopened.get()) == 0, "add project filament using native sizing") ||
+        !require(orca_session_get_option(reopened.get(), "layer_height", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value) == "0.12", "adding filament preserves process edits")) return 17;
+    const int mix_ids[] = {1, 2}, mix_ratios[] = {40, 60}, bad_ratios[] = {40, 40};
+    if (!require(orca_session_add_mixed_filament(reopened.get(), mix_ids, bad_ratios, 2, 0, 0, 0) != 0,
+                 "reject invalid mixed ratios") ||
+        !require(orca_session_add_mixed_filament(reopened.get(), mix_ids, mix_ratios, 2, 1, 0, 1) == 0,
+                 "native mixed filament with per-part gradient") ||
+        !require(orca_session_get_option(reopened.get(), "filament_mixed_components", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value).find("1,2") != std::string::npos, "mixed physical component metadata") ||
+        !require(orca_session_get_option(reopened.get(), "filament_mixed_gradient_range", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value).find("0.9000,0.1000") != std::string::npos, "desktop linear gradient metadata")) return 17;
+    diagnostic_session = reopened.get();
+    const char *mix_info = orca_session_mixed_filament_json(reopened.get(), 2);
+    if (!require(mix_info != nullptr, "read existing mixed slot")) return 17;
+    const std::string mix_before = mix_info;
+    const std::string mix_profile = orca_session_filament_slot_name(reopened.get(), 2);
+    const int edited_ratios[] = {30, 70};
+    if (!require(orca_session_update_mixed_filament(reopened.get(), 2, bad_ratios, 2, -1, 0) != 0,
+                 "reject an invalid ratio edit") ||
+        !require(orca_session_update_mixed_filament(reopened.get(), 0, edited_ratios, 2, -1, 0) != 0,
+                 "reject editing a physical slot as mixed")) return 17;
+    mix_info = orca_session_mixed_filament_json(reopened.get(), 2);
+    if (!require(mix_info && std::string(mix_info) == mix_before, "failed mix edits preserve metadata") ||
+        !require(orca_session_update_mixed_filament(reopened.get(), 2, edited_ratios, 2, 2, 0) == 0,
+                 "edit proportions and reverse a linear gradient") ||
+        !require(orca_session_get_option(reopened.get(), "filament_mixed_sublayer_ratios", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value).find("0.3000,0.7000") != std::string::npos, "updated native ratios") ||
+        !require(orca_session_get_option(reopened.get(), "filament_mixed_gradient_range", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value).find("0.1000,0.9000") != std::string::npos, "updated native gradient") ||
+        !require(std::string(orca_session_filament_slot_name(reopened.get(), 2)) == mix_profile,
+                 "mix edit preserves preset identity") ||
+        !require(orca_session_get_option(reopened.get(), "layer_height", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value) == "0.12", "mix edit preserves process settings")) return 17;
+    if (!require(orca_session_set_option(reopened.get(), "filament_mixed_gradient_curve", "\"\";\"\";\"0,0.1|0.5,0.5|1,0.9\"") == 0,
+                 "import custom gradient fixture")) return 17;
+    orca_session_get_option(reopened.get(), "filament_mixed_gradient_curve", restored_value, sizeof(restored_value));
+    const std::string imported_curve = restored_value;
+    if (!require(orca_session_update_mixed_filament(reopened.get(), 2, mix_ratios, 2, -1, 1) == 0,
+                 "change ratios while retaining an imported curve") ||
+        !require(orca_session_get_option(reopened.get(), "filament_mixed_gradient_curve", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value) == imported_curve, "ratio edit does not replace imported curve") ||
+        !require(orca_session_set_option(reopened.get(), "filament_mixed_sublayer_ratios", "\"\";\"\";\"0.3333,0.6667\"") == 0,
+                 "import precise ratios")) return 17;
+    orca_session_get_option(reopened.get(), "filament_mixed_sublayer_ratios", restored_value, sizeof(restored_value));
+    const std::string imported_ratios = restored_value;
+    if (!require(orca_session_update_mixed_filament(reopened.get(), 2, nullptr, 0, -1, 1) == 0,
+                 "preserve exact imported mix without changing fields") ||
+        !require(orca_session_get_option(reopened.get(), "filament_mixed_gradient_curve", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value) == imported_curve, "custom gradient remains byte-identical") ||
+        !require(orca_session_get_option(reopened.get(), "filament_mixed_sublayer_ratios", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value) == imported_ratios, "untouched precise ratios remain byte-identical") ||
+        !require(orca_session_update_mixed_filament(reopened.get(), 2, mix_ratios, 2, 1, 1) == 0,
+                 "restore initial mix for subsequent profile regression cases")) return 17;
+    {
+        double gradient_min = 0, gradient_max = 1;
+        orca_mixed_gradient_limits(&gradient_min, &gradient_max);
+        if (!require(gradient_min > 0 && gradient_max < 1 && gradient_min < gradient_max,
+                     "native gradient editor bounds keep both filaments flowing") ||
+            !require(orca_session_set_option(reopened.get(), "filament_mixed_gradient_curve", "\"\";\"\";\"0,0.2|0.5,0.6|1,0.8\"") == 0,
+                     "gradient control curve fixture")) return 17;
+        orca_session_get_option(reopened.get(), "filament_mixed_gradient_curve", restored_value, sizeof(restored_value));
+        const std::string gradient_curve_before = restored_value;
+        if (!require(orca_session_edit_mixed_gradient(reopened.get(), 2, nullptr, 0, nullptr, 0, 0,
+                         "0.2345,0.7654", "0,0.2|0.5,0.6|1,0.8", 0) == 0,
+                     "disable custom gradient while retaining exact range and curve") ||
+            !require(orca_session_get_option(reopened.get(), "filament_mixed_gradient_curve", restored_value, sizeof(restored_value)) == 0 &&
+                     std::string(restored_value) == gradient_curve_before, "disabled gradient retains curve bytes") ||
+            !require(orca_session_edit_mixed_gradient(reopened.get(), 2, nullptr, 0, nullptr, 0, 1,
+                         "0.2345,0.7654", "0,0.2|0.5,0.6|1,0.8", 1) == 0,
+                     "re-enable imported gradient and per-part mode")) return 17;
+        const char *gradient_info = orca_session_mixed_filament_json(reopened.get(), 2);
+        if (!require(gradient_info != nullptr, "read updated gradient")) return 17;
+        const std::string gradient_info_before = gradient_info;
+        if (!require(orca_session_edit_mixed_gradient(reopened.get(), 2, nullptr, 0, nullptr, 0, 1,
+                         "0,1", "", 0) != 0 &&
+                     orca_session_edit_mixed_gradient(reopened.get(), 2, nullptr, 0, nullptr, 0, 1,
+                         "nan,0.8", "", 0) != 0, "reject degenerate and non-finite endpoint edits")) return 17;
+        gradient_info = orca_session_mixed_filament_json(reopened.get(), 2);
+        if (!require(gradient_info && std::string(gradient_info) == gradient_info_before,
+                     "invalid gradient edits preserve previous metadata") ||
+            !require(orca_session_edit_mixed_gradient(reopened.get(), 2, nullptr, 0, nullptr, 0, 1,
+                         "0.25,0.75", "", 0) == 0,
+                     "explicit linear selection clears imported curve") ||
+            !require(orca_session_get_option(reopened.get(), "filament_mixed_gradient_range", restored_value, sizeof(restored_value)) == 0 &&
+                     std::string(restored_value).find("0.25,0.75") != std::string::npos,
+                     "custom linear endpoints reach native project metadata") ||
+            !require(orca_session_update_mixed_filament(reopened.get(), 2, mix_ratios, 2, 1, 1) == 0,
+                     "restore legacy default gradient fixture")) return 17;
+    }
+    std::printf("PASS: existing mix edits, invalid-edit isolation, preset/process identity and imported curve preservation\n");
+    std::printf("PASS: native mixed filament ratios, validation and gradient metadata\n");
+    diagnostic_session = reopened.get();
+    if (!require(orca_session_set_option(reopened.get(), "nozzle_temperature", "245,211,240") == 0 &&
+                 orca_session_save_user_filament(reopened.get(), "Slot Target") == 0 &&
+                 orca_session_select_filament(reopened.get(), "Legacy Full Filament") == 0 &&
+                 orca_session_set_option(reopened.get(), "nozzle_temperature", "235,211,240") == 0 &&
+                 orca_session_set_option(reopened.get(), "layer_height", "0.13") == 0,
+                 "slot assignment fixture and unsaved process edit")) return 17;
+    char colors_before[4096]{};
+    orca_session_get_option(reopened.get(), "filament_colour", colors_before, sizeof(colors_before));
+    if (!require(orca_session_set_filament_slot(reopened.get(), 1, "Slot Target") == 0,
+                 "assign personal profile to second physical slot") ||
+        !require(std::string(orca_session_selected_filament(reopened.get())) == "Legacy Full Filament" &&
+                 std::string(orca_session_filament_slot_name(reopened.get(), 1)) == "Slot Target",
+                 "second-slot assignment does not steal first-slot selection") ||
+        !require(orca_session_get_option(reopened.get(), "nozzle_temperature", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value) == "235,245,240", "only the selected physical slot changes") ||
+        !require(orca_session_get_option(reopened.get(), "layer_height", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value) == "0.13", "slot assignment preserves unsaved process edits") ||
+        !require(orca_session_get_option(reopened.get(), "filament_colour", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value) == colors_before, "slot assignment preserves project colors") ||
+        !require(orca_session_set_filament_slot(reopened.get(), 1, "missing profile") < 0 &&
+                 orca_session_set_filament_slot(reopened.get(), 99, "Slot Target") < 0 &&
+                 orca_session_set_filament_slot(reopened.get(), 2, "Slot Target") < 0,
+                 "reject missing profiles, invalid slots and direct mixed-slot assignment")) return 17;
+    if (!require(orca_session_set_option(reopened.get(), "nozzle_temperature", "235,213,240") == 0 &&
+                 orca_session_set_filament_slot(reopened.get(), 0, "Slot Target") == 0,
+                 "assign first physical slot and its derived mix") ||
+        !require(orca_session_get_option(reopened.get(), "nozzle_temperature", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value) == "245,213,245", "update dependent mix while retaining other slot edits") ||
+        !require(orca_session_set_filament_slot(reopened.get(), 1, "Variant Slot") == 0 &&
+                 orca_session_get_option(reopened.get(), "nozzle_temperature", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value) == "245,220,230,245", "material assignment retains both nozzle variants") ||
+        !require(orca_session_set_filament_slot(reopened.get(), 1, "Slot Target") == 0 &&
+                 orca_session_get_option(reopened.get(), "nozzle_temperature", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value) == "245,245,245", "variant removal keeps other filament values aligned") ||
+        !require(orca_session_get_option(reopened.get(), "filament_mixed_gradient_range", restored_value, sizeof(restored_value)) == 0 &&
+                 std::string(restored_value).find("0.9000,0.1000") != std::string::npos, "preset changes retain mixing metadata")) return 17;
+    std::printf("PASS: per-slot personal materials, process/color isolation, dependent mixes and nozzle-variant alignment\n");
+    {
+        // The first component owns the virtual slot's material/nozzle variants.
+        // Keep unsaved physical temperatures while changing that inheritance.
+        diagnostic_session = reopened.get();
+        const int reordered[] = {2, 1};
+        if (!require(orca_session_set_filament_slot(reopened.get(), 1, "Variant Slot") == 0 &&
+                     orca_session_set_option(reopened.get(), "nozzle_temperature", "246,221,231,247") == 0 &&
+                     orca_session_replace_mixed_components(reopened.get(), 2, reordered, 2, nullptr, 0, -1, 0) == 0,
+                     "replace first mixed component without reassigning physical slots") ||
+            !require(orca_session_get_option(reopened.get(), "nozzle_temperature", restored_value, sizeof(restored_value)) == 0 &&
+                     std::string(restored_value) == "246,221,231,220,230", "new virtual variants preserve physical edits") ||
+            !require(std::string(orca_session_filament_slot_name(reopened.get(), 2)) == "Variant Slot" &&
+                     std::string(orca_session_selected_filament(reopened.get())) == "Slot Target", "virtual inheritance keeps first selection") ||
+            !require(orca_session_get_option(reopened.get(), "filament_mixed_sublayer_ratios", restored_value, sizeof(restored_value)) == 0 &&
+                     std::string(restored_value).find("0.4000,0.6000") != std::string::npos, "component reordering preserves exact proportions") ||
+            !require(orca_session_get_option(reopened.get(), "layer_height", restored_value, sizeof(restored_value)) == 0 &&
+                     std::string(restored_value) == "0.13", "component reordering preserves process edits")) return 17;
+    }
+    {
+        // Reuse the already loaded catalog, rather than allocate a third one.
+        diagnostic_session = session.get();
+        if (!require(orca_session_set_option(session.get(), "filament_colour", "#FF0000;#00FF00;#0000FF;#FFFFFF") == 0 &&
+                     orca_session_add_project_filament(session.get()) == 0 &&
+                     orca_session_add_mixed_filament(session.get(), mix_ids, mix_ratios, 2, 0, 0, 0) == 0,
+                     "component transition fixture with five physical slots") ||
+            !require(orca_session_clear_model(session.get()) == 0 &&
+                     orca_session_add_primitive(session.get(), 0, 10, 10, 10) == 0 &&
+                     orca_session_set_object_option(session.get(), 0, "extruder", "6") == 0 &&
+                     orca_session_paint_fill(session.get(), 0, 2, 6) >= 0, "assign object and facets to stable mixed slot")) return 17;
+        int mixed_paint_before = 0, mixed_paint_after = 0;
+        if (!require(orca_session_paint_stats(session.get(), 0, 2, 6, &mixed_paint_before) == 0 && mixed_paint_before > 0,
+                     "mixed slot has painted facets")) return 17;
+        const char *info = orca_session_mixed_filament_json(session.get(), 5);
+        if (!require(info != nullptr, "read component transition fixture")) return 17;
+        const std::string original_mix = info;
+        const int duplicates[] = {1, 1}, virtual_component[] = {1, 6}, unknown[] = {1, 7};
+        const int three_components[] = {3, 1, 2}, three_weights[] = {20, 30, 50};
+        if (!require(orca_session_replace_mixed_components(session.get(), 5, duplicates, 2, mix_ratios, 2, -1, 0) != 0 &&
+                     orca_session_replace_mixed_components(session.get(), 5, virtual_component, 2, mix_ratios, 2, -1, 0) != 0 &&
+                     orca_session_replace_mixed_components(session.get(), 5, unknown, 2, mix_ratios, 2, -1, 0) != 0 &&
+                     orca_session_replace_mixed_components(session.get(), 5, three_components, 3, three_weights, 3, 1, 0) != 0,
+                     "reject duplicate/virtual/missing components and three-way gradients")) return 17;
+        info = orca_session_mixed_filament_json(session.get(), 5);
+        if (!require(info && std::string(info) == original_mix, "failed replacements preserve mix metadata") ||
+            !require(orca_session_replace_mixed_components(session.get(), 5, three_components, 3, three_weights, 3, 0, 0) == 0 &&
+                     orca_session_replace_mixed_components(session.get(), 5, mix_ids, 2, mix_ratios, 2, 1, 1) == 0,
+                     "replace two-to-three and three-to-two components without adding slots") ||
+            !require(orca_session_get_option(session.get(), "filament_is_mixed", restored_value, sizeof(restored_value)) == 0 &&
+                     std::string(restored_value) == "0,0,0,0,0,1", "mixed slot index remains stable") ||
+            !require(orca_session_get_object_option(session.get(), 0, "extruder", restored_value, sizeof(restored_value)) == 0 &&
+                     std::string(restored_value) == "6", "component replacement keeps object assignment") ||
+            !require(orca_session_paint_stats(session.get(), 0, 2, 6, &mixed_paint_after) == 0 && mixed_paint_after == mixed_paint_before,
+                     "component replacement keeps painted facet IDs")) return 17;
+        orca_session_get_option(session.get(), "filament_colour", restored_value, sizeof(restored_value));
+        const std::string original_colors = restored_value;
+        info = orca_session_mixed_filament_json(session.get(), 5);
+        if (!require(info != nullptr, "read mix before physical recolor")) return 17;
+        const std::string metadata_before_recolor = info;
+        const char *new_colors = "#C0392B;#2980B9;#0000FF;#FFFFFF;#AAAAAA;#FFFFFF";
+        if (!require(orca_session_set_option(session.get(), "filament_multi_colour", original_colors.c_str()) == 0 &&
+                     orca_session_set_option(session.get(), "filament_colour", new_colors) == 0 &&
+                     orca_session_get_option(session.get(), "filament_colour", restored_value, sizeof(restored_value)) == 0 &&
+                     std::string(restored_value) != new_colors, "physical recolor refreshes the stale virtual swatch")) return 17;
+        const std::string recolored = restored_value;
+        if (!require(orca_session_get_option(session.get(), "filament_multi_colour", restored_value, sizeof(restored_value)) == 0 &&
+                     std::string(restored_value) == recolored, "single and multi-color project fields stay aligned") ||
+            !require(orca_session_update_mixed_filament(session.get(), 5, mix_ratios, 2, -1, 1) == 0 &&
+                     orca_session_get_option(session.get(), "filament_colour", restored_value, sizeof(restored_value)) == 0 &&
+                     std::string(restored_value) == recolored, "physical recolor agrees with native ratio-edit blending")) return 17;
+        info = orca_session_mixed_filament_json(session.get(), 5);
+        if (!require(info && std::string(info) == metadata_before_recolor,
+                     "recolor preserves mixed proportions, endpoints, curves and mode") ||
+            !require(orca_session_paint_stats(session.get(), 0, 2, 6, &mixed_paint_after) == 0 && mixed_paint_after == mixed_paint_before,
+                     "physical recolor preserves painted assignments")) return 17;
+        const std::string color_snapshot = directory + "/mixed-recolor.3mf";
+        const char *broken_components = "\"\";\"\";\"\";\"\";\"\";\"1,99\"";
+        const char *broken_colors = "#00FF00;#00FF00;#0000FF;#FFFFFF;#AAAAAA;#ABCDEF";
+        if (!require(orca_session_snapshot(session.get(), color_snapshot.c_str()) == 0 &&
+                     orca_session_set_option(session.get(), "filament_mixed_components", broken_components) == 0 &&
+                     orca_session_set_option(session.get(), "filament_colour", broken_colors) == 0 &&
+                     orca_session_get_option(session.get(), "filament_colour", restored_value, sizeof(restored_value)) == 0 &&
+                     std::string(restored_value) == broken_colors, "broken imported mix does not block physical color edits") ||
+            !require(orca_session_get_option(session.get(), "filament_mixed_components", restored_value, sizeof(restored_value)) == 0 &&
+                     std::string(restored_value).find("1,99") != std::string::npos, "recolor does not rewrite broken component metadata") ||
+            !require(orca_session_restore_snapshot(session.get(), color_snapshot.c_str()) == 0 &&
+                     orca_session_get_option(session.get(), "filament_colour", restored_value, sizeof(restored_value)) == 0 &&
+                     std::string(restored_value) == recolored, "3MF restores recomputed project colors") ||
+            !require(orca_session_get_option(session.get(), "filament_multi_colour", restored_value, sizeof(restored_value)) == 0 &&
+                     std::string(restored_value) == recolored, "3MF restores matching multi-color metadata") ||
+            !require(orca_session_set_option(session.get(), "filament_colour", original_colors.c_str()) == 0,
+                     "restore original physical swatches")) return 17;
+        std::printf("PASS: physical recolor updates native blends and multi-color fields, retains paint/mix metadata and round-trips through 3MF\n");
+    }
+    {
+        const int gradient_components[] = {1, 2}, gradient_weights[] = {40, 60};
+        if (!require(orca_session_add_mixed_gradient(session.get(), gradient_components, gradient_weights, 2,
+                         1, "0.2,0.8", "", 1) == 0, "create mix with custom linear endpoints")) return 17;
+        const char *created_gradient = orca_session_mixed_filament_json(session.get(), 6);
+        if (!require(created_gradient && std::string(created_gradient).find("\"range\":\"0.2,0.8\"") != std::string::npos,
+                     "new mix preserves chosen gradient range")) return 17;
+        orca_session_get_option(session.get(), "filament_is_mixed", restored_value, sizeof(restored_value));
+        const std::string flags_before_invalid = restored_value;
+        if (!require(orca_session_add_mixed_gradient(session.get(), gradient_components, gradient_weights, 2,
+                         1, "0,1", "", 0) != 0, "invalid gradient rejected before adding a slot") ||
+            !require(orca_session_get_option(session.get(), "filament_is_mixed", restored_value, sizeof(restored_value)) == 0 &&
+                     std::string(restored_value) == flags_before_invalid, "failed gradient creation preserves slot count")) return 17;
+    }
+    std::printf("PASS: custom gradient endpoints, retained curves, mode transitions and invalid-creation isolation\n");
+    std::printf("PASS: component replacement, virtual variants, rejected references, count transitions and painting identity\n");
+    std::printf("PASS: independent process/filament persistence, canonical names and native filament addition\n");
+    std::printf("PASS: primitives, centered axis scaling, flush matrix repair and processed preview height\n");
+    std::printf("PASS: native preset bundle, cloud printer/filament catalog, selection and profile export\n");
+    std::printf("PASS: 3MF import, slicing, G-code export, processed preview, validation, cancellation and recovery\n");
+    return 0;
+}

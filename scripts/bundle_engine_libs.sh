@@ -32,8 +32,15 @@ if [[ -d "$DEPS_LIB" ]]; then
       *python*|*GLEW*|*glfw*|*wx*|*eigen_blas*|*eigen_lapack*) continue ;;
       *.a) LIBS+=("$f") ;;
     esac
-  done < <(find "$DEPS_LIB" -maxdepth 1 -name 'lib*.a' -print0 2>/dev/null || true)
+  done < <(find "$DEPS_LIB" -type f -name 'lib*.a' -print0 2>/dev/null || true)
 fi
+
+for required in "$BUILD/src/ios/liborca_ios_api.a" "$BUILD/src/libslic3r/liblibslic3r.a" "$BUILD/src/libslic3r/liblibslic3r_cgal.a"; do
+  if [[ ! -s "$required" ]]; then
+    echo "Missing or empty required engine archive: $required" >&2
+    exit 1
+  fi
+done
 
 EXIST=()
 for L in "${LIBS[@]}"; do

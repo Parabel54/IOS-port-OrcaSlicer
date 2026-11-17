@@ -11,9 +11,31 @@ import UIKit
 
 @main
 struct OrcaSlicerApp: App {
+    init() {
+        if ProcessInfo.processInfo.arguments.contains("--test-document-import") {
+            OrcaEngine.wizardCompleted = true
+        }
+        if ProcessInfo.processInfo.arguments.contains("--test-view-metadata") {
+            let completion = DispatchSemaphore(value: 0)
+            let result = FileManager.default.temporaryDirectory.appendingPathComponent("orca-view-metadata-smoke.txt")
+            try? FileManager.default.removeItem(at: result)
+            let worker = Thread {
+                _ = String(reflecting: OrcaRootView.Body.self)
+                do { try "PASS: root view metadata resolves on a 1 MB stack".write(to: result, atomically: true, encoding: .utf8) }
+                catch { NSLog("Could not write view metadata test result: %@", error.localizedDescription) }
+                completion.signal()
+            }
+            worker.name = "OrcaViewMetadataSmoke"
+            worker.stackSize = 1_048_576
+            worker.start()
+            precondition(completion.wait(timeout: .now() + 15) == .success && FileManager.default.fileExists(atPath: result.path),
+                         "Root view metadata test failed")
+        }
+    }
+
     var body: some Scene {
         WindowGroup {
-            OrcaRootView()
+            StartupRecoveryView()
                 .preferredColorScheme(.dark)
         }
     }
@@ -39,13 +61,43 @@ private enum OrcaTheme {
 // MARK: - Root
 
 struct OrcaRootView: View {
-    @StateObject private var engine = OrcaEngine()
-    @State private var showImporter = false
-    @State private var importAppend = false
+    @StateObject private var engine: OrcaEngine
+    @Environment(\.scenePhase) private var scenePhase
+
+    @ObservedObject private var documents: DocumentInbox
+
+    init(loadSystemProfiles: Bool = true, documents: DocumentInbox? = nil) {
+        _documents = ObservedObject(wrappedValue: documents ?? DocumentInbox())
+        _engine = StateObject(wrappedValue: OrcaEngine(loadSystemProfiles: loadSystemProfiles))
+    }
+    @StateObject private var connections = PrinterConnections()
+    @StateObject private var cloudAccount = OrcaCloudAccount()
+    @State private var documentPicker: DocumentImportRequest?
+    @State private var pendingDocumentPicker: DocumentImportRequest?
+    @State private var didTestImport = false
+    @State private var processingDocument = false
+    @State private var cloudPresetRevision: UUID?
+    @State private var settingsDetent: PresentationDetent = .large
+    @State private var operationError: String?
     @State private var showProcess = false
+    @State private var showPlateInspector = false
+    @State private var showMeshTools = false
+    @State private var showModelLibrary = false
+    @State private var primitiveKind = 0
+    @State private var primitiveX = "20"
+    @State private var primitiveY = "20"
+    @State private var primitiveZ = "20"
+    @State private var scaleX = "100"
+    @State private var scaleY = "100"
+    @State private var scaleZ = "100"
+    @State private var uniformScale = true
+    @State private var moveX = "0"
+    @State private var moveY = "0"
+    @State private var moveZ = "0"
+    @State private var rotateAmount = "45"
+    @State private var showPreviewControls = false
+    @State private var sidebarVisible = true
     @State private var showCalibration = false
-    @State private var showPresetImporter = false
-    @State private var presetImportKind: Int = 0 // 0 process, 1 filament, 2 overlay
     @State private var exportShareURL: URL?
     @State private var projectURL: URL?
     @State private var layerHeight = "0.20"
@@ -69,6 +121,7 @@ struct OrcaRootView: View {
         case move = "Move"
         case rotate = "Rotate"
         case scale = "Scale"
+        case layOnFace = "Lay on face"
         case measure = "Measure"
         case paintSupport = "Support paint"
         case paintSeam = "Seam paint"
@@ -77,10 +130,18 @@ struct OrcaRootView: View {
         case paintBrimEars = "Brim ears"
     }
 
+    @State private var rotationAxis = 2
+    @State private var plateTouchMode: PlateTouchMode = .orbit
+    @State private var fitCameraRequest = UUID()
+    @State private var cameraView: CameraPreset = .home
+    @AppStorage("orca.usePerspectiveCamera") private var usePerspectiveCamera = true
+    @AppStorage("orca.autoPerspective") private var autoPerspective = false
+    @State private var cameraViewPolicy = CameraViewPolicy()
     @State private var gizmoMode: GizmoMode = .select
     @State private var showPreferences = false
     @State private var showAbout = false
     @State private var showShortcuts = false
+    @State private var showLayerHeights = false
     @State private var showObjectSettings = false
     @State private var presetBundleShareURL: URL?
     @State private var textPlateName = "Text plate"
@@ -92,10 +153,6 @@ struct OrcaRootView: View {
     @State private var wizardVendors: Set<String> = Set(OrcaEngine.preferredVendors)
     @State private var wizardLanguage: String = OrcaEngine.appLanguage
     @State private var wizardRegion: String = OrcaEngine.appRegion
-    @State private var objLayerHeight = ""
-    @State private var objWalls = ""
-    @State private var objInfill = ""
-    @State private var objExtruder = "0"
     @State private var measurePointA: SIMD3<Float>?
     @State private var measurePointB: SIMD3<Float>?
     @State private var measureDistanceText = ""
@@ -147,7 +204,7 @@ struct OrcaRootView: View {
     private var currentPaintState: Int {
         switch gizmoMode {
         case .paintMMU:
-            return paintToolState == 0 ? 0 : max(1, min(16, paintMMUExtruder))
+            return paintToolState == 0 ? 0 : max(1, min(engine.maximumPaintFilaments, paintMMUExtruder))
         case .paintFuzzy:
             return paintToolState == 0 ? 0 : 1
         case .paintSupport, .paintSeam:
@@ -157,29 +214,144 @@ struct OrcaRootView: View {
         }
     }
 
-    var body: some View {
-        GeometryReader { geo in
-            let bottomPad = max(geo.safeAreaInsets.bottom, 8)
+    // The root previously resolved a single enormous opaque view type and could
+    // overflow the main-thread stack while SwiftUI instantiated its metadata.
+    // Erase at screen and presentation boundaries, preserving the existing state.
+    private var rootLayout: AnyView {
+        AnyView(GeometryReader { geo in
             ZStack {
                 OrcaTheme.bg.ignoresSafeArea()
                 VStack(spacing: 0) {
-                    headerBar
-                    tabBar
-                    plateStage
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                    if mainTab == .preview, engine.gcodeGeometry != nil {
-                        layerScrubber
+                    headerBar(inlineInspector: geo.size.width >= 860 && geo.size.height >= 500)
+                        .fixedSize(horizontal: false, vertical: true).layoutPriority(2)
+                    if !engine.automaticProfileLoading {
+                        Text("Recovery mode: system profiles are not loaded. Reopen the app to retry startup.")
+                            .font(.caption)
+                            .padding(8)
                     }
-                    controlsPanel(bottomInset: bottomPad)
+                    tabBar.fixedSize(horizontal: false, vertical: true).layoutPriority(2)
+                    if mainTab == .device {
+                        NavigationStack { devicePlaceholder }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        HStack(spacing: 0) {
+                            // Available bounds also cover iPad split view and Stage Manager.
+                            if geo.size.width >= 860 && geo.size.height >= 500 && sidebarVisible {
+                                processSheet.frame(width: min(340, geo.size.width * 0.32))
+                                Divider()
+                            }
+                            VStack(spacing: 0) {
+                                // Bound the scene and inspector to the space left by the
+                                // tabs and footer. Their content must not displace actions
+                                // on short phones or in a compact landscape window.
+                                GeometryReader { workspace in
+                                    VStack(spacing: 0) {
+                                        plateStage
+                                            .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity).clipped()
+                                            .allowsHitTesting(!isSlicing && !engine.presetsLoading && !engine.sessionBusy)
+                                        if mainTab == .preview && !engine.previewLayerHeights.isEmpty {
+                                            previewLayerBar.padding(.horizontal, 12).padding(.vertical, 6)
+                                                .background(OrcaTheme.panel)
+                                        }
+                                        if mainTab == .preview && showPreviewControls {
+                                            previewControlsPanel.frame(height: min(320, workspace.size.height * 0.4))
+                                        }
+                                    }.frame(width: workspace.size.width, height: workspace.size.height).clipped()
+                                }
+                                // Clipping drawing alone does not bound SwiftUI hit testing.
+                                .contentShape(Rectangle())
+                                compactControls.padding(.vertical, 4).background(OrcaTheme.panel)
+                                    .fixedSize(horizontal: false, vertical: true).layoutPriority(2).zIndex(1)
+                            }
+                        }
+                    }
                 }
+                .frame(width: geo.size.width, height: geo.size.height).clipped()
+                .onAppear { recordWorkspaceLayout(geo.size) }
+                .onChange(of: geo.size) { recordWorkspaceLayout($0) }
             }
         }
-        .sheet(isPresented: $showProcess) {
+        // The C session belongs to the background slice until it finishes.
+        .disabled(isSlicing || engine.presetsLoading || engine.sessionBusy)
+        .overlay {
+            if isSlicing {
+                VStack(spacing: 14) {
+                    ProgressView().tint(OrcaTheme.accent)
+                    Text(engine.slicePhase.isEmpty ? "Starting…" : engine.slicePhase)
+                        .foregroundStyle(OrcaTheme.text)
+                    Button("Cancel slicing") { engine.cancelSlice() }
+                        .foregroundStyle(OrcaTheme.accent)
+                        .disabled(engine.slicePercent < 5)
+                }
+                .padding(24)
+                .background(OrcaTheme.panel)
+                .clipShape(RoundedRectangle(cornerRadius: 14))
+            } else if engine.sessionBusy {
+                ProgressView(engine.sessionBusyMessage)
+                    .padding(24)
+                    .background(OrcaTheme.panel)
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
+            } else if documents.receiving > 0 {
+                ProgressView("Preparing file…")
+                    .padding(20)
+                    .background(OrcaTheme.panel)
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
+            }
+        })
+    }
+
+    private func recordWorkspaceLayout(_ size: CGSize) {
+        guard ProcessInfo.processInfo.arguments.contains("--test-view-metadata") else { return }
+        let data: [String: Any] = ["width": size.width, "height": size.height,
+                                  "sidebar": size.width >= 860 && size.height >= 500 && sidebarVisible]
+        if let json = try? JSONSerialization.data(withJSONObject: data) {
+            try? json.write(to: FileManager.default.temporaryDirectory.appendingPathComponent("orca-workspace-layout.json"))
+            if size.width > size.height {
+                try? json.write(to: FileManager.default.temporaryDirectory.appendingPathComponent("orca-workspace-landscape.json"))
+            }
+        }
+    }
+
+    private var primaryPresentations: AnyView {
+        AnyView(rootLayout
+        .sheet(isPresented: $showProcess, onDismiss: presentPendingDocumentPicker) {
             processSheet
-                .presentationDetents([.medium, .large])
+                .presentationDetents([.medium, .large], selection: $settingsDetent)
                 .presentationDragIndicator(.visible)
                 .preferredColorScheme(.dark)
+        }
+        .sheet(isPresented: $showPlateInspector, onDismiss: { importPendingDocuments(); importCloudPresetsIfReady() }) {
+            NavigationStack {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        plateTabsRow
+                        objectPickerRow
+                        NavigationLink("Mesh tools") {
+                            MeshToolsPanel(engine: engine) {
+                                status = engine.lastMessage
+                                showPlateInspector = false
+                            }
+                        }.buttonStyle(.bordered).disabled(!engine.hasModel).accessibilityIdentifier("mesh-tools")
+                        transformEditor
+                        plateToolsRow
+                    }.padding()
+                }
+                .navigationTitle("Objects and tools")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showPlateInspector = false }.disabled(engine.sessionBusy) } }
+            }.presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
+                .interactiveDismissDisabled(engine.sessionBusy)
+        }
+        .sheet(isPresented: $showModelLibrary) { modelLibrary }
+        .sheet(isPresented: $showMeshTools, onDismiss: {
+            presentPendingDocumentPicker(); importPendingDocuments(); importCloudPresetsIfReady()
+        }) {
+            NavigationStack {
+                MeshToolsPanel(engine: engine) { status = engine.lastMessage; showMeshTools = false }
+                    .toolbar { ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { showMeshTools = false }.disabled(engine.sessionBusy)
+                    } }
+            }.presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
+                .interactiveDismissDisabled(engine.sessionBusy)
         }
         .sheet(isPresented: $showCalibration) {
             calibrationSheet
@@ -193,6 +365,11 @@ struct OrcaRootView: View {
                 .interactiveDismissDisabled(!OrcaEngine.wizardCompleted)
                 .preferredColorScheme(.dark)
         }
+        )
+    }
+
+    private var auxiliaryPresentations: AnyView {
+        AnyView(primaryPresentations
         .sheet(isPresented: $showPreferences) {
             preferencesSheet
                 .presentationDetents([.medium, .large])
@@ -231,7 +408,7 @@ struct OrcaRootView: View {
                 .navigationTitle("Shortcuts")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
-                    ToolbarItem(placement: .topBarTrailing) {
+                    ToolbarItem(placement: .navigationBarTrailing) {
                         Button("Done") { showShortcuts = false }
                             .foregroundStyle(OrcaTheme.accent)
                     }
@@ -240,11 +417,30 @@ struct OrcaRootView: View {
             .presentationDetents([.medium, .large])
             .preferredColorScheme(.dark)
         }
+        .sheet(isPresented: $showLayerHeights, onDismiss: {
+            presentPendingDocumentPicker(); importPendingDocuments(); importCloudPresetsIfReady()
+        }) {
+            NavigationStack {
+                LayerHeightPanel(engine: engine, objectIndex: engine.selectedObjectIndex) { status = engine.lastMessage }
+                    .toolbar { ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { showLayerHeights = false }.disabled(engine.sessionBusy)
+                    } }
+            }
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+            .interactiveDismissDisabled(engine.sessionBusy)
+            .preferredColorScheme(.dark)
+        }
         .sheet(isPresented: $showObjectSettings) {
             objectSettingsSheet
                 .presentationDetents([.medium, .large])
                 .preferredColorScheme(.dark)
         }
+        )
+    }
+
+    var body: some View {
+        auxiliaryPresentations
         .onAppear {
             if !OrcaEngine.wizardCompleted {
                 showWizard = true
@@ -254,51 +450,58 @@ struct OrcaRootView: View {
                 wizardVendors = Set(OrcaEngine.preferredVendors)
             }
         }
-        .fileImporter(
-            isPresented: $showImporter,
-            allowedContentTypes: modelTypes,
-            allowsMultipleSelection: false
-        ) { handleImport($0) }
-        .fileImporter(
-            isPresented: $showPresetImporter,
-            allowedContentTypes: [.json, .data],
-            allowsMultipleSelection: false
-        ) { result in
-            switch result {
-            case .success(let urls):
-                guard let url = urls.first else { return }
-                let kind: Int? = presetImportKind == 2 ? nil : presetImportKind
-                if engine.importConfigJSON(url: url, asUserPreset: kind) {
-                    status = engine.lastMessage
-                    syncProcessFieldsFromEngine()
-                } else {
-                    status = engine.lastMessage
+        .sheet(item: $documentPicker) { request in
+            NativeDocumentPicker(settingsOnly: request.isSettings, onPick: { url in
+                documents.receive(url, kind: request.kind)
+            }, onDismiss: {
+                if ProcessInfo.processInfo.arguments.contains("--test-native-picker"), documents.receiving == 0, documents.pending.isEmpty {
+                    // UI automation cancels through the system button, then
+                    // exercises the document inbox with its local fixture.
+                    documents.receive(testDocumentFixture, kind: request.kind)
                 }
-            case .failure(let err):
-                status = err.localizedDescription
+                documentPicker = nil
+            })
+        }
+        .onAppear {
+            importPendingDocuments()
+            testDocumentPickerWhenReady()
+            if ProcessInfo.processInfo.arguments.contains("--test-view-metadata") {
+                let result = PlateSceneView.cameraSmokeTest() ? "PASS: one-finger pan/orbit and two-finger zoom camera math" : "FAIL: camera gesture smoke test"
+                try? result.write(to: FileManager.default.temporaryDirectory.appendingPathComponent("orca-camera-smoke.txt"), atomically: true, encoding: .utf8)
             }
         }
+        .onChange(of: mainTab) { tab in
+            if tab != .preview { engine.pauseToolheadPlayback() }
+        }
+        .onChange(of: scenePhase) { phase in
+            if phase != .active { engine.pauseToolheadPlayback() }
+        }
+        .onDisappear { engine.pauseToolheadPlayback() }
+        .onChange(of: cloudAccount.busy) { busy in if !busy { importCloudPresetsIfReady() } }
+        .onChange(of: cloudAccount.profileRevision) { _ in importCloudPresetsIfReady() }
+        .onChange(of: engine.sessionBusy) { importing in if !importing { importPendingDocuments(); importCloudPresetsIfReady() } }
+        .onChange(of: documents.pending.count) { _ in importPendingDocuments() }
+        .onChange(of: engine.presetsLoading) { _ in importPendingDocuments() }
+        .onChange(of: engine.startupFinished) { _ in
+            importPendingDocuments()
+            testDocumentPickerWhenReady()
+            importCloudPresetsIfReady()
+        }
+        .onChange(of: isSlicing) { _ in importPendingDocuments(); importCloudPresetsIfReady() }
+        .onChange(of: editingModalPresented) { _ in importPendingDocuments(); importCloudPresetsIfReady() }
+        .alert(operationError == nil ? "Import failed" : "Operation failed", isPresented: Binding(
+            get: { operationError != nil || !documents.errorMessage.isEmpty },
+            set: { if !$0 { operationError = nil; documents.errorMessage = "" } }
+        )) {
+            Button("OK", role: .cancel) { operationError = nil; documents.errorMessage = "" }
+        } message: { Text(operationError ?? documents.errorMessage) }
     }
 
-    private var headerBar: some View {
-        HStack(spacing: 12) {
-            OrcaLogoMark()
-                .frame(width: 36, height: 36)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("OrcaSlicer")
-                    .font(.system(size: 20, weight: .bold))
-                    .foregroundStyle(OrcaTheme.text)
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(engine.isLinked ? OrcaTheme.success : OrcaTheme.danger)
-                        .frame(width: 7, height: 7)
-                    Text(engine.isLinked ? "Ready" : "Engine offline")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(engine.isLinked ? OrcaTheme.success : OrcaTheme.danger)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                }
-            }
+    private func headerBar(inlineInspector: Bool) -> AnyView {
+        AnyView(HStack(spacing: 8) {
+            fileProjectMenu
+            Text("OrcaSlicer").font(.headline).lineLimit(1).minimumScaleFactor(0.75)
+                .foregroundStyle(OrcaTheme.text)
             Spacer(minLength: 8)
             Button {
                 engine.undo()
@@ -333,11 +536,13 @@ struct OrcaRootView: View {
             }
             .disabled(!engine.canRedo)
             Menu {
+                cameraViewMenu
                 Button("Object settings…") {
-                    loadObjectSettingsFields()
                     showObjectSettings = true
                 }
                 .disabled(!engine.hasModel || engine.selectedObjectIndex < 0)
+                Button("Variable layer height…") { showLayerHeights = true }
+                    .disabled(!engine.hasModel || engine.selectedObjectIndex < 0)
                 Button("Setup wizard…") { showWizard = true }
                 Button("Preferences…") { showPreferences = true }
                 Button("Keyboard shortcuts…") { showShortcuts = true }
@@ -350,7 +555,9 @@ struct OrcaRootView: View {
                     .background(OrcaTheme.elevated)
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
-            Button { showProcess = true } label: {
+            Button {
+                if inlineInspector { sidebarVisible.toggle() } else { showProcess = true }
+            } label: {
                 Image(systemName: "slider.horizontal.3")
                     .font(.system(size: 17, weight: .semibold))
                     .foregroundStyle(OrcaTheme.text)
@@ -359,19 +566,21 @@ struct OrcaRootView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 2)
         .background(OrcaTheme.panel)
         .overlay(alignment: .bottom) {
             Rectangle().fill(OrcaTheme.border).frame(height: 1)
-        }
+        })
     }
 
-    private var tabBar: some View {
-        HStack(spacing: 0) {
+    private var tabBar: AnyView {
+        AnyView(HStack(spacing: 0) {
             ForEach(MainTab.allCases, id: \.self) { tab in
                 Button {
                     mainTab = tab
+                    if engine.previewFromFile { fitCameraRequest = UUID() }
+                    if tab != .preview { showPreviewControls = false }
                     if tab != .prepare { moveMode = false }
                     if tab == .preview && engine.gcodeURL == nil {
                         status = "Slice to preview toolpaths."
@@ -387,49 +596,28 @@ struct OrcaRootView: View {
                 .buttonStyle(.plain)
             }
         }
-        .background(OrcaTheme.panel)
-    }
-
-    private var hintOverlay: some View {
-        // Model / bed facts only — no tutorial tip copy
-        Group {
-            if engine.hasModel || !engine.boundsText.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    if let name = engine.modelName {
-                        Text(name)
-                            .font(.system(size: 11, design: .monospaced))
-                            .lineLimit(1)
-                    }
-                    if !engine.boundsText.isEmpty {
-                        Text(engine.boundsText)
-                            .font(.system(size: 11, design: .monospaced))
-                    }
-                    Text(String(format: "%.0f × %.0f × %.0f mm", engine.bedSize.x, engine.bedSize.y, engine.bedHeight))
-                        .font(.system(size: 11, design: .monospaced))
-                    if !engine.selectedPrinter.isEmpty {
-                        Text(engine.selectedPrinter)
-                            .font(.system(size: 10, design: .monospaced))
-                            .lineLimit(1)
-                    }
-                }
-                .foregroundStyle(OrcaTheme.muted)
-                .padding(10)
-                .background(OrcaTheme.panel.opacity(0.92))
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            }
-        }
+        .background(OrcaTheme.panel))
     }
 
     enum PrinterHostType: String, CaseIterable, Identifiable {
         case moonraker = "Moonraker"
         case octoprint = "OctoPrint"
         case prusalink = "PrusaLink"
+        case flashforge = "Flashforge"
+        case flashforgeTCP = "Flashforge TCP"
         var id: String { rawValue }
     }
 
     @State private var hostType: PrinterHostType = .moonraker
     @State private var printerHost = "http://192.168.1.100"
     @State private var octoApiKey = ""
+    @State private var flashforgeSerial = ""
+    @State private var flashforgeStatus: FlashforgeStatus?
+    @State private var flashforgeUploadedJob: FlashforgeUploadedJob?
+    @State private var flashforgeTCPUploadedJob: FlashforgeTCPUploadedJob?
+    @State private var flashforgeUseStation = false
+    @State private var flashforgeLeveling = true
+    @State private var flashforgeToolSlots = [1, 2, 3, 4]
     @State private var printerStatus = "Not connected"
     @State private var isConnecting = false
     @State private var isJobBusy = false
@@ -464,8 +652,8 @@ struct OrcaRootView: View {
         }
     }
 
-    private var devicePlaceholder: some View {
-        ScrollView {
+    private var devicePlaceholder: AnyView {
+        AnyView(ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 HStack(spacing: 12) {
                     Image(systemName: "printer.fill")
@@ -492,6 +680,13 @@ struct OrcaRootView: View {
                     }
                     .buttonStyle(.plain)
                 }
+
+                PrinterConnectionsPanel(account: cloudAccount, engine: engine, connections: connections, address: printerHost,
+                                        kind: hostType.rawValue, apiKey: hostType == .flashforgeTCP ? "" : octoApiKey,
+                                        serialNumber: hostType == .flashforge ? flashforgeSerial : nil) { printer in
+                    selectPrinterConnection(printer)
+                }
+                .disabled(isConnecting || isJobBusy)
 
                 // Live temps from host
                 if !liveTempText.isEmpty || liveNozzleActual != nil {
@@ -555,6 +750,9 @@ struct OrcaRootView: View {
                     }
                     ForEach(discoveredPrinters) { p in
                         Button {
+                            guard !isConnecting, !isJobBusy else { return }
+                            resetPrinterConnection()
+                            octoApiKey = ""
                             printerHost = p.urlString
                             if p.serviceType.contains("octoprint") {
                                 hostType = .octoprint
@@ -562,7 +760,6 @@ struct OrcaRootView: View {
                                 hostType = .moonraker
                             }
                             printerStatus = "Selected \(p.name)"
-                            Task { await connectPrinterHost() }
                         } label: {
                             HStack {
                                 VStack(alignment: .leading, spacing: 2) {
@@ -592,45 +789,47 @@ struct OrcaRootView: View {
                         Text(t.rawValue).tag(t)
                     }
                 }
-                .pickerStyle(.segmented)
-                .onChange(of: hostType) { _ in
-                    printerStatus = "Not connected"
-                    jobState = ""
-                    jobMessage = ""
-                    lastUploadedFilename = nil
-                    liveNozzleActual = nil
-                    liveBedActual = nil
-                    liveTempText = ""
-                    statusPollTask?.cancel()
-                }
+                .pickerStyle(.menu)
+                .disabled(isConnecting || isJobBusy)
+                .onChange(of: hostType) { _ in resetPrinterConnection() }
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text(
-                        hostType == .moonraker ? "Moonraker / Klipper host"
+                        hostType == .flashforge ? "Flashforge AD5X / Adventurer 5M host (port 8898)"
+                            : hostType == .flashforgeTCP ? "Flashforge legacy TCP host (port 8899)"
+                            : hostType == .moonraker ? "Moonraker / Klipper host"
                             : hostType == .prusalink ? "PrusaLink host"
                             : "OctoPrint host"
                     )
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(OrcaTheme.muted)
                     TextField(
-                        hostType == .moonraker ? "http://printer.local"
+                        hostType == .flashforge ? "http://192.168.1.100:8898"
+                            : hostType == .flashforgeTCP ? "tcp://printer.local:8899"
+                            : hostType == .moonraker ? "http://printer.local"
                             : hostType == .prusalink ? "http://prusa.local"
                             : "http://octopi.local",
-                        text: $printerHost
+                        text: Binding(get: { printerHost }, set: { value in
+                            resetPrinterConnection()
+                            octoApiKey = ""
+                            printerHost = value
+                        })
                     )
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
+                        .disabled(isConnecting || isJobBusy)
                         .font(.system(size: 15, design: .monospaced))
                         .foregroundStyle(OrcaTheme.text)
                         .padding(12)
                         .background(OrcaTheme.elevated)
                         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    if hostType == .octoprint || hostType == .prusalink {
+                    if hostType != .flashforgeTCP, PrinterConnection.validatedURL(printerHost) != nil {
                         SecureField(
-                            hostType == .prusalink ? "API key (PrusaLink)" : "API key (OctoPrint)",
-                            text: $octoApiKey
+                            hostType == .flashforge ? "Flashforge LAN access code" : "API key (optional)",
+                            text: Binding(get: { octoApiKey }, set: { resetPrinterConnection(); octoApiKey = $0 })
                         )
+                            .disabled(isConnecting || isJobBusy)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                             .font(.system(size: 14, design: .monospaced))
@@ -639,6 +838,12 @@ struct OrcaRootView: View {
                             .background(OrcaTheme.elevated)
                             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     }
+                }
+
+                if hostType == .flashforge { flashforgeConnectionOptions }
+                if hostType == .flashforgeTCP {
+                    Text("Use this for Flashforge firmware with the desktop TCP protocol enabled. Upload and Start print are separate actions. For AD5X material mapping, live temperatures and Cancel, use Flashforge with its LAN access code. TCP can also use your saved Tailscale or WireGuard route.")
+                        .font(.caption).foregroundStyle(OrcaTheme.muted)
                 }
 
                 HStack(spacing: 10) {
@@ -656,7 +861,7 @@ struct OrcaRootView: View {
                         .foregroundStyle(.white)
                         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     }
-                    .disabled(isConnecting)
+                    .disabled(isConnecting || isJobBusy)
                     .buttonStyle(.plain)
 
                     Button {
@@ -670,7 +875,7 @@ struct OrcaRootView: View {
                             .foregroundStyle(engine.gcodeURL != nil ? OrcaTheme.accent : OrcaTheme.muted)
                             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     }
-                    .disabled(engine.gcodeURL == nil || isConnecting)
+                    .disabled(engine.gcodeURL == nil || isConnecting || isJobBusy)
                     .buttonStyle(.plain)
                 }
 
@@ -716,7 +921,7 @@ struct OrcaRootView: View {
                             .foregroundStyle(canStartPrint ? .white : OrcaTheme.muted)
                             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         }
-                        .disabled(!canStartPrint || isJobBusy)
+                        .disabled(!canStartPrint || isJobBusy || isConnecting)
                         .buttonStyle(.plain)
 
                         Button {
@@ -730,7 +935,7 @@ struct OrcaRootView: View {
                                 .foregroundStyle(OrcaTheme.danger)
                                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         }
-                        .disabled(isJobBusy)
+                        .disabled(isJobBusy || isConnecting || hostType == .flashforgeTCP)
                         .buttonStyle(.plain)
 
                         Button {
@@ -743,6 +948,7 @@ struct OrcaRootView: View {
                                 .foregroundStyle(OrcaTheme.accent)
                                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         }
+                        .disabled(isConnecting || isJobBusy)
                         .buttonStyle(.plain)
                     }
                 }
@@ -807,11 +1013,18 @@ struct OrcaRootView: View {
             .padding(20)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(OrcaTheme.bg.opacity(0.96))
+        .background(OrcaTheme.bg.opacity(0.96)))
     }
 
     private var canStartPrint: Bool {
-        lastUploadedFilename != nil || engine.gcodeURL != nil
+        if hostType == .flashforgeTCP {
+            return flashforgeTCPUploadedJob != nil && engine.gcodeURL == flashforgeTCPUploadedJob?.source
+                && PrinterConnection.validatedTCPURL(printerHost) == flashforgeTCPUploadedJob?.endpoint
+        }
+        if hostType == .flashforge {
+            return flashforgeUploadedJob != nil && engine.gcodeURL == flashforgeUploadedJob?.source
+        }
+        return lastUploadedFilename != nil || engine.gcodeURL != nil
     }
 
     private func tempField(_ title: String, text: Binding<String>, apply: @escaping () -> Void) -> some View {
@@ -835,48 +1048,288 @@ struct OrcaRootView: View {
         .frame(maxWidth: .infinity)
     }
 
+    private func resetPrinterConnection() {
+        statusPollTask?.cancel()
+        statusPollTask = nil
+        printerStatus = "Not connected"
+        lastUploadedFilename = nil
+        flashforgeUploadedJob = nil
+        flashforgeTCPUploadedJob = nil
+        flashforgeStatus = nil
+        jobState = ""
+        jobMessage = ""
+        jobProgress = 0
+        liveNozzleActual = nil
+        liveNozzleTarget = nil
+        liveBedActual = nil
+        liveBedTarget = nil
+        liveTempText = ""
+    }
+
+    private func selectPrinterConnection(_ printer: PrinterConnection) {
+        guard !isConnecting, !isJobBusy,
+              let type = PrinterHostType(rawValue: printer.kind) else { return }
+        do {
+            let key = try connections.apiKey(for: printer)
+            resetPrinterConnection()
+            hostType = type
+            printerHost = printer.connectionAddress
+            octoApiKey = key
+            flashforgeSerial = printer.serialNumber ?? ""
+            printerStatus = "Selected \(printer.name)"
+        } catch { connections.message = error.localizedDescription }
+    }
+
     private func printerBaseURL() -> URL? {
-        URL(string: printerHost.trimmingCharacters(in: .whitespacesAndNewlines))
+        PrinterConnection.validatedURL(printerHost)
     }
 
     private func moonrakerBaseURL() -> URL? { printerBaseURL() }
 
     private func connectPrinterHost() async {
+        guard !isConnecting, !isJobBusy else { return }
         switch hostType {
         case .moonraker: await connectMoonraker()
+        case .flashforge: await connectFlashforge()
+        case .flashforgeTCP: await connectFlashforgeTCP()
         case .octoprint, .prusalink: await connectOctoPrint() // PrusaLink speaks OctoPrint-compatible API
         }
     }
 
     private func uploadGCodeToHost() async {
+        guard !isConnecting, !isJobBusy else { return }
         switch hostType {
         case .moonraker: await uploadGCodeToMoonraker()
+        case .flashforge: await uploadGCodeToFlashforge()
+        case .flashforgeTCP: await uploadGCodeToFlashforgeTCP()
         case .octoprint, .prusalink: await uploadGCodeToOctoPrint()
         }
     }
 
     private func startHostPrint() async {
+        guard !isConnecting, !isJobBusy else { return }
         switch hostType {
         case .moonraker: await startMoonrakerPrint()
+        case .flashforge: await startFlashforgePrint()
+        case .flashforgeTCP: await startFlashforgeTCPPrint()
         case .octoprint, .prusalink: await startOctoPrint()
         }
     }
 
     private func cancelHostPrint() async {
+        guard !isConnecting, !isJobBusy else { return }
         switch hostType {
         case .moonraker: await cancelMoonrakerPrint()
+        case .flashforge: await cancelFlashforgePrint()
+        case .flashforgeTCP: return
         case .octoprint, .prusalink: await cancelOctoPrint()
         }
     }
 
     private func refreshHostJobStatus() async {
+        guard !isConnecting, !isJobBusy else { return }
         switch hostType {
         case .moonraker: await refreshMoonrakerJobStatus()
+        case .flashforge: await refreshFlashforgeStatus()
+        case .flashforgeTCP: await connectFlashforgeTCP()
         case .octoprint, .prusalink: await refreshOctoPrintJobStatus()
         }
     }
 
-    private func octoHeaders(for req: inout URLRequest) {
+    private var flashforgeConnectionOptions: AnyView {
+        AnyView(VStack(alignment: .leading, spacing: 10) {
+            TextField("Flashforge serial number", text: Binding(get: { flashforgeSerial }, set: {
+                resetPrinterConnection()
+                flashforgeSerial = $0
+            }))
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .textFieldStyle(.roundedBorder)
+            Text("Use the printer’s local IP, serial number, and LAN access code from its network settings. Connect first to read status and AD5X material slots.")
+                .font(.caption).foregroundStyle(OrcaTheme.muted)
+            Text("Slicing profile: \(engine.selectedPrinter.isEmpty ? "Choose a Flashforge profile in Process" : engine.selectedPrinter)")
+                .font(.caption)
+            Toggle("Level before printing", isOn: $flashforgeLeveling)
+            if let current = flashforgeStatus, current.hasMaterialStation {
+                Toggle("Use AD5X material station (IFS)", isOn: $flashforgeUseStation)
+                if flashforgeUseStation {
+                    ForEach(0..<4, id: \.self) { tool in
+                        Picker("Tool \(tool + 1)", selection: $flashforgeToolSlots[tool]) {
+                            ForEach(current.slots) { slot in
+                                Text("Slot \(slot.id): \(slot.material)\(slot.hasFilament ? "" : " (empty)")").tag(slot.id)
+                            }
+                        }
+                    }
+                    Text("Mappings apply to tools present in the generated G-code. Upload does not start a print; Start print is a separate action.")
+                        .font(.caption).foregroundStyle(OrcaTheme.muted)
+                }
+            }
+        }
+        .disabled(isConnecting || isJobBusy)
+        .onChange(of: flashforgeUseStation) { _ in invalidateFlashforgeUpload() }
+        .onChange(of: flashforgeLeveling) { _ in invalidateFlashforgeUpload() }
+        .onChange(of: flashforgeToolSlots) { _ in invalidateFlashforgeUpload() })
+    }
+
+    private func invalidateFlashforgeUpload() {
+        flashforgeUploadedJob = nil
+        flashforgeTCPUploadedJob = nil
+        lastUploadedFilename = nil
+    }
+
+    private func flashforgeClient() throws -> FlashforgeClient {
+        try FlashforgeClient(address: printerHost, serial: flashforgeSerial, code: octoApiKey)
+    }
+
+    private func applyFlashforgeStatus(_ current: FlashforgeStatus) {
+        flashforgeStatus = current
+        jobState = current.state
+        jobProgress = current.progress
+        jobMessage = current.filename
+        liveNozzleActual = current.nozzle
+        liveNozzleTarget = current.nozzleTarget
+        liveBedActual = current.bed
+        liveBedTarget = current.bedTarget
+        updateLiveTempText()
+        printerStatus = "\(current.name) · \(current.state)"
+    }
+
+    private func connectFlashforge() async {
+        isConnecting = true
+        defer { isConnecting = false }
+        do {
+            let current = try await flashforgeClient().detail()
+            guard !Task.isCancelled else { return }
+            applyFlashforgeStatus(current)
+            flashforgeUseStation = current.hasMaterialStation
+            startLiveTempPolling()
+        } catch { printerStatus = error.localizedDescription }
+    }
+
+    private func refreshFlashforgeStatus() async {
+        do {
+            let current = try await flashforgeClient().detail()
+            guard !Task.isCancelled else { return }
+            applyFlashforgeStatus(current)
+        } catch {
+            guard !Task.isCancelled else { return }
+            jobMessage = error.localizedDescription
+        }
+    }
+
+    private func uploadGCodeToFlashforge() async {
+        guard let source = engine.gcodeURL else { printerStatus = "Slice first to produce G-code"; return }
+        let printerModel = engine.getOption("printer_model") ?? ""
+        guard FlashforgeClient.profileMatches(printerModel: printerModel) else {
+            printerStatus = String(localized: "Select the matching Flashforge printer preset before uploading")
+            return
+        }
+        isConnecting = true
+        invalidateFlashforgeUpload()
+        defer { isConnecting = false }
+        do {
+            let client = try flashforgeClient()
+            let current = try await client.detail()
+            guard !Task.isCancelled else { return }
+            applyFlashforgeStatus(current)
+            if !FlashforgeClient.profileMatches(printerModel: printerModel, modelID: current.modelID) {
+                printerStatus = "The connected printer does not match the selected Flashforge slicing profile"
+                return
+            }
+            let useStation = flashforgeUseStation
+            if useStation && !current.hasMaterialStation { throw FlashforgeError.materialMapping }
+            let leveling = flashforgeLeveling
+            let mapping = flashforgeToolSlots
+            let upload = try await Task.detached(priority: .userInitiated) {
+                try client.prepareUpload(source: source, leveling: leveling, useStation: useStation,
+                                         slots: current.slots, toolSlots: mapping)
+            }.value
+            let job = try await client.upload(upload)
+            flashforgeUploadedJob = job
+            lastUploadedFilename = job.filename
+            printerStatus = "Uploaded \(job.filename) · ready to start"
+            engine.recordHostJob(host: printerHost, file: job.filename, hostType: "Flashforge")
+        } catch { printerStatus = error.localizedDescription }
+    }
+
+    private func startFlashforgePrint() async {
+        guard let job = flashforgeUploadedJob, engine.gcodeURL == job.source else {
+            printerStatus = "Upload the current G-code before starting"
+            return
+        }
+        isJobBusy = true
+        defer { isJobBusy = false }
+        do {
+            try await flashforgeClient().start(job)
+            printerStatus = "Print start requested"
+            startLiveTempPolling()
+        } catch { printerStatus = error.localizedDescription }
+    }
+
+    private func cancelFlashforgePrint() async {
+        isJobBusy = true
+        defer { isJobBusy = false }
+        do {
+            try await flashforgeClient().cancel()
+            printerStatus = "Print cancel requested"
+        } catch { printerStatus = error.localizedDescription }
+    }
+
+    private func connectFlashforgeTCP() async {
+        guard !isConnecting, !isJobBusy else { return }
+        isConnecting = true
+        defer { isConnecting = false }
+        do {
+            let client = try FlashforgeTCPClient(address: printerHost)
+            let klipper = (engine.getOption("gcode_flavor") ?? "").lowercased() == "klipper"
+            let lines = try await client.connect(klipper: klipper)
+            try Task.checkCancellation()
+            printerStatus = String(localized: "Connected to Flashforge TCP")
+            jobMessage = lines.joined(separator: "\n")
+        } catch { printerStatus = error.localizedDescription }
+    }
+
+    private func uploadGCodeToFlashforgeTCP() async {
+        guard let source = engine.gcodeURL else { printerStatus = String(localized: "Slice first to produce G-code"); return }
+        guard FlashforgeClient.profileMatches(printerModel: engine.getOption("printer_model") ?? "") else {
+            printerStatus = String(localized: "Select the matching Flashforge printer preset before uploading")
+            return
+        }
+        isConnecting = true
+        invalidateFlashforgeUpload()
+        defer { isConnecting = false }
+        do {
+            let client = try FlashforgeTCPClient(address: printerHost)
+            let klipper = (engine.getOption("gcode_flavor") ?? "").lowercased() == "klipper"
+            let job = try await client.upload(source: source, klipper: klipper)
+            try Task.checkCancellation()
+            guard engine.gcodeURL == source, PrinterConnection.validatedTCPURL(printerHost) == job.endpoint else {
+                throw FlashforgeTCPError.wrongPrinter
+            }
+            flashforgeTCPUploadedJob = job
+            lastUploadedFilename = job.filename
+            printerStatus = String(localized: "Uploaded \(job.filename) · ready to start")
+            jobMessage = ""
+            engine.recordHostJob(host: printerHost, file: job.filename, hostType: PrinterHostType.flashforgeTCP.rawValue)
+        } catch { printerStatus = error.localizedDescription }
+    }
+
+    private func startFlashforgeTCPPrint() async {
+        guard let job = flashforgeTCPUploadedJob, engine.gcodeURL == job.source else {
+            printerStatus = FlashforgeTCPError.wrongPrinter.localizedDescription
+            return
+        }
+        isJobBusy = true
+        defer { isJobBusy = false }
+        do {
+            try await FlashforgeTCPClient(address: printerHost).start(job)
+            try Task.checkCancellation()
+            invalidateFlashforgeUpload()
+            printerStatus = String(localized: "Print start requested")
+        } catch { printerStatus = error.localizedDescription }
+    }
+
+    private func printerHeaders(for req: inout URLRequest) {
         let key = octoApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         if !key.isEmpty {
             req.setValue(key, forHTTPHeaderField: "X-Api-Key")
@@ -892,9 +1345,11 @@ struct OrcaRootView: View {
         }
         let info = base.appendingPathComponent("server/info")
         var req = URLRequest(url: info)
+        printerHeaders(for: &req)
         req.timeoutInterval = 5
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
+            guard !Task.isCancelled else { return }
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             if code == 200 {
                 if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -926,9 +1381,10 @@ struct OrcaRootView: View {
         }
         var req = URLRequest(url: base.appendingPathComponent("api/version"))
         req.timeoutInterval = 5
-        octoHeaders(for: &req)
+        printerHeaders(for: &req)
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
+            guard !Task.isCancelled else { return }
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             if code == 200 {
                 if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
@@ -981,6 +1437,7 @@ struct OrcaRootView: View {
         let uploadURL = base.appendingPathComponent("server/files/upload")
         let boundary = "OrcaBoundary\(UUID().uuidString)"
         var req = URLRequest(url: uploadURL)
+        printerHeaders(for: &req)
         req.httpMethod = "POST"
         req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         req.timeoutInterval = 60
@@ -1001,6 +1458,7 @@ struct OrcaRootView: View {
         req.httpBody = body
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
+            guard !Task.isCancelled else { return }
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             if (200...299).contains(code) {
                 // Prefer path returned by Moonraker; fall back to filename in gcodes/
@@ -1051,10 +1509,12 @@ struct OrcaRootView: View {
             return
         }
         var req = URLRequest(url: url)
+        printerHeaders(for: &req)
         req.httpMethod = "POST"
         req.timeoutInterval = 15
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
+            guard !Task.isCancelled else { return }
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             if (200...299).contains(code) {
                 jobState = "printing"
@@ -1081,6 +1541,7 @@ struct OrcaRootView: View {
         isJobBusy = true
         defer { isJobBusy = false }
         var req = URLRequest(url: base.appendingPathComponent("printer/print/cancel"))
+        printerHeaders(for: &req)
         req.httpMethod = "POST"
         req.timeoutInterval = 10
         do {
@@ -1116,9 +1577,11 @@ struct OrcaRootView: View {
         ]
         guard let url = comps?.url else { return }
         var req = URLRequest(url: url)
+        printerHeaders(for: &req)
         req.timeoutInterval = 8
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
+            guard !Task.isCancelled else { return }
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             guard (200...299).contains(code),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -1149,6 +1612,7 @@ struct OrcaRootView: View {
                 printerStatus = "Job · \(jobState) · \(String(format: "%.0f%%", jobProgress * 100))"
             }
         } catch {
+            guard !Task.isCancelled else { return }
             jobMessage = error.localizedDescription
         }
     }
@@ -1224,6 +1688,8 @@ struct OrcaRootView: View {
     /// Poll live nozzle/bed temps when host supports it.
     private func refreshLiveTemps() async {
         switch hostType {
+        case .flashforgeTCP: return
+        case .flashforge: await refreshFlashforgeStatus()
         case .moonraker:
             // Temps already folded into refreshMoonrakerJobStatus; also allow standalone poll
             await refreshMoonrakerTempsOnly()
@@ -1244,9 +1710,11 @@ struct OrcaRootView: View {
         ]
         guard let url = comps?.url else { return }
         var req = URLRequest(url: url)
+        printerHeaders(for: &req)
         req.timeoutInterval = 5
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
+            guard !Task.isCancelled else { return }
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             guard (200...299).contains(code),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -1263,9 +1731,10 @@ struct OrcaRootView: View {
         guard let base = printerBaseURL() else { return }
         var req = URLRequest(url: base.appendingPathComponent("api/printer"))
         req.timeoutInterval = 5
-        octoHeaders(for: &req)
+        printerHeaders(for: &req)
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
+            guard !Task.isCancelled else { return }
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             guard (200...299).contains(code),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -1433,7 +1902,7 @@ struct OrcaRootView: View {
         var req = URLRequest(url: uploadURL)
         req.httpMethod = "POST"
         req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        octoHeaders(for: &req)
+        printerHeaders(for: &req)
         req.timeoutInterval = 90
         guard let fileData = try? Data(contentsOf: gcode) else {
             printerStatus = "Could not read G-code file"
@@ -1455,6 +1924,7 @@ struct OrcaRootView: View {
         req.httpBody = body
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
+            guard !Task.isCancelled else { return }
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             if (200...299).contains(code) {
                 var remoteName = filename
@@ -1500,11 +1970,12 @@ struct OrcaRootView: View {
         var req = URLRequest(url: base.appendingPathComponent("api/job"))
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        octoHeaders(for: &req)
+        printerHeaders(for: &req)
         req.timeoutInterval = 15
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["command": "start"])
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
+            guard !Task.isCancelled else { return }
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             if (200...299).contains(code) {
                 jobState = "Printing"
@@ -1533,7 +2004,7 @@ struct OrcaRootView: View {
         var req = URLRequest(url: base.appendingPathComponent("api/job"))
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        octoHeaders(for: &req)
+        printerHeaders(for: &req)
         req.timeoutInterval = 10
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["command": "cancel"])
         do {
@@ -1558,9 +2029,10 @@ struct OrcaRootView: View {
         guard let base = printerBaseURL() else { return }
         var req = URLRequest(url: base.appendingPathComponent("api/job"))
         req.timeoutInterval = 8
-        octoHeaders(for: &req)
+        printerHeaders(for: &req)
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
+            guard !Task.isCancelled else { return }
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             guard (200...299).contains(code),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -1587,174 +2059,196 @@ struct OrcaRootView: View {
                 printerStatus = "Octo · \(jobState) · \(String(format: "%.0f%%", jobProgress * 100))"
             }
         } catch {
+            guard !Task.isCancelled else { return }
             jobMessage = error.localizedDescription
         }
     }
 
-    private func controlsPanel(bottomInset: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if !status.isEmpty {
-                Text(status)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(OrcaTheme.muted)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
+    private var fileProjectMenu: AnyView {
+        AnyView(NativeProjectMenu { button in
+            let models = UIMenu(options: .displayInline, children: [
+                UIAction(title: "Open model…") { _ in requestDocumentPicker(.model(append: false)) },
+                UIAction(title: "Add model…") { _ in requestDocumentPicker(.model(append: true)) },
+                UIAction(title: "Add primitive or handy model…") { _ in showModelLibrary = true }
+            ])
+            var presets: [UIMenuElement] = [
+                UIAction(title: "Import process preset…") { _ in requestDocumentPicker(.settings(preset: 0)) },
+                UIAction(title: "Import filament preset…") { _ in requestDocumentPicker(.settings(preset: 1)) },
+                UIAction(title: "Import configuration…") { _ in requestDocumentPicker(.settings(preset: nil)) },
+                UIAction(title: "Export user presets…") { [weak button] _ in
+                    if let button { exportUserPresetsZip(from: button) }
+                },
+                UIAction(title: "Export configuration…") { _ in exportShareURL = engine.exportConfigJSON() }
+            ]
+            if let url = exportShareURL {
+                presets.append(UIAction(title: "Share configuration") { [weak button] _ in
+                    if let button { NativeProjectMenu.share(url, from: button) }
+                })
             }
-
-            HStack(spacing: 10) {
-                actionButton(title: "Open", systemImage: "folder.fill") {
-                    importAppend = false
-                    showImporter = true
+            var project: [UIMenuElement] = [
+                UIAction(title: "Save project…", attributes: engine.hasModel ? [] : .disabled) { _ in
+                    projectURL = engine.saveProject3MF(); status = engine.lastMessage
                 }
-                actionButton(title: "Add", systemImage: "plus.rectangle.on.folder") {
-                    importAppend = true
-                    showImporter = true
-                }
-                actionButton(title: "Process", systemImage: "slider.horizontal.3") {
-                    showProcess = true
-                }
+            ]
+            if let url = projectURL {
+                project.append(UIAction(title: "Share project") { [weak button] _ in
+                    if let button { NativeProjectMenu.share(url, from: button) }
+                })
             }
+            project.append(UIAction(title: "Calibration…") { _ in showCalibration = true })
+            return UIMenu(children: [models, UIMenu(options: .displayInline, children: presets),
+                                    UIMenu(options: .displayInline, children: project)])
+        }.frame(width: 44, height: 44))
+    }
 
-            if mainTab == .prepare {
-                plateTabsRow
+    private var compactControls: AnyView {
+        AnyView(HStack(spacing: 8) {
+            Button {
+                if mainTab == .preview { showPreviewControls.toggle() } else { showPlateInspector = true }
+            } label: {
+                Image(systemName: mainTab == .preview ? "line.3.horizontal.decrease" : "square.3.layers.3d")
+                    .frame(width: 44, height: 44)
+            }.accessibilityLabel(mainTab == .preview ? Text("Preview controls") : Text("Objects and tools"))
+            if mainTab == .preview, let gcode = engine.gcodeURL {
+                ShareLink(item: gcode) {
+                    Label("Export G-code", systemImage: "square.and.arrow.up")
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                }.buttonStyle(.borderedProminent).tint(OrcaTheme.accent)
+            } else {
+                Button(action: sliceNow) {
+                    Label("Slice plate", systemImage: "square.3.layers.3d.down.right")
+                        .font(.subheadline.weight(.semibold)).lineLimit(1)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                }.buttonStyle(.borderedProminent).tint(OrcaTheme.accent)
+                    .disabled(!engine.hasModel || isSlicing || engine.sessionBusy)
+                    .accessibilityIdentifier("slice-plate")
             }
-            if engine.hasModel && mainTab == .prepare {
-                objectPickerRow
-                plateToolsRow
-            }
+        }.padding(.horizontal, 8))
+    }
 
-            Button(action: sliceNow) {
-                HStack(spacing: 10) {
-                    if isSlicing {
-                        ProgressView().controlSize(.regular).tint(.white)
-                        Text("\(engine.slicePercent)% · \(engine.slicePhase.isEmpty ? "Slicing…" : engine.slicePhase)")
-                            .font(.system(size: 15, weight: .bold))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.7)
-                    } else {
-                        Image(systemName: "square.3.layers.3d.down.right")
-                            .font(.system(size: 17, weight: .bold))
-                        Text("Slice plate")
-                            .font(.system(size: 17, weight: .bold))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.85)
-                    }
-                }
-                .frame(maxWidth: .infinity)
-                .frame(height: 54)
-                .background(engine.hasModel && !isSlicing ? OrcaTheme.accent : OrcaTheme.accentDim.opacity(0.55))
-                .foregroundStyle(.white)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            }
-            .buttonStyle(.plain)
-            .disabled(!engine.hasModel || isSlicing)
+    private let handyModels: [(String, [String])] = [
+        ("Orca Cube", ["OrcaCube_v2.drc", "OrcaPlug_v2.drc"]),
+        ("OrcaSliced Combo", ["OrcaSliced.3mf", "OrcaCube_v2.drc", "OrcaPlug_v2.drc"]),
+        ("Orca Badge", ["OrcaBadge.3mf"]),
+        ("Orca Tolerance Test", ["OrcaToleranceTest.drc"]),
+        ("3DBenchy", ["3DBenchy.drc"]), ("Cali Cat", ["calicat.drc"]),
+        ("Autodesk FDM Test", ["ksr_fdmtest_v4.drc"]),
+        ("Voron Cube", ["Voron_Design_Cube_v7.drc"]),
+        ("Stanford Bunny", ["Stanford_Bunny.drc"]),
+        ("Orca String Hell", ["Orca_stringhell.drc"])
+    ]
 
-            if !engine.lastSliceStatsText.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(engine.lastSliceStatsText)
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(OrcaTheme.accent)
-                    if !engine.lastAvgLayerTimeText.isEmpty {
-                        Text(engine.lastAvgLayerTimeText)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(OrcaTheme.muted)
-                    }
-                    if !engine.filamentByRole.isEmpty {
-                        Text(engine.filamentByRole.prefix(4).map { r in
-                            String(format: "%@: %.1fg", r.name, r.grams)
-                        }.joined(separator: " · "))
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(OrcaTheme.muted)
-                            .lineLimit(2)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            if let gcode = engine.gcodeURL {
-                HStack(spacing: 10) {
-                    Button {
-                        mainTab = .preview
-                        status = ""
-                    } label: {
-                        Label("Preview", systemImage: "eye")
-                            .font(.system(size: 13, weight: .semibold))
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 46)
-                            .background(OrcaTheme.accent.opacity(0.18))
-                            .foregroundStyle(OrcaTheme.accent)
-                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    }
-                    ShareLink(item: gcode) {
-                        Label("G-code", systemImage: "square.and.arrow.up")
-                            .font(.system(size: 13, weight: .semibold))
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 46)
-                            .background(OrcaTheme.success.opacity(0.18))
-                            .foregroundStyle(OrcaTheme.success)
-                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    }
-                }
-            }
-
-            if engine.hasModel {
-                HStack(spacing: 10) {
-                    Button {
-                        if let url = engine.saveProject3MF() {
-                            projectURL = url
-                            status = engine.lastMessage
-                        } else {
-                            status = engine.lastMessage
+    private var modelLibrary: AnyView {
+        AnyView(NavigationStack {
+            Form {
+                Section("Primitive") {
+                    Picker("Shape", selection: $primitiveKind) {
+                        ForEach(Array(["Cube", "Cylinder", "Sphere", "Cone", "Torus", "Disc"].enumerated()), id: \.offset) { i, name in
+                            Text(name).tag(i)
                         }
-                    } label: {
-                        Label("Save 3MF", systemImage: "doc.badge.arrow.up")
-                            .font(.system(size: 13, weight: .semibold))
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 42)
-                            .background(OrcaTheme.elevated)
-                            .foregroundStyle(OrcaTheme.text)
-                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }.onChange(of: primitiveKind) { kind in primitiveZ = kind == 5 ? "0.2" : "20" }
+                    numericField(primitiveKind == 0 ? "Width X (mm)" : primitiveKind == 4 ? "Inner diameter (mm)" : "Diameter (mm)", text: $primitiveX)
+                    if primitiveKind == 0 || primitiveKind == 4 {
+                        numericField(primitiveKind == 4 ? "Tube diameter (mm)" : "Depth Y (mm)", text: $primitiveY)
                     }
-                    .buttonStyle(.plain)
-                    if let projectURL {
-                        ShareLink(item: projectURL) {
-                            Label("Share project", systemImage: "square.and.arrow.up")
-                                .font(.system(size: 13, weight: .semibold))
-                                .frame(maxWidth: .infinity)
-                                .frame(height: 42)
-                                .background(OrcaTheme.accent.opacity(0.18))
-                                .foregroundStyle(OrcaTheme.accent)
-                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    if primitiveKind != 2 && primitiveKind != 4 { numericField("Height Z (mm)", text: $primitiveZ) }
+                    Button("Add to plate") {
+                        guard let x = Float(primitiveX), let y = Float(primitiveY), let z = Float(primitiveZ),
+                              [x, y, z].allSatisfy({ $0.isFinite && $0 > 0 && $0 <= 10000 }) else {
+                            documents.errorMessage = "Enter dimensions between 0 and 10000 mm."; return
+                        }
+                        if engine.addPrimitive(kind: primitiveKind, x: x, y: y, z: z) {
+                            mainTab = .prepare; fitCameraRequest = UUID(); showModelLibrary = false
+                        } else { documents.errorMessage = engine.lastMessage }
+                    }.accessibilityIdentifier("add-primitive")
+                }
+                Section("Handy models") {
+                    ForEach(Array(handyModels.enumerated()), id: \.offset) { _, model in
+                        Button(model.0) {
+                            showModelLibrary = false
+                            Task { @MainActor in
+                                for file in model.1 {
+                                    guard let root = Bundle.main.resourceURL else { return }
+                                    let url = root.appendingPathComponent("handy_models").appendingPathComponent(file)
+                                    guard await engine.loadDocumentModel(url: url, append: true, includeSettings: false) else {
+                                        documents.errorMessage = engine.lastMessage; return
+                                    }
+                                }
+                                engine.arrange()
+                                mainTab = .prepare; fitCameraRequest = UUID(); status = engine.lastMessage
+                            }
                         }
                     }
                 }
             }
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 14)
-        .padding(.bottom, bottomInset + 10)
-        .background(OrcaTheme.panel)
-        .overlay(alignment: .top) {
-            Rectangle().fill(OrcaTheme.border).frame(height: 1)
+            .navigationTitle("Add model").navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { showModelLibrary = false } } }
+        })
+    }
+
+    private func numericField(_ title: String, text: Binding<String>) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            TextField(title, text: text).multilineTextAlignment(.trailing)
+                .keyboardType(.numbersAndPunctuation).frame(maxWidth: 110)
+                .textFieldStyle(.roundedBorder)
         }
     }
 
-    private func actionButton(title: String, systemImage: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            VStack(spacing: 6) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 16, weight: .semibold))
-                Text(title)
-                    .font(.system(size: 12, weight: .semibold))
-                    .lineLimit(1)
+    private var transformEditor: AnyView {
+        AnyView(VStack(alignment: .leading, spacing: 12) {
+            Text("Transform selection").font(.headline)
+            Text(engine.selectedObjectIndex < 0 ? "All objects" : engine.objectNames.indices.contains(engine.selectedObjectIndex) ? engine.objectNames[engine.selectedObjectIndex] : "Selection")
+                .font(.caption).foregroundStyle(.secondary)
+            Picker("Transform", selection: Binding(get: { [.move, .rotate, .scale].contains(gizmoMode) ? gizmoMode : .move }, set: { gizmoMode = $0 })) {
+                Text("Move").tag(GizmoMode.move)
+                Text("Rotate").tag(GizmoMode.rotate)
+                Text("Scale").tag(GizmoMode.scale)
+            }.pickerStyle(.segmented)
+                .onChange(of: gizmoMode) { mode in
+                    if mode == .move { plateTouchMode = .move }
+                    if mode == .rotate { plateTouchMode = .rotate }
+                    if mode == .scale { plateTouchMode = .scale }
+                }
+            if gizmoMode == .scale {
+                Toggle("Uniform scale", isOn: $uniformScale)
+                numericField(uniformScale ? "Scale (%)" : "X scale (%)", text: $scaleX)
+                if !uniformScale {
+                    numericField("Y scale (%)", text: $scaleY)
+                    numericField("Z scale (%)", text: $scaleZ)
+                }
+                Text("Relative to current size, along the object's local axes.").font(.caption).foregroundStyle(.secondary)
+                Button("Apply scale") {
+                    let values = uniformScale ? [scaleX, scaleX, scaleX] : [scaleX, scaleY, scaleZ]
+                    let factors = values.compactMap { Float($0) }
+                    guard factors.count == 3, factors.allSatisfy({ $0.isFinite && $0 > 0 && $0 <= 10000 }) else {
+                        documents.errorMessage = "Enter scale percentages between 0 and 10000."; return
+                    }
+                    engine.scale(x: factors[0] / 100, y: factors[1] / 100, z: factors[2] / 100)
+                    status = engine.lastMessage; showPlateInspector = false
+                }.accessibilityIdentifier("apply-scale")
+            } else if gizmoMode == .rotate {
+                Picker("Axis", selection: $rotationAxis) { Text("X").tag(0); Text("Y").tag(1); Text("Z").tag(2) }
+                    .pickerStyle(.segmented)
+                numericField("Rotation (degrees)", text: $rotateAmount)
+                Button("Apply rotation") {
+                    guard let angle = Float(rotateAmount), angle.isFinite else { documents.errorMessage = "Enter a valid angle."; return }
+                    engine.rotate(axis: rotationAxis, degrees: angle)
+                    status = engine.lastMessage; showPlateInspector = false
+                }
+            } else {
+                numericField("Move X (mm)", text: $moveX)
+                numericField("Move Y (mm)", text: $moveY)
+                numericField("Move Z (mm)", text: $moveZ)
+                Button("Apply move") {
+                    let values = [moveX, moveY, moveZ].compactMap { Float($0) }
+                    guard values.count == 3, values.allSatisfy({ $0.isFinite }) else { documents.errorMessage = "Enter valid distances."; return }
+                    engine.translate(dx: values[0], dy: values[1], dz: values[2])
+                    status = engine.lastMessage; showPlateInspector = false
+                }
             }
-            .frame(maxWidth: .infinity)
-            .frame(height: 56)
-            .background(OrcaTheme.elevated)
-            .foregroundStyle(OrcaTheme.text)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        }
-        .buttonStyle(.plain)
+        }.disabled(!engine.hasModel))
     }
 
     private var objectPickerRow: some View {
@@ -1769,14 +2263,28 @@ struct OrcaRootView: View {
                     }
                 }
                 toolChip("Duplicate", "plus.square.on.square") {
-                    engine.duplicateSelected(); status = engine.lastMessage
+                    Task { @MainActor in
+                        if await engine.duplicateSelected() == false { operationError = engine.lastMessage }
+                        status = engine.lastMessage
+                    }
                 }
+                .disabled(!engine.hasModel)
+                toolChip("Copies", "square.stack.3d.up") { showMeshTools = true }
+                    .disabled(!engine.objectNames.indices.contains(engine.selectedObjectIndex))
                 toolChip("Delete", "trash") {
-                    engine.deleteSelected(); status = engine.lastMessage
+                    Task { @MainActor in
+                        if await engine.deleteSelected() == false { operationError = engine.lastMessage }
+                        status = engine.lastMessage
+                    }
                 }
+                .disabled(!engine.hasModel)
                 toolChip("Clear", "xmark.rectangle") {
-                    engine.clearPlate(); status = engine.lastMessage
+                    Task { @MainActor in
+                        if await engine.clearPlateWithUndo() == false { operationError = engine.lastMessage }
+                        status = engine.lastMessage
+                    }
                 }
+                .disabled(!engine.hasModel)
             }
         }
     }
@@ -1796,6 +2304,30 @@ struct OrcaRootView: View {
                 )
         }
         .buttonStyle(.plain)
+    }
+
+    private var copiesMenu: some View {
+        let index = engine.selectedObjectIndex
+        let count = engine.objectInstanceCounts.indices.contains(index) ? engine.objectInstanceCounts[index] : 0
+        return Menu {
+            Button("Add instance") { setObjectCopies(count + 1) }.disabled(count >= 1000)
+            Button("Fewer instances") { setObjectCopies(count - 1) }.disabled(count < 1)
+            Button("Set number of copies…") { showMeshTools = true }
+        } label: {
+            Label("Copies", systemImage: "square.stack.3d.up")
+                .font(.system(size: 12, weight: .semibold))
+                .padding(.horizontal, 12).padding(.vertical, 8)
+                .foregroundStyle(OrcaTheme.text).background(OrcaTheme.elevated, in: Capsule())
+        }
+        .disabled(!engine.objectNames.indices.contains(index) || engine.sessionBusy || engine.sliceRunning || engine.presetsLoading)
+        .accessibilityIdentifier("object-copies-menu")
+    }
+
+    private func setObjectCopies(_ count: Int) {
+        Task { @MainActor in
+            if await engine.editMesh(.copies(count)) == false { operationError = engine.lastMessage }
+            status = engine.lastMessage
+        }
     }
 
     private var plateTabsRow: some View {
@@ -1868,6 +2400,7 @@ struct OrcaRootView: View {
                     selected: moveMode
                 ) {
                     moveMode.toggle()
+                    plateTouchMode = moveMode ? .move : .orbit
                     status = moveMode
                         ? "Move mode: drag on plate (orbit off)"
                         : "Orbit camera"
@@ -1876,7 +2409,13 @@ struct OrcaRootView: View {
                 ForEach(GizmoMode.allCases, id: \.self) { mode in
                     toolChip(mode.rawValue, gizmoIcon(mode), selected: gizmoMode == mode) {
                         gizmoMode = mode
+                        showPlateInspector = false
                         moveMode = (mode == .move)
+                        if mode == .move { plateTouchMode = .move }
+                        else if mode == .rotate { plateTouchMode = .rotate }
+                        else if mode == .scale { plateTouchMode = .scale }
+                        else if mode == .layOnFace { plateTouchMode = .layOnFace }
+                        else if mode == .select { plateTouchMode = .select }
                         if mode != .measure {
                             measurePointA = nil
                             measurePointB = nil
@@ -1982,24 +2521,54 @@ struct OrcaRootView: View {
         }
     }
 
-    private var plateStage: some View {
-        ZStack {
+    private var activePlateTouchMode: PlateTouchMode {
+        mainTab == .prepare ? plateTouchMode : (plateTouchMode == .pan ? .pan : .orbit)
+    }
+
+    private var plateStage: AnyView {
+        AnyView(ZStack {
             PlateSceneView(
                 mesh: engine.mesh,
+                framingBounds: mainTab == .preview ? engine.previewBounds : nil,
+                meshRevision: engine.meshRevision,
                 objectMeshes: engine.objectMeshes,
+                objectColors: engine.objectFilamentColors,
+                paintedFilaments: engine.paintedFilaments,
+                filamentColors: engine.projectDisplayColors,
+                filamentPaintRevision: engine.filamentPaintRevision,
                 selectedObjectIndex: engine.selectedObjectIndex,
                 gcodeNode: engine.gcodePathNode,
-                showGCode: mainTab == .preview && engine.gcodePathNode != nil,
-                bedSize: engine.bedSize,
-                bedTexturePath: engine.bedTexturePath,
+                showGCode: mainTab == .preview,
+                toolheadPosition: engine.previewToolheadPosition,
+                toolheadMove: engine.previewToolheadMove,
+                toolpathGeometry: engine.gcodeGeometry,
+                showToolhead: engine.previewShowToolMarker,
+                smoothToolhead: engine.smoothToolheadMovement,
+                showShell: engine.previewShowShell,
+                bedSize: mainTab == .preview && engine.previewFromFile ? (engine.previewBedSize ?? engine.bedSize) : engine.bedSize,
+                bedTexturePath: mainTab == .preview && engine.previewFromFile ? nil : engine.bedTexturePath,
                 accent: UIColor(red: 0, green: 150 / 255, blue: 136 / 255, alpha: 1),
-                moveMode: (moveMode || gizmoMode == .move) && mainTab == .prepare && engine.hasModel,
-                // Tap-to-select + drag-on-object always on Prepare (except measure/paint gizmos)
-                selectMode: mainTab == .prepare && engine.hasModel
-                    && gizmoMode != .measure && !isPaintGizmo,
+                touchMode: activePlateTouchMode,
+                fitRequest: fitCameraRequest,
+                cameraView: cameraView,
+                projection: usePerspectiveCamera ? .perspective : .orthographic,
+                onCameraView: selectCameraView,
+                onOrbitBegin: {
+                    usePerspectiveCamera = cameraViewPolicy.orbit(automatic: autoPerspective,
+                        current: usePerspectiveCamera ? .perspective : .orthographic) == .perspective
+                },
+                rotationAxis: rotationAxis,
+                onScaleCommit: { factor, index in
+                    engine.scale(factor: factor, index: index)
+                    status = engine.lastMessage
+                },
+                onRotateCommit: { degrees, index in
+                    engine.rotate(axis: rotationAxis, degrees: degrees, index: index)
+                    status = engine.lastMessage
+                },
                 measureMode: gizmoMode == .measure && mainTab == .prepare,
                 paintMode: isPaintGizmo && mainTab == .prepare && engine.hasModel,
-                paintOverlay: isPaintGizmo ? engine.paintOverlayMesh : nil,
+                paintOverlay: isPaintGizmo && mainTab == .prepare ? engine.paintOverlayMesh : nil,
                 paintOverlayColor: paintOverlayUIColor,
                 onDragCommit: { dx, dy, objIdx in
                     // Use index captured at drag start — never rely on post-tap selection
@@ -2021,10 +2590,66 @@ struct OrcaRootView: View {
                         engine.selectObject(at: idx)
                     }
                     status = engine.lastMessage
+                },
+                onFacePick: { index, point in
+                    engine.selectedObjectIndex = index
+                    Task { @MainActor in
+                        if await engine.editMesh(.layOnFace(point)) == false { operationError = engine.lastMessage }
+                        status = engine.lastMessage
+                    }
                 }
             )
-            .overlay(alignment: .topLeading) {
-                hintOverlay.padding(12)
+            .overlay(alignment: .bottom) {
+                if mainTab != .device {
+                    VStack(spacing: 4) {
+                    HStack(spacing: 0) {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(PlateTouchMode.allCases) { mode in
+                                if mainTab == .prepare || mode == .orbit || mode == .pan {
+                                    toolChip(mode.rawValue, mode.icon, selected: activePlateTouchMode == mode) {
+                                        plateTouchMode = mode
+                                        gizmoMode = mode == .move ? .move : mode == .rotate ? .rotate : mode == .scale ? .scale : mode == .layOnFace ? .layOnFace : .select
+                                        moveMode = mode == .move
+                                        engine.clearPaintOverlay()
+                                    }
+                                }
+                            }
+                            if mainTab == .prepare {
+                                toolChip("Add", "plus") { showModelLibrary = true }.accessibilityIdentifier("model-library-shortcut")
+                                toolChip("Transform", "slider.horizontal.3") { showPlateInspector = true }
+                                copiesMenu
+                                toolChip("Mesh tools", "cube.transparent") { showMeshTools = true }
+                                    .disabled(!engine.hasModel).accessibilityIdentifier("mesh-tools-shortcut")
+                                toolChip("Layer height", "slider.vertical.3") { showLayerHeights = true }
+                                    .disabled(!engine.objectNames.indices.contains(engine.selectedObjectIndex))
+                                    .accessibilityIdentifier("layer-height-shortcut")
+                            }
+                        }.padding(8)
+                    }
+                    modelInformationMenu
+                    toolChip("Home", "house") { selectCameraView(.home) }
+                        .accessibilityIdentifier("camera-home").padding(.trailing, 8)
+                    }
+                    if activePlateTouchMode == .rotate {
+                        Picker("Rotation axis", selection: $rotationAxis) {
+                            Text("X").tag(0)
+                            Text("Y").tag(1)
+                            Text("Z").tag(2)
+                        }.pickerStyle(.segmented).padding(.horizontal, 8).padding(.bottom, 8)
+                    }
+                    }.background(.ultraThinMaterial).clipShape(RoundedRectangle(cornerRadius: 12)).padding(8)
+                }
+            }
+            .overlay {
+                if mainTab == .preview && engine.gcodeGeometry == nil {
+                    VStack(spacing: 12) {
+                        Image(systemName: "square.3.layers.3d").font(.largeTitle)
+                        Text("Slice the plate to preview toolpaths")
+                        Button("Slice plate", action: sliceNow).buttonStyle(.borderedProminent)
+                            .disabled(!engine.hasModel || isSlicing)
+                    }.padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+                }
             }
             .overlay(alignment: .topTrailing) {
                 gizmoStatusBadges.padding(12)
@@ -2034,7 +2659,61 @@ struct OrcaRootView: View {
                     devicePlaceholder
                 }
             }
-        }
+        })
+    }
+
+    private var modelInformationMenu: some View {
+        Menu {
+            if mainTab == .preview && engine.previewFromFile {
+                if let url = engine.gcodeURL { Text(url.lastPathComponent) }
+                Text("G-code preview")
+            } else {
+                if let name = engine.modelName { Text(name) }
+                if !engine.boundsText.isEmpty { Text(engine.boundsText) }
+                if !engine.selectedPrinter.isEmpty { Text(engine.selectedPrinter) }
+            }
+            if !status.isEmpty { Text(status) }
+            Text(engine.lastSliceStatsText)
+            Button("Fit model") { fitCameraRequest = UUID() }
+        } label: {
+            Image(systemName: "info.circle").frame(width: 44, height: 44)
+        }.accessibilityLabel(Text("Model and slice information"))
+    }
+
+    private func selectCameraView(_ view: CameraPreset) {
+        usePerspectiveCamera = cameraViewPolicy.select(view, automatic: autoPerspective,
+            current: usePerspectiveCamera ? .perspective : .orthographic) == .perspective
+        cameraView = view
+        fitCameraRequest = UUID()
+    }
+
+    private var projectionSelection: Binding<Bool> {
+        Binding(get: { usePerspectiveCamera }, set: {
+            cameraViewPolicy.reset()
+            usePerspectiveCamera = $0
+        })
+    }
+
+    private var automaticPerspectiveSelection: Binding<Bool> {
+        Binding(get: { autoPerspective }, set: {
+            cameraViewPolicy.reset()
+            autoPerspective = $0
+        })
+    }
+
+    private var cameraViewMenu: some View {
+        Menu("View") {
+            Button { selectCameraView(.home) } label: { Label("Home view", systemImage: "house") }
+            ForEach(CameraPreset.allCases.filter { $0 != .home }, id: \.rawValue) { view in
+                Button("\(view.rawValue) view") { selectCameraView(view) }
+            }
+            Divider()
+            Picker("Projection", selection: projectionSelection) {
+                Text("Perspective").tag(true)
+                Text("Orthographic").tag(false)
+            }
+            Toggle("Auto Perspective", isOn: automaticPerspectiveSelection)
+        }.accessibilityIdentifier("camera-view-menu")
     }
 
     @ViewBuilder
@@ -2048,9 +2727,9 @@ struct OrcaRootView: View {
                     paintToolState = 2; status = "Brush: blocker"
                 }
             } else if gizmoMode == .paintMMU {
-                toolChip("Ext \(paintMMUExtruder)", "paintpalette", selected: paintToolState != 0) {
+                toolChip("Filament \(paintMMUExtruder)", "paintpalette", selected: paintToolState != 0) {
                     paintToolState = 1
-                    paintMMUExtruder = paintMMUExtruder >= 4 ? 1 : paintMMUExtruder + 1
+                    paintMMUExtruder = paintMMUExtruder >= min(engine.maximumPaintFilaments, engine.projectFilamentColors.count) ? 1 : paintMMUExtruder + 1
                     status = "MMU extruder \(paintMMUExtruder)"
                 }
             } else if gizmoMode == .paintFuzzy {
@@ -2109,6 +2788,11 @@ struct OrcaRootView: View {
 
     private var gizmoStatusBadges: some View {
         VStack(alignment: .trailing, spacing: 6) {
+            if activePlateTouchMode == .layOnFace && mainTab == .prepare {
+                Text("Tap a flat outer face · drag to orbit")
+                    .font(.caption).padding(8)
+                    .background(.regularMaterial, in: Capsule())
+            }
             if (moveMode || gizmoMode == .move) && mainTab == .prepare && engine.hasModel {
                 Text("Move gizmo · orbit off")
                     .font(.system(size: 11, weight: .semibold))
@@ -2206,6 +2890,7 @@ struct OrcaRootView: View {
         case .move: return "arrow.up.and.down.and.arrow.left.and.right"
         case .rotate: return "rotate.3d"
         case .scale: return "arrow.up.left.and.arrow.down.right"
+        case .layOnFace: return "cube.transparent"
         case .measure: return "ruler"
         case .paintSupport: return "paintbrush.pointed"
         case .paintSeam: return "line.diagonal"
@@ -2215,20 +2900,8 @@ struct OrcaRootView: View {
         }
     }
 
-    private func loadObjectSettingsFields() {
-        let idx = engine.selectedObjectIndex >= 0 ? engine.selectedObjectIndex : 0
-        objLayerHeight = engine.getObjectOption(index: idx, key: "layer_height")
-            ?? engine.getOptionFirst("layer_height") ?? "0.2"
-        objWalls = engine.getObjectOption(index: idx, key: "wall_loops")
-            ?? engine.getOptionFirst("wall_loops") ?? "2"
-        objInfill = (engine.getObjectOption(index: idx, key: "sparse_infill_density")
-            ?? engine.getOptionPercent("sparse_infill_density") ?? "15")
-            .replacingOccurrences(of: "%", with: "")
-        objExtruder = engine.getObjectOption(index: idx, key: "extruder") ?? "0"
-    }
-
-    private var configWizardSheet: some View {
-        NavigationStack {
+    private var configWizardSheet: AnyView {
+        AnyView(NavigationStack {
             List {
                 Section("Welcome") {
                     Text("First-run setup (desktop ConfigWizard lite). Language, region, preferred vendors, and last printer are stored in UserDefaults.")
@@ -2293,7 +2966,7 @@ struct OrcaRootView: View {
             .navigationTitle("Setup wizard")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Continue") {
                         OrcaEngine.appLanguage = wizardLanguage
                         OrcaEngine.appRegion = wizardRegion
@@ -2307,20 +2980,27 @@ struct OrcaRootView: View {
                 }
             }
             .task {
-                if engine.vendorList.isEmpty && !engine.presetsLoading {
+                if engine.automaticProfileLoading && engine.vendorList.isEmpty && !engine.presetsLoading {
                     await engine.loadAllSystemPresets()
                 }
             }
-        }
+        })
     }
 
-    private var preferencesSheet: some View {
-        NavigationStack {
+    private var preferencesSheet: AnyView {
+        AnyView(NavigationStack {
             List {
                 Section("Appearance") {
                     Toggle("Dark mode (forced)", isOn: .constant(true))
                         .listRowBackground(OrcaTheme.panel)
                     labeled("Theme", "Orca desktop dark")
+                }
+                Section("3D view") {
+                    Picker("Projection", selection: projectionSelection) {
+                        Text("Perspective").tag(true)
+                        Text("Orthographic").tag(false)
+                    }
+                    Toggle("Auto Perspective", isOn: automaticPerspectiveSelection)
                 }
                 Section("Setup") {
                     Button("Show setup wizard again") {
@@ -2373,16 +3053,16 @@ struct OrcaRootView: View {
             .navigationTitle("Preferences")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Done") { showPreferences = false }
                         .foregroundStyle(OrcaTheme.accent)
                 }
             }
-        }
+        })
     }
 
-    private var aboutSheet: some View {
-        NavigationStack {
+    private var aboutSheet: AnyView {
+        AnyView(NavigationStack {
             VStack(spacing: 16) {
                 Image(systemName: "seal.fill")
                     .font(.system(size: 48))
@@ -2394,6 +3074,8 @@ struct OrcaRootView: View {
                     .font(.system(size: 13, design: .monospaced))
                     .foregroundStyle(OrcaTheme.muted)
                     .multilineTextAlignment(.center)
+                Text("Build \(Bundle.main.object(forInfoDictionaryKey: "OrcaBuildRevision") as? String ?? "development")")
+                    .font(.caption.monospaced())
                 Text("iOS shell (SwiftUI) · official libslic3r engine\nAGPL-3.0 · replaces desktop wxWidgets UI on mobile")
                     .font(.footnote)
                     .foregroundStyle(OrcaTheme.muted)
@@ -2407,59 +3089,18 @@ struct OrcaRootView: View {
             .navigationTitle("About")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Done") { showAbout = false }
                         .foregroundStyle(OrcaTheme.accent)
                 }
             }
-        }
+        })
     }
 
-    private var objectSettingsSheet: some View {
-        let idx = engine.selectedObjectIndex >= 0 ? engine.selectedObjectIndex : 0
-        return NavigationStack {
-            List {
-                Section("Object \(idx + 1)") {
-                    labeled("Name", engine.objectNames.indices.contains(idx) ? engine.objectNames[idx] : "—")
-                }
-                Section("Overrides (desktop Object Settings)") {
-                    processField(title: "layer_height", unit: "mm", text: $objLayerHeight) {
-                        _ = engine.setObjectOption(index: idx, key: "layer_height", value: objLayerHeight)
-                        status = engine.lastMessage
-                    }
-                    processField(title: "wall_loops", unit: "", text: $objWalls) {
-                        _ = engine.setObjectOption(index: idx, key: "wall_loops", value: objWalls)
-                        status = engine.lastMessage
-                    }
-                    processField(title: "sparse_infill_density", unit: "%", text: $objInfill) {
-                        _ = engine.setObjectOption(index: idx, key: "sparse_infill_density", value: "\(objInfill)%")
-                        status = engine.lastMessage
-                    }
-                    processField(title: "extruder (0=default)", unit: "", text: $objExtruder) {
-                        if let e = Int(objExtruder) {
-                            engine.setObjectExtruder(index: idx, extruder1Based: e)
-                            status = engine.lastMessage
-                        }
-                    }
-                    Button("Clear layer_height override") {
-                        engine.eraseObjectOption(index: idx, key: "layer_height")
-                        loadObjectSettingsFields()
-                    }
-                    .foregroundStyle(OrcaTheme.danger)
-                    .listRowBackground(OrcaTheme.panel)
-                }
-            }
-            .scrollContentBackground(.hidden)
-            .background(OrcaTheme.bg)
-            .navigationTitle("Object settings")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { showObjectSettings = false }
-                        .foregroundStyle(OrcaTheme.accent)
-                }
-            }
-        }
+    private var objectSettingsSheet: AnyView {
+        AnyView(ProcessSettingsBrowser(engine: engine, objects: true, onClose: { showObjectSettings = false }) {
+            status = engine.lastMessage
+        })
     }
 
     private func toolChip(
@@ -2487,105 +3128,217 @@ struct OrcaRootView: View {
         .buttonStyle(.plain)
     }
 
-    private var layerScrubber: some View {
-        VStack(alignment: .leading, spacing: 6) {
+    private var lowerPreviewLayer: Int {
+        engine.previewLayerHeights.firstIndex(where: { $0 >= engine.previewMinZ - 0.001 }) ?? 0
+    }
+    private var upperPreviewLayer: Int {
+        engine.previewLayerHeights.lastIndex(where: { $0 <= engine.previewMaxZ + 0.001 }) ?? 0
+    }
+    private var upperLayerBinding: Binding<Double> {
+        Binding(get: { Double(upperPreviewLayer) }, set: { value in
+            let i = Int(value.rounded())
+            guard engine.previewLayerHeights.indices.contains(i) else { return }
+            let z = engine.previewLayerHeights[i]
+            guard z != engine.previewMaxZ else { return }
+            engine.previewMaxZ = z
+            engine.previewMinZ = min(engine.previewMinZ, z)
+            engine.resetPreviewSequence()
+            engine.requestPreviewLayer()
+        })
+    }
+
+    private var previewLayerBar: some View {
+        VStack(spacing: 2) {
             HStack {
-                Text("Clip Z (min–max)")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(OrcaTheme.muted)
+                Text("Layer \(upperPreviewLayer + 1) / \(engine.previewLayerHeights.count)")
                 Spacer()
-                Text(String(
-                    format: "%.2f–%.2f / %.2f mm",
-                    engine.previewMinZ, engine.previewMaxZ, engine.gcodeZMax
-                ))
-                    .font(.system(size: 12, weight: .medium, design: .monospaced))
-                    .foregroundStyle(OrcaTheme.accent)
-            }
-            // Max Z (top clip) — desktop G-code layer scrubber
-            Slider(
-                value: Binding(
-                    get: { Double(engine.previewMaxZ) },
-                    set: { v in
-                        engine.previewMaxZ = Float(v)
-                        if engine.previewMinZ > engine.previewMaxZ {
-                            engine.previewMinZ = engine.previewMaxZ
-                        }
-                        engine.applyPreviewLayer()
-                    }
-                ),
-                in: Double(engine.gcodeZMin)...Double(max(engine.gcodeZMax, engine.gcodeZMin + 0.05))
-            )
-            .tint(OrcaTheme.accent)
-            // Min Z (bottom clip / clipping plane lite)
-            Slider(
-                value: Binding(
-                    get: { Double(engine.previewMinZ) },
-                    set: { v in
-                        engine.previewMinZ = Float(v)
-                        if engine.previewMinZ > engine.previewMaxZ {
-                            engine.previewMaxZ = engine.previewMinZ
-                        }
-                        engine.applyPreviewLayer()
-                    }
-                ),
-                in: Double(engine.gcodeZMin)...Double(max(engine.gcodeZMax, engine.gcodeZMin + 0.05))
-            )
-            .tint(OrcaTheme.muted)
+                Text(String(format: "Z %.2f mm", engine.previewMaxZ))
+            }.font(.caption.monospacedDigit())
+            Slider(value: upperLayerBinding, in: 0...Double(max(1, engine.previewLayerHeights.count - 1)), step: 1)
+                .disabled(engine.previewLayerHeights.count < 2).tint(OrcaTheme.accent)
+                .accessibilityLabel("Upper preview layer")
+        }
+    }
 
-            // Color legend chips — wall / infill / support / travel / other (W5)
-            ScrollView(.horizontal, showsIndicators: false) {
+    // An in-workspace panel keeps all three main tabs reachable even at its
+    // largest size. A modal large detent covered them on compact devices.
+    private var previewControlsPanel: AnyView {
+        AnyView(VStack(spacing: 0) {
+            HStack {
+                Text("Preview controls").font(.subheadline.weight(.semibold))
+                Spacer()
+                Button { showPreviewControls = false } label: { Image(systemName: "chevron.down").frame(width: 44, height: 44) }
+                    .accessibilityLabel("Hide preview controls")
+            }.padding(.horizontal, 16)
+                .contentShape(Rectangle())
+                .gesture(DragGesture().onEnded { if $0.translation.height > 35 { showPreviewControls = false } })
+            ScrollView { layerScrubber }.accessibilityIdentifier("preview-controls-content")
+        }.background(OrcaTheme.panel))
+    }
+
+    private var toolpathScrubber: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let geometry = engine.gcodeGeometry {
+                let cursor = max(-1, engine.previewToolheadMove ?? Double(min(engine.previewThroughMove, max(0, geometry.moveCount - 1))))
+                HStack {
+                    Text("Toolhead position").font(.subheadline.weight(.semibold))
+                    Spacer()
+                    Text("Move \((cursor + 1).formatted(.number.precision(.fractionLength(0...2)))) / \(geometry.moveCount)")
+                        .font(.caption.monospacedDigit()).lineLimit(1).minimumScaleFactor(0.7)
+                }
                 HStack(spacing: 8) {
-                    legendChip(
-                        "Wall",
-                        color: Color(red: 0.95, green: 0.55, blue: 0.15),
-                        isOn: $engine.previewShowWall
-                    )
-                    legendChip(
-                        "Infill",
-                        color: Color(red: 0.25, green: 0.75, blue: 0.55),
-                        isOn: $engine.previewShowInfill
-                    )
-                    legendChip(
-                        "Support",
-                        color: Color(red: 0.55, green: 0.55, blue: 0.60),
-                        isOn: $engine.previewShowSupport
-                    )
-                    legendChip(
-                        "Travel",
-                        color: Color(red: 0.45, green: 0.45, blue: 0.50),
-                        isOn: $engine.previewShowTravel
-                    )
-                    legendChip(
-                        "Other",
-                        color: Color(red: 0.70, green: 0.70, blue: 0.75),
-                        isOn: $engine.previewShowOther
-                    )
+                    Button { engine.stepToolhead(-1) } label: { Image(systemName: "backward.end.fill").frame(width: 44, height: 44) }
+                        .accessibilityLabel("Previous toolpath move").disabled(cursor <= -1)
+                    ManualToolpathScrubber(value: Binding(
+                        get: { cursor },
+                        set: { engine.scrubToolhead(to: $0) }), range: -1...Double(max(0, geometry.moveCount - 1)),
+                        onEditingChanged: { engine.setToolheadScrubbing($0) })
+                    Button { engine.stepToolhead(1) } label: { Image(systemName: "forward.end.fill").frame(width: 44, height: 44) }
+                        .accessibilityLabel("Next toolpath move").disabled(cursor >= Double(geometry.moveCount - 1))
+                }
+                HStack {
+                    Button {
+                        if engine.previewPlaybackRunning { engine.pauseToolheadPlayback() }
+                        else { engine.playToolhead() }
+                    } label: {
+                        Label(engine.previewPlaybackRunning ? "Pause" : "Play",
+                              systemImage: engine.previewPlaybackRunning ? "pause.fill" : "play.fill")
+                    }.accessibilityIdentifier("toolhead-playback")
+                    Spacer()
+                    Picker("Playback speed", selection: $engine.previewPlaybackRate) {
+                        Text("1×").tag(1.0)
+                        Text("10×").tag(10.0)
+                        Text("100×").tag(100.0)
+                    }.pickerStyle(.menu)
+                }
+                Text("Scrub or play to see each move. Playback uses G-code feedrates.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Smooth toolhead movement", isOn: $engine.smoothToolheadMovement)
+                Button("Show complete toolpath") {
+                    engine.resetPreviewSequence()
                 }
             }
+        }
+    }
 
-            // Color mode: feature / height / speed
-            HStack(spacing: 8) {
-                Text("Color")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(OrcaTheme.muted)
-                ForEach(GCodePathGeometry.ColorMode.allCases) { mode in
-                    Button {
-                        engine.previewColorMode = mode
-                        engine.applyPreviewLayer()
-                    } label: {
-                        Text(mode.label)
-                            .font(.system(size: 11, weight: .semibold))
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(engine.previewColorMode == mode
-                                        ? OrcaTheme.accent.opacity(0.28) : OrcaTheme.elevated)
-                            .foregroundStyle(engine.previewColorMode == mode
-                                             ? OrcaTheme.accent : OrcaTheme.muted)
-                            .clipShape(Capsule())
-                    }
-                    .buttonStyle(.plain)
+    private var layerScrubber: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Color by").font(.subheadline.weight(.semibold))
+                Spacer()
+                Picker("Color by", selection: Binding(
+                get: { engine.previewColorMode },
+                set: { engine.previewColorMode = $0; engine.requestPreviewLayer() }
+            )) {
+                ForEach(GCodePathGeometry.ColorMode.allCases) { mode in Text(mode.label).tag(mode) }
+            }.pickerStyle(.menu).labelsHidden()
+            }
+
+            if engine.gcodeGeometry == nil { Text("Slice the plate to preview toolpaths.") }
+            else {
+                if engine.previewFromFile, let url = engine.gcodeURL { Text(url.lastPathComponent).font(.headline) }
+                Text(engine.lastSliceStatsText).font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                if engine.previewIsReduced {
+                    Text("Toolpaths are reduced to fit available memory.").font(.caption).foregroundStyle(.secondary)
                 }
-                Spacer(minLength: 0)
+                toolpathScrubber
+                Text("Lower layer \(lowerPreviewLayer + 1)").font(.caption)
+                Slider(value: Binding(get: { Double(lowerPreviewLayer) }, set: { value in
+                    let i = Int(value.rounded())
+                    guard engine.previewLayerHeights.indices.contains(i) else { return }
+                    let z = engine.previewLayerHeights[i]
+                    guard z != engine.previewMinZ else { return }
+                    engine.previewMinZ = z
+                    engine.previewMaxZ = max(engine.previewMaxZ, z)
+                    engine.resetPreviewSequence()
+                    engine.requestPreviewLayer()
+                }), in: 0...Double(max(1, engine.previewLayerHeights.count - 1)), step: 1)
+                    .disabled(engine.previewLayerHeights.count < 2)
+                Button("Show all layers") {
+                    engine.previewMinZ = engine.gcodeZMin
+                    engine.previewMaxZ = engine.gcodeZMax
+                    engine.resetPreviewSequence()
+                    engine.requestPreviewLayer()
+                }
+            }
+            if engine.previewLightweight || (engine.gcodeGeometry?.moveCount ?? 0) > 250_000 {
+                Text("Memory-saving preview · all toolpaths retained").font(.caption).foregroundStyle(.secondary)
+            }
+            if engine.previewBuilding {
+                ProgressView("Updating toolpaths…").accessibilityIdentifier("preview-building")
+            }
+            if let geometry = engine.gcodeGeometry {
+                Button("Show current layer only") {
+                    engine.previewMinZ = engine.previewMaxZ
+                    engine.resetPreviewSequence()
+                    engine.requestPreviewLayer()
+                }
+                DisclosureGroup("Line types") {
+                    HStack {
+                        Button("All") { engine.previewHiddenFeatures = []; engine.requestPreviewLayer() }
+                        Button("None") { engine.previewHiddenFeatures = Set(geometry.features); engine.requestPreviewLayer() }
+                    }.buttonStyle(.bordered)
+                    ForEach(geometry.features, id: \.self) { feature in
+                        Toggle(isOn: Binding(get: { !engine.previewHiddenFeatures.contains(feature) }, set: { visible in
+                            if visible { engine.previewHiddenFeatures.remove(feature) }
+                            else { engine.previewHiddenFeatures.insert(feature) }
+                            engine.requestPreviewLayer()
+                        })) {
+                            Label { Text(feature) } icon: {
+                                Circle().fill(Color(uiColor: GCodePathGeometry.color(for: feature))).frame(width: 10, height: 10)
+                            }
+                        }
+                    }
+                }.accessibilityIdentifier("preview-line-types")
+                DisclosureGroup("Options") {
+                    if !engine.previewFromFile { Toggle("Model shell", isOn: $engine.previewShowShell) }
+                    Toggle("Tool marker", isOn: Binding(get: { engine.previewShowToolMarker }, set: {
+                        engine.previewShowToolMarker = $0; engine.requestPreviewLayer()
+                    }))
+                    Toggle("Center of gravity", isOn: Binding(get: { engine.previewShowCenterOfGravity }, set: {
+                        engine.previewShowCenterOfGravity = $0; engine.requestPreviewLayer()
+                    }))
+                    ForEach(GCodePathGeometry.MoveKind.allCases.filter { $0 != .extrude }) { kind in
+                        Toggle(kind.label, isOn: Binding(get: { engine.previewEnabledMoves.contains(kind) }, set: { visible in
+                            if visible { engine.previewEnabledMoves.insert(kind) }
+                            else { engine.previewEnabledMoves.remove(kind) }
+                            engine.requestPreviewLayer()
+                        }))
+                    }
+                }.accessibilityIdentifier("preview-options")
+                DisclosureGroup("Filaments and tools") {
+                    ForEach(geometry.toolIDs, id: \.self) { tool in
+                        Toggle("Tool \(tool + 1)", isOn: Binding(get: { !engine.previewHiddenTools.contains(tool) }, set: { visible in
+                            if visible { engine.previewHiddenTools.remove(tool) }
+                            else { engine.previewHiddenTools.insert(tool) }
+                            engine.requestPreviewLayer()
+                        }))
+                    }
+                    ForEach(geometry.filamentIDs, id: \.self) { filament in
+                        Toggle("Filament \(filament + 1)", isOn: Binding(get: { !engine.previewHiddenFilaments.contains(filament) }, set: { visible in
+                            if visible { engine.previewHiddenFilaments.remove(filament) }
+                            else { engine.previewHiddenFilaments.insert(filament) }
+                            engine.requestPreviewLayer()
+                        }))
+                    }
+                }
+
+            }
+
+            if engine.previewColorMode.isNumeric, let geometry = engine.gcodeGeometry {
+                let range = geometry.colorRange(for: engine.previewColorMode)
+                let unit = engine.previewColorMode.unit
+                LinearGradient(colors: [Color(uiColor: GCodePathGeometry.gradientColor(t: 0)),
+                    Color(uiColor: GCodePathGeometry.gradientColor(t: 0.25)),
+                    Color(uiColor: GCodePathGeometry.gradientColor(t: 0.5)),
+                    Color(uiColor: GCodePathGeometry.gradientColor(t: 0.75)),
+                    Color(uiColor: GCodePathGeometry.gradientColor(t: 1))], startPoint: .leading, endPoint: .trailing)
+                    .frame(height: 8).clipShape(Capsule())
+                HStack {
+                    Text(String(format: "%.2f %@", range.lowerBound, unit))
+                    Spacer()
+                    Text(String(format: "%.2f %@", range.upperBound, unit))
+                }.font(.caption.monospacedDigit())
             }
 
             // Analysis strip when stats available
@@ -2599,7 +3352,7 @@ struct OrcaRootView: View {
                     if !engine.filamentByRole.isEmpty {
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 8) {
-                                ForEach(Array(engine.filamentByRole.prefix(8).enumerated()), id: \.offset) { _, r in
+                                ForEach(Array(engine.filamentByRole.enumerated()), id: \.offset) { _, r in
                                     Text(String(format: "%@: %.1fg", r.name, r.grams))
                                         .font(.system(size: 10, weight: .medium, design: .monospaced))
                                         .padding(.horizontal, 8)
@@ -2620,51 +3373,6 @@ struct OrcaRootView: View {
         .overlay(alignment: .top) {
             Rectangle().fill(OrcaTheme.border).frame(height: 1)
         }
-    }
-
-    private func featureToggle(_ title: String, isOn: Binding<Bool>) -> some View {
-        Button {
-            isOn.wrappedValue.toggle()
-            engine.applyPreviewLayer()
-        } label: {
-            Text(title)
-                .font(.system(size: 11, weight: .semibold))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(isOn.wrappedValue ? OrcaTheme.accent.opacity(0.28) : OrcaTheme.elevated)
-                .foregroundStyle(isOn.wrappedValue ? OrcaTheme.accent : OrcaTheme.muted)
-                .clipShape(Capsule())
-                .overlay(
-                    Capsule().stroke(isOn.wrappedValue ? OrcaTheme.accent : Color.clear, lineWidth: 1)
-                )
-        }
-        .buttonStyle(.plain)
-    }
-
-    /// Color-swatch legend chip for G-code feature groups (W5).
-    private func legendChip(_ title: String, color: Color, isOn: Binding<Bool>) -> some View {
-        Button {
-            isOn.wrappedValue.toggle()
-            engine.applyPreviewLayer()
-        } label: {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(color)
-                    .frame(width: 8, height: 8)
-                    .opacity(isOn.wrappedValue ? 1 : 0.35)
-                Text(title)
-                    .font(.system(size: 11, weight: .semibold))
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(isOn.wrappedValue ? color.opacity(0.22) : OrcaTheme.elevated)
-            .foregroundStyle(isOn.wrappedValue ? OrcaTheme.text : OrcaTheme.muted)
-            .clipShape(Capsule())
-            .overlay(
-                Capsule().stroke(isOn.wrappedValue ? color.opacity(0.8) : Color.clear, lineWidth: 1)
-            )
-        }
-        .buttonStyle(.plain)
     }
 
     @State private var topShells = "3"
@@ -2709,8 +3417,8 @@ struct OrcaRootView: View {
     @State private var calibFlowPass = 1
     @State private var calibFlowLinear = true
 
-    private var calibrationSheet: some View {
-        NavigationStack {
+    private var calibrationSheet: AnyView {
+        AnyView(NavigationStack {
             List {
                 if engine.calibMode != 0 {
                     Section {
@@ -2914,1021 +3622,16 @@ struct OrcaRootView: View {
                         .foregroundStyle(OrcaTheme.accent)
                 }
             }
-        }
+        })
     }
 
-    private var processSheet: some View {
-        NavigationStack {
-            List {
-                Section {
-                    if engine.presetsLoading {
-                        HStack(spacing: 10) {
-                            ProgressView()
-                            Text("Installing system profiles…")
-                                .foregroundStyle(OrcaTheme.muted)
-                        }
-                        .listRowBackground(OrcaTheme.panel)
-                    } else if engine.presetsLoaded {
-                        labeled(
-                            "Catalog",
-                            "\(engine.printerNames.count) printers · \(engine.processNames.count) process · \(engine.filamentNames.count) filament"
-                        )
-                        Toggle(isOn: Binding(
-                            get: { engine.compatibleOnly },
-                            set: { engine.setCompatibleOnly($0) }
-                        )) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Compatible only")
-                                    .foregroundStyle(OrcaTheme.text)
-                                Text("Filter process & filament for selected printer")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(OrcaTheme.muted)
-                            }
-                        }
-                        .tint(OrcaTheme.accent)
-                        .listRowBackground(OrcaTheme.panel)
-                    } else {
-                        Button {
-                            Task { await engine.loadAllSystemPresets() }
-                        } label: {
-                            Text("Load all system profiles")
-                                .foregroundStyle(OrcaTheme.accent)
-                        }
-                        .listRowBackground(OrcaTheme.panel)
-                    }
-                    Button {
-                        showPrinterPicker = true
-                    } label: {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Printer")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(OrcaTheme.muted)
-                                Text(engine.selectedPrinter.isEmpty ? "Select printer…" : engine.selectedPrinter)
-                                    .foregroundStyle(OrcaTheme.text)
-                                    .lineLimit(2)
-                            }
-                            Spacer()
-                            if let path = engine.printerCoverPath, let ui = UIImage(contentsOfFile: path) {
-                                Image(uiImage: ui)
-                                    .resizable()
-                                    .scaledToFit()
-                                    .frame(width: 44, height: 44)
-                                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                            }
-                            Image(systemName: "chevron.right")
-                                .foregroundStyle(OrcaTheme.muted)
-                        }
-                    }
-                    .listRowBackground(OrcaTheme.panel)
-
-                    Button {
-                        showProcessPicker = true
-                    } label: {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Process")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(OrcaTheme.muted)
-                                Text(engine.selectedProcess.isEmpty ? engine.activeProcessProfile : engine.selectedProcess)
-                                    .foregroundStyle(OrcaTheme.text)
-                                    .lineLimit(2)
-                            }
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                                .foregroundStyle(OrcaTheme.muted)
-                        }
-                    }
-                    .listRowBackground(OrcaTheme.panel)
-
-                    Button {
-                        filamentSlotForPicker = 0
-                        showFilamentPicker = true
-                    } label: {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Filament")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(OrcaTheme.muted)
-                                Text(engine.selectedFilament.isEmpty ? "Select filament…" : engine.selectedFilament)
-                                    .foregroundStyle(OrcaTheme.text)
-                                    .lineLimit(2)
-                            }
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                                .foregroundStyle(OrcaTheme.muted)
-                        }
-                    }
-                    .listRowBackground(OrcaTheme.panel)
-
-                    // Multi-extruder filament slots (when printer has >1 nozzle)
-                    if engine.extruderCount > 1 {
-                        ForEach(0..<engine.extruderCount, id: \.self) { slot in
-                            Button {
-                                filamentSlotForPicker = slot
-                                showFilamentPicker = true
-                            } label: {
-                                HStack {
-                                    Text("Extruder \(slot + 1)")
-                                        .foregroundStyle(OrcaTheme.muted)
-                                    Spacer()
-                                    Text(slotFilamentLabel(slot))
-                                    .foregroundStyle(OrcaTheme.text)
-                                    .lineLimit(1)
-                                    Image(systemName: "chevron.right")
-                                        .foregroundStyle(OrcaTheme.muted)
-                                }
-                            }
-                            .listRowBackground(OrcaTheme.panel)
-                        }
-                    }
-                } header: {
-                    Text("System profiles")
-                }
-
-                Section {
-                    Button {
-                        showCalibration = true
-                    } label: {
-                        HStack {
-                            Image(systemName: "ruler")
-                                .foregroundStyle(OrcaTheme.accent)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Calibration")
-                                    .foregroundStyle(OrcaTheme.text)
-                                Text(engine.calibMode == 0
-                                     ? "Temp tower · flow · PA · retraction"
-                                     : engine.calibSummary)
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(OrcaTheme.muted)
-                                    .lineLimit(1)
-                            }
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                                .foregroundStyle(OrcaTheme.muted)
-                        }
-                    }
-                    .listRowBackground(OrcaTheme.panel)
-                } header: {
-                    Text("Calibration")
-                }
-
-                if !engine.recentModelPaths.isEmpty {
-                    Section("Recent models") {
-                        ForEach(engine.recentModelPaths.prefix(8), id: \.self) { path in
-                            Button {
-                                let url = URL(fileURLWithPath: path)
-                                guard FileManager.default.fileExists(atPath: path) else {
-                                    status = "Missing: \(URL(fileURLWithPath: path).lastPathComponent)"
-                                    return
-                                }
-                                status = engine.loadModel(url: url)
-                                syncProcessFieldsFromEngine()
-                                showProcess = false
-                            } label: {
-                                Text(URL(fileURLWithPath: path).lastPathComponent)
-                                    .foregroundStyle(OrcaTheme.accent)
-                                    .lineLimit(1)
-                            }
-                            .listRowBackground(OrcaTheme.panel)
-                        }
-                    }
-                }
-
-                Section {
-                    TextField("Name (e.g. My PLA Fine)", text: $userProcessName)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .font(.system(size: 15, design: .monospaced))
-                        .foregroundStyle(OrcaTheme.text)
-                        .listRowBackground(OrcaTheme.panel)
-                    Button {
-                        let name = userProcessName.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if engine.saveUserProcess(name: name.isEmpty ? "My Process" : name) {
-                            status = engine.lastMessage
-                            if userProcessName.isEmpty { userProcessName = "My Process" }
-                        } else {
-                            status = engine.lastMessage
-                        }
-                    } label: {
-                        Text("Save current settings as user process")
-                            .foregroundStyle(OrcaTheme.accent)
-                    }
-                    .listRowBackground(OrcaTheme.panel)
-                    if !engine.userProcessNames.isEmpty {
-                        Text("Saved: \(engine.userProcessNames.joined(separator: ", "))")
-                            .font(.system(size: 11))
-                            .foregroundStyle(OrcaTheme.muted)
-                            .listRowBackground(OrcaTheme.panel)
-                    }
-                } header: {
-                    Text("User process (persists)")
-                }
-
-                Section {
-                    TextField("Name (e.g. My PLA)", text: $userFilamentName)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .font(.system(size: 15, design: .monospaced))
-                        .foregroundStyle(OrcaTheme.text)
-                        .listRowBackground(OrcaTheme.panel)
-                    Button {
-                        let name = userFilamentName.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if engine.saveUserFilament(name: name.isEmpty ? "My Filament" : name) {
-                            status = engine.lastMessage
-                            if userFilamentName.isEmpty { userFilamentName = "My Filament" }
-                        } else {
-                            status = engine.lastMessage
-                        }
-                    } label: {
-                        Text("Save current settings as user filament")
-                            .foregroundStyle(OrcaTheme.accent)
-                    }
-                    .listRowBackground(OrcaTheme.panel)
-                    if !engine.userFilamentNames.isEmpty {
-                        Text("Saved: \(engine.userFilamentNames.joined(separator: ", "))")
-                            .font(.system(size: 11))
-                            .foregroundStyle(OrcaTheme.muted)
-                            .listRowBackground(OrcaTheme.panel)
-                    }
-                } header: {
-                    Text("User filament (persists)")
-                }
-
-                Section {
-                    Button {
-                        if let url = engine.exportConfigJSON() {
-                            status = engine.lastMessage
-                            exportShareURL = url
-                        } else {
-                            status = engine.lastMessage
-                            exportShareURL = nil
-                        }
-                    } label: {
-                        Label("Export current config JSON", systemImage: "square.and.arrow.up")
-                            .foregroundStyle(OrcaTheme.accent)
-                    }
-                    .listRowBackground(OrcaTheme.panel)
-                    if let url = exportShareURL {
-                        ShareLink(item: url) {
-                            Label("Share \(url.lastPathComponent)", systemImage: "square.and.arrow.up.on.square")
-                                .foregroundStyle(OrcaTheme.accent)
-                        }
-                        .listRowBackground(OrcaTheme.panel)
-                    }
-                    Button {
-                        presetImportKind = 0
-                        showPresetImporter = true
-                    } label: {
-                        Text("Import process JSON from Files…")
-                            .foregroundStyle(OrcaTheme.accent)
-                    }
-                    .listRowBackground(OrcaTheme.panel)
-                    Button {
-                        presetImportKind = 1
-                        showPresetImporter = true
-                    } label: {
-                        Text("Import filament JSON from Files…")
-                            .foregroundStyle(OrcaTheme.accent)
-                    }
-                    .listRowBackground(OrcaTheme.panel)
-                    Button {
-                        presetImportKind = 2
-                        showPresetImporter = true
-                    } label: {
-                        Text("Import config overlay JSON…")
-                            .foregroundStyle(OrcaTheme.accent)
-                    }
-                    .listRowBackground(OrcaTheme.panel)
-                } header: {
-                    Text("Export / import config")
-                } footer: {
-                    Text("User presets live in Documents/OrcaSlicer/user_presets/. Export uses official DynamicPrintConfig JSON.")
-                        .font(.system(size: 11))
-                }
-
-                if engine.hasModel {
-                    Section {
-                        HStack {
-                            Text("Grid N×M")
-                                .foregroundStyle(OrcaTheme.muted)
-                            TextField("2", text: $cloneNx)
-                                .keyboardType(.numberPad)
-                                .multilineTextAlignment(.trailing)
-                                .foregroundStyle(OrcaTheme.text)
-                                .frame(width: 40)
-                            Text("×").foregroundStyle(OrcaTheme.muted)
-                            TextField("2", text: $cloneNy)
-                                .keyboardType(.numberPad)
-                                .multilineTextAlignment(.trailing)
-                                .foregroundStyle(OrcaTheme.text)
-                                .frame(width: 40)
-                            Spacer()
-                            Button("Clone") {
-                                let nx = max(1, min(20, Int(cloneNx) ?? 2))
-                                let ny = max(1, min(20, Int(cloneNy) ?? 2))
-                                if engine.cloneGrid(nx: nx, ny: ny) {
-                                    status = engine.lastMessage
-                                } else {
-                                    status = engine.lastMessage
-                                }
-                            }
-                            .fontWeight(.bold)
-                            .foregroundStyle(OrcaTheme.accent)
-                        }
-                        .listRowBackground(OrcaTheme.panel)
-
-                        Button {
-                            _ = engine.refreshMeshHealth()
-                            status = engine.meshHealthText
-                        } label: {
-                            HStack {
-                                Text("Mesh health")
-                                    .foregroundStyle(OrcaTheme.text)
-                                Spacer()
-                                Text(engine.meshHealthText.isEmpty ? "Check" : engine.meshHealthText)
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(OrcaTheme.muted)
-                                    .lineLimit(1)
-                            }
-                        }
-                        .listRowBackground(OrcaTheme.panel)
-                        Button {
-                            if engine.repairMesh() {
-                                status = engine.lastMessage
-                            } else {
-                                status = engine.lastMessage
-                            }
-                        } label: {
-                            Text("Repair mesh (CGAL)")
-                                .foregroundStyle(OrcaTheme.accent)
-                        }
-                        .listRowBackground(OrcaTheme.panel)
-
-                        HStack {
-                            Text("Cut Z mm")
-                                .foregroundStyle(OrcaTheme.muted)
-                            TextField("mid", text: $cutZText)
-                                .keyboardType(.decimalPad)
-                                .multilineTextAlignment(.trailing)
-                                .foregroundStyle(OrcaTheme.text)
-                            Button("Cut") {
-                                let zCut: Float
-                                if let v = Float(cutZText), v.isFinite {
-                                    zCut = v
-                                } else {
-                                    zCut = (engine.modelMinZ + engine.modelMaxZ) * 0.5
-                                }
-                                if engine.cutObjectZ(zCut) {
-                                    status = engine.lastMessage
-                                } else {
-                                    status = engine.lastMessage
-                                }
-                            }
-                            .fontWeight(.bold)
-                            .foregroundStyle(OrcaTheme.accent)
-                        }
-                        .listRowBackground(OrcaTheme.panel)
-
-                        HStack {
-                            Text("Tilt ° (X)")
-                                .foregroundStyle(OrcaTheme.muted)
-                            TextField("0", text: $cutPlaneTilt)
-                                .keyboardType(.decimalPad)
-                                .multilineTextAlignment(.trailing)
-                                .foregroundStyle(OrcaTheme.text)
-                                .frame(width: 48)
-                            Button("Plane cut") {
-                                let zCut: Float
-                                if let v = Float(cutZText), v.isFinite {
-                                    zCut = v
-                                } else {
-                                    zCut = (engine.modelMinZ + engine.modelMaxZ) * 0.5
-                                }
-                                let tiltDeg = Float(cutPlaneTilt) ?? 0
-                                let tilt = tiltDeg * .pi / 180
-                                // Normal tilted about X: (0, -sin, cos) so 0° = +Z horizontal cut
-                                let n = SIMD3<Float>(0, -sin(tilt), cos(tilt))
-                                let midX = (engine.bedSize.x) * 0.5
-                                let midY = (engine.bedSize.y) * 0.5
-                                if engine.cutObjectPlane(
-                                    point: SIMD3(midX, midY, zCut),
-                                    normal: n
-                                ) {
-                                    status = engine.lastMessage
-                                } else {
-                                    status = engine.lastMessage
-                                }
-                            }
-                            .fontWeight(.bold)
-                            .foregroundStyle(OrcaTheme.accent)
-                        }
-                        .listRowBackground(OrcaTheme.panel)
-
-                        HStack {
-                            Text("Simplify faces")
-                                .foregroundStyle(OrcaTheme.muted)
-                            TextField("50%", text: $simplifyTargetFaces)
-                                .keyboardType(.numberPad)
-                                .multilineTextAlignment(.trailing)
-                                .foregroundStyle(OrcaTheme.text)
-                            Button("Simplify") {
-                                let t = Int(simplifyTargetFaces) ?? 0
-                                if engine.simplifyMesh(targetFaces: t) {
-                                    status = engine.lastMessage
-                                } else {
-                                    status = engine.lastMessage
-                                }
-                            }
-                            .fontWeight(.bold)
-                            .foregroundStyle(OrcaTheme.accent)
-                        }
-                        .listRowBackground(OrcaTheme.panel)
-
-                        // Emboss lite — flat box "text plate" named by user
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Text plate (emboss lite)")
-                                .foregroundStyle(OrcaTheme.muted)
-                            TextField("Name / label", text: $textPlateName)
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
-                                .foregroundStyle(OrcaTheme.text)
-                            HStack {
-                                TextField("X", text: $textPlateX)
-                                    .keyboardType(.decimalPad)
-                                    .multilineTextAlignment(.trailing)
-                                    .foregroundStyle(OrcaTheme.text)
-                                    .frame(width: 48)
-                                Text("×").foregroundStyle(OrcaTheme.muted)
-                                TextField("Y", text: $textPlateY)
-                                    .keyboardType(.decimalPad)
-                                    .multilineTextAlignment(.trailing)
-                                    .foregroundStyle(OrcaTheme.text)
-                                    .frame(width: 48)
-                                Text("×").foregroundStyle(OrcaTheme.muted)
-                                TextField("Z", text: $textPlateZ)
-                                    .keyboardType(.decimalPad)
-                                    .multilineTextAlignment(.trailing)
-                                    .foregroundStyle(OrcaTheme.text)
-                                    .frame(width: 48)
-                                Text("mm").foregroundStyle(OrcaTheme.muted)
-                                Spacer()
-                                Button("Add") {
-                                    let sx = Float(textPlateX) ?? 40
-                                    let sy = Float(textPlateY) ?? 10
-                                    let sz = Float(textPlateZ) ?? 2
-                                    _ = engine.addTextPlate(
-                                        name: textPlateName, sizeX: sx, sizeY: sy, sizeZ: sz
-                                    )
-                                    status = engine.lastMessage
-                                }
-                                .fontWeight(.bold)
-                                .foregroundStyle(OrcaTheme.accent)
-                            }
-                            HStack {
-                                Text("Explode spacing")
-                                    .foregroundStyle(OrcaTheme.muted)
-                                TextField("20", text: $explodeSpacing)
-                                    .keyboardType(.decimalPad)
-                                    .multilineTextAlignment(.trailing)
-                                    .foregroundStyle(OrcaTheme.text)
-                                    .frame(width: 48)
-                                Text("mm").foregroundStyle(OrcaTheme.muted)
-                                Spacer()
-                                Button(engine.explodeFactor > 0.001 ? "Collapse" : "Explode") {
-                                    let sp = Float(explodeSpacing) ?? 20
-                                    if engine.explodeFactor > 0.001 {
-                                        engine.explode(factor: 0, spacingMm: sp)
-                                    } else {
-                                        engine.explode(factor: 1.2, spacingMm: sp)
-                                    }
-                                    status = engine.lastMessage
-                                }
-                                .fontWeight(.bold)
-                                .foregroundStyle(OrcaTheme.accent)
-                            }
-                        }
-                        .listRowBackground(OrcaTheme.panel)
-
-                        if engine.objectCount >= 2 {
-                            VStack(alignment: .leading, spacing: 8) {
-                                HStack {
-                                    Text("Boolean other #")
-                                        .foregroundStyle(OrcaTheme.muted)
-                                    TextField("auto", text: $booleanOtherText)
-                                        .keyboardType(.numberPad)
-                                        .multilineTextAlignment(.trailing)
-                                        .foregroundStyle(OrcaTheme.text)
-                                        .frame(width: 48)
-                                        .onChange(of: booleanOtherText) { v in
-                                            if let n = Int(v), n >= 1 {
-                                                engine.booleanOtherObjectIndex = n - 1
-                                            } else {
-                                                engine.booleanOtherObjectIndex = -1
-                                            }
-                                        }
-                                }
-                                HStack(spacing: 12) {
-                                    Button("Union") {
-                                        _ = engine.meshBoolean(op: 0)
-                                        status = engine.lastMessage
-                                    }
-                                    .foregroundStyle(OrcaTheme.accent)
-                                    Button("A − B") {
-                                        _ = engine.meshBoolean(op: 1)
-                                        status = engine.lastMessage
-                                    }
-                                    .foregroundStyle(OrcaTheme.accent)
-                                    Button("Intersect") {
-                                        _ = engine.meshBoolean(op: 2)
-                                        status = engine.lastMessage
-                                    }
-                                    .foregroundStyle(OrcaTheme.accent)
-                                }
-                                .fontWeight(.semibold)
-                            }
-                            .listRowBackground(OrcaTheme.panel)
-                        }
-                    } header: {
-                        Text("Mesh / object ops")
-                    } footer: {
-                        Text("Clone · explode/collapse · text plate (box) · horizontal/tilted plane cut · CGAL repair · quadric simplify · mcut boolean (needs ≥2 objects). Brim ears gizmo paints ModelObject::brim_points.")
-                            .font(.system(size: 11))
-                    }
-                }
-
-                if !engine.presetsLoaded {
-                    Section("Bundled process (fallback)") {
-                        ForEach(OrcaEngine.bundledProcessProfiles, id: \.id) { profile in
-                            Button {
-                                if engine.loadProcessProfile(profile.id) {
-                                    syncProcessFieldsFromEngine()
-                                    status = engine.lastMessage
-                                } else {
-                                    status = engine.lastMessage
-                                }
-                            } label: {
-                                HStack {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(profile.title)
-                                            .foregroundStyle(OrcaTheme.text)
-                                        Text(profile.id + ".json")
-                                            .font(.system(size: 11, design: .monospaced))
-                                            .foregroundStyle(OrcaTheme.muted)
-                                    }
-                                    Spacer()
-                                    if engine.activeProcessProfile == profile.id {
-                                        Image(systemName: "checkmark.circle.fill")
-                                            .foregroundStyle(OrcaTheme.accent)
-                                    }
-                                }
-                            }
-                            .listRowBackground(OrcaTheme.panel)
-                        }
-                    }
-                }
-
-                Section("Objects on plate") {
-                    if engine.hasModel {
-                        labeled("File", engine.modelName ?? "—")
-                        labeled("Count", "\(engine.objectCount)")
-                        if !engine.boundsText.isEmpty {
-                            labeled("Bounds", engine.boundsText)
-                        }
-                        if engine.modelVolumeMm3 > 0 {
-                            labeled("Volume", String(format: "%.1f mm³", engine.modelVolumeMm3))
-                        }
-                        if let mesh = engine.mesh {
-                            labeled("Mesh", "\(mesh.vertexCount) verts · \(mesh.indices.count / 3) tris")
-                        }
-                        // Selectable object list
-                        ForEach(Array(engine.objectNames.enumerated()), id: \.offset) { idx, name in
-                            Button {
-                                engine.selectedObjectIndex = idx
-                                status = "Selected \(name)"
-                            } label: {
-                                HStack {
-                                    Image(systemName: engine.selectedObjectIndex == idx
-                                          ? "checkmark.circle.fill" : "circle")
-                                        .foregroundStyle(OrcaTheme.accent)
-                                    Text(name)
-                                        .foregroundStyle(OrcaTheme.text)
-                                    Spacer()
-                                }
-                            }
-                            .listRowBackground(OrcaTheme.panel)
-                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                                Button(role: .destructive) {
-                                    engine.deleteObject(at: idx)
-                                    status = engine.lastMessage
-                                } label: {
-                                    Label("Delete", systemImage: "trash")
-                                }
-                                Button {
-                                    engine.duplicateObject(at: idx)
-                                    status = engine.lastMessage
-                                } label: {
-                                    Label("Duplicate", systemImage: "plus.square.on.square")
-                                }
-                                .tint(OrcaTheme.accent)
-                            }
-                        }
-                        HStack(spacing: 8) {
-                            Button("Duplicate selected") {
-                                engine.duplicateSelected()
-                                status = engine.lastMessage
-                            }
-                            .disabled(engine.selectedObjectIndex < 0)
-                            Spacer()
-                            Button("Delete selected", role: .destructive) {
-                                engine.deleteSelected()
-                                status = engine.lastMessage
-                            }
-                            .disabled(engine.selectedObjectIndex < 0)
-                        }
-                        .font(.system(size: 13, weight: .semibold))
-                        .listRowBackground(OrcaTheme.panel)
-                    } else {
-                        Text("No model loaded")
-                            .foregroundStyle(OrcaTheme.muted)
-                            .listRowBackground(OrcaTheme.panel)
-                    }
-                }
-                Section("Printer / plate") {
-                    labeled(
-                        "Bed",
-                        String(
-                            format: "%.0f × %.0f × %.0f mm",
-                            engine.bedSize.x, engine.bedSize.y, engine.bedHeight
-                        )
-                    )
-                    labeled("Nozzle", engine.getOption("nozzle_diameter").map { "\($0) mm" } ?? "0.4 mm")
-                    labeled("Filament Ø", engine.getOption("filament_diameter").map { "\($0) mm" } ?? "1.75 mm")
-                    labeled("Active process", engine.activeProcessProfile)
-                    HStack(spacing: 8) {
-                        bedPreset("220²", 220, 220)
-                        bedPreset("256²", 256, 256)
-                        bedPreset("300²", 300, 300)
-                        bedPreset("350²", 350, 350)
-                    }
-                    .listRowBackground(OrcaTheme.panel)
-                }
-                Section {
-                    Button {
-                        showAllSettings = true
-                    } label: {
-                        HStack {
-                            Image(systemName: "slider.horizontal.3")
-                                .foregroundStyle(OrcaTheme.accent)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("All settings")
-                                    .foregroundStyle(OrcaTheme.text)
-                                Text("Searchable full process / machine / filament keys")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(OrcaTheme.muted)
-                            }
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                                .foregroundStyle(OrcaTheme.muted)
-                        }
-                    }
-                    .listRowBackground(OrcaTheme.panel)
-                } header: {
-                    Text("Full browser")
-                }
-                Section {
-                    processField(title: "layer_height", unit: "mm", text: $layerHeight) {
-                        engine.setOptionScalar("layer_height", value: layerHeight)
-                        status = engine.lastMessage
-                    }
-                    processField(title: "wall_loops", unit: "", text: $walls) {
-                        engine.setOptionScalar("wall_loops", value: walls)
-                        status = engine.lastMessage
-                    }
-                    processField(title: "sparse_infill_density", unit: "%", text: $infill) {
-                        engine.setOptionPercent("sparse_infill_density", value: infill)
-                        status = engine.lastMessage
-                    }
-                    enumPicker(
-                        title: "sparse_infill_pattern",
-                        selection: $infillPattern,
-                        choices: ProcessOptionCatalog.infillPattern
-                    ) { key in
-                        engine.setOptionScalar("sparse_infill_pattern", value: key)
-                        status = engine.lastMessage
-                    }
-                    processField(title: "top_shell_layers", unit: "", text: $topShells) {
-                        engine.setOptionScalar("top_shell_layers", value: topShells)
-                        status = engine.lastMessage
-                    }
-                    processField(title: "bottom_shell_layers", unit: "", text: $bottomShells) {
-                        engine.setOptionScalar("bottom_shell_layers", value: bottomShells)
-                        status = engine.lastMessage
-                    }
-                } header: {
-                    Text("Quality")
-                }
-                Section {
-                    Toggle(isOn: $supportOn) {
-                        Text("enable_support")
-                            .font(.system(size: 13, weight: .medium, design: .monospaced))
-                    }
-                    .tint(OrcaTheme.accent)
-                    .listRowBackground(OrcaTheme.panel)
-                    .onChange(of: supportOn) { on in
-                        engine.setOptionBool("enable_support", value: on)
-                        status = engine.lastMessage
-                    }
-                    if supportOn {
-                        enumPicker(
-                            title: "support_type",
-                            selection: $supportType,
-                            choices: ProcessOptionCatalog.supportType
-                        ) { key in
-                            engine.setOptionScalar("support_type", value: key)
-                            status = engine.lastMessage
-                        }
-                    }
-                    enumPicker(
-                        title: "brim_type",
-                        selection: $brimType,
-                        choices: ProcessOptionCatalog.brimType
-                    ) { key in
-                        engine.setOptionScalar("brim_type", value: key)
-                        status = engine.lastMessage
-                    }
-                    if brimType != "no_brim" && brimType != "auto_brim" && brimType != "painted" {
-                        processField(title: "brim_width", unit: "mm", text: $brimWidth) {
-                            engine.setOptionScalar("brim_width", value: brimWidth)
-                            status = engine.lastMessage
-                        }
-                    }
-                } header: {
-                    Text("Support / brim")
-                }
-                Section {
-                    processField(title: "outer_wall_speed", unit: "mm/s", text: $outerWallSpeed) {
-                        engine.setOptionScalar("outer_wall_speed", value: outerWallSpeed)
-                        status = engine.lastMessage
-                    }
-                    processField(title: "sparse_infill_speed", unit: "mm/s", text: $sparseSpeed) {
-                        engine.setOptionScalar("sparse_infill_speed", value: sparseSpeed)
-                        status = engine.lastMessage
-                    }
-                } header: {
-                    Text("Speeds")
-                }
-                Section {
-                    processField(title: "nozzle_temperature", unit: "°C", text: $nozzleTemp) {
-                        // Multi-extruder options accept a single value or comma list
-                        engine.setOptionScalar("nozzle_temperature", value: nozzleTemp)
-                        engine.setOptionScalar("nozzle_temperature_initial_layer", value: nozzleTemp)
-                        status = engine.lastMessage
-                    }
-                    processField(title: "bed_temperature", unit: "°C", text: $bedTemp) {
-                        // Orca may use bed_temperature or hot_plate_temp depending on machine
-                        engine.setOptionScalar("bed_temperature", value: bedTemp)
-                        engine.setOptionScalar("bed_temperature_initial_layer", value: bedTemp)
-                        engine.setOptionScalar("hot_plate_temp", value: bedTemp)
-                        engine.setOptionScalar("hot_plate_temp_initial_layer", value: bedTemp)
-                        status = engine.lastMessage
-                    }
-                    processField(title: "filament_diameter", unit: "mm", text: $filamentDiameter) {
-                        engine.setOptionScalar("filament_diameter", value: filamentDiameter)
-                        status = engine.lastMessage
-                    }
-                } header: {
-                    Text("Filament / temps")
-                }
-                Section {
-                    enumPicker(
-                        title: "wall_generator",
-                        selection: $wallGenerator,
-                        choices: ProcessOptionCatalog.wallGenerator
-                    ) { key in
-                        engine.setOptionScalar("wall_generator", value: key)
-                        status = engine.lastMessage
-                    }
-                    enumPicker(
-                        title: "seam_position",
-                        selection: $seamPosition,
-                        choices: ProcessOptionCatalog.seamPosition
-                    ) { key in
-                        engine.setOptionScalar("seam_position", value: key)
-                        status = engine.lastMessage
-                    }
-                    enumPicker(
-                        title: "ironing_type",
-                        selection: $ironingType,
-                        choices: ProcessOptionCatalog.ironingType
-                    ) { key in
-                        // Official key is ironing_type (not a bool "ironing")
-                        engine.setOptionScalar("ironing_type", value: key)
-                        status = engine.lastMessage
-                    }
-                } header: {
-                    Text("Walls / seam / ironing")
-                }
-                Section("Engine") {
-                    Text(engine.version)
-                        .font(.system(size: 12, design: .monospaced))
-                        .foregroundStyle(OrcaTheme.muted)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text(engine.lastMessage)
-                        .font(.system(size: 11))
-                        .foregroundStyle(OrcaTheme.muted)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .listRowBackground(OrcaTheme.panel)
-                }
-            }
-            .scrollContentBackground(.hidden)
-            .background(OrcaTheme.bg)
-            .navigationTitle("Process")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { showProcess = false }
-                        .fontWeight(.semibold)
-                        .foregroundStyle(OrcaTheme.accent)
-                }
-            }
-            .onAppear {
-                engine.refreshBedSize()
-                syncProcessFieldsFromEngine()
-            }
-            .sheet(isPresented: $showPrinterPicker) {
-                presetPickerSheet(
-                    title: "Printer",
-                    search: $printerSearch,
-                    items: engine.filteredPrinters(
-                        vendor: vendorFilter.isEmpty ? nil : vendorFilter,
-                        search: printerSearch
-                    ),
-                    selected: engine.selectedPrinter,
-                    vendorChips: engine.vendorList,
-                    vendorFilter: $vendorFilter
-                ) { name in
-                    if engine.selectPrinter(name) {
-                        syncProcessFieldsFromEngine()
-                        status = engine.lastMessage
-                    }
-                    showPrinterPicker = false
-                }
-            }
-            .sheet(isPresented: $showProcessPicker) {
-                presetPickerSheet(
-                    title: "Process",
-                    search: $processSearch,
-                    items: engine.filteredProcesses(search: processSearch),
-                    selected: engine.selectedProcess.isEmpty ? engine.activeProcessProfile : engine.selectedProcess,
-                    vendorChips: [],
-                    vendorFilter: .constant("")
-                ) { name in
-                    if engine.presetsLoaded {
-                        _ = engine.selectProcess(name)
-                    } else {
-                        _ = engine.loadProcessProfile(name)
-                    }
-                    syncProcessFieldsFromEngine()
-                    status = engine.lastMessage
-                    showProcessPicker = false
-                }
-            }
-            .sheet(isPresented: $showFilamentPicker) {
-                presetPickerSheet(
-                    title: filamentSlotForPicker == 0
-                        ? "Filament"
-                        : "Filament · extruder \(filamentSlotForPicker + 1)",
-                    search: $filamentSearch,
-                    items: engine.filteredFilaments(search: filamentSearch),
-                    selected: filamentSlotForPicker == 0
-                        ? engine.selectedFilament
-                        : engine.filamentSlotName(filamentSlotForPicker),
-                    vendorChips: [],
-                    vendorFilter: .constant("")
-                ) { name in
-                    if filamentSlotForPicker == 0 {
-                        _ = engine.selectFilament(name)
-                    } else {
-                        _ = engine.setFilamentSlot(filamentSlotForPicker, name: name)
-                    }
-                    syncProcessFieldsFromEngine()
-                    status = engine.lastMessage
-                    showFilamentPicker = false
-                }
-            }
-            .sheet(isPresented: $showAllSettings) {
-                ProcessSettingsBrowser(engine: engine) {
-                    syncProcessFieldsFromEngine()
-                    status = engine.lastMessage
-                }
-                .presentationDetents([.large])
-                .presentationDragIndicator(.visible)
-                .preferredColorScheme(.dark)
-            }
-        }
+    private var processSheet: AnyView {
+        AnyView(ProcessSettingsBrowser(engine: engine, onChanged: {
+            syncProcessFieldsFromEngine()
+            status = engine.lastMessage
+        }))
     }
 
-    /// Searchable list of system presets (printer / process / filament).
-    private func presetPickerSheet(
-        title: String,
-        search: Binding<String>,
-        items: [String],
-        selected: String,
-        vendorChips: [String],
-        vendorFilter: Binding<String>,
-        onPick: @escaping (String) -> Void
-    ) -> some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                if !vendorChips.isEmpty {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
-                            vendorChip("All", selected: vendorFilter.wrappedValue.isEmpty) {
-                                vendorFilter.wrappedValue = ""
-                            }
-                            ForEach(vendorChips, id: \.self) { v in
-                                vendorChip(v, selected: vendorFilter.wrappedValue == v) {
-                                    vendorFilter.wrappedValue = v
-                                }
-                            }
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                    }
-                    .background(OrcaTheme.panel)
-                }
-                List {
-                    if items.isEmpty {
-                        Text(engine.presetsLoaded ? "No matches" : "Profiles not loaded")
-                            .foregroundStyle(OrcaTheme.muted)
-                            .listRowBackground(OrcaTheme.panel)
-                    } else {
-                        ForEach(items.prefix(800), id: \.self) { name in
-                            Button {
-                                onPick(name)
-                            } label: {
-                                HStack {
-                                    Text(name)
-                                        .foregroundStyle(OrcaTheme.text)
-                                        .multilineTextAlignment(.leading)
-                                    Spacer()
-                                    if name == selected {
-                                        Image(systemName: "checkmark.circle.fill")
-                                            .foregroundStyle(OrcaTheme.accent)
-                                    }
-                                }
-                            }
-                            .listRowBackground(OrcaTheme.panel)
-                        }
-                        if items.count > 800 {
-                            Text("Showing 800 of \(items.count) — refine search")
-                                .font(.caption)
-                                .foregroundStyle(OrcaTheme.muted)
-                                .listRowBackground(OrcaTheme.panel)
-                        }
-                    }
-                }
-                .scrollContentBackground(.hidden)
-            }
-            .background(OrcaTheme.bg)
-            .searchable(text: search, prompt: "Search \(title.lowercased())")
-            .navigationTitle(title)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") {
-                        showPrinterPicker = false
-                        showProcessPicker = false
-                        showFilamentPicker = false
-                    }
-                    .foregroundStyle(OrcaTheme.accent)
-                }
-            }
-            .preferredColorScheme(.dark)
-        }
-        .presentationDetents([.medium, .large])
-    }
-
-    private func slotFilamentLabel(_ slot: Int) -> String {
-        let n = engine.filamentSlotName(slot)
-        return n.isEmpty ? "—" : n
-    }
-
-    private func vendorChip(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 12, weight: .semibold))
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(selected ? OrcaTheme.accent.opacity(0.25) : OrcaTheme.elevated)
-                .foregroundStyle(selected ? OrcaTheme.accent : OrcaTheme.muted)
-                .clipShape(Capsule())
-        }
-        .buttonStyle(.plain)
-    }
-
-    /// Pull key process options into sheet fields after profile load / open.
     private func syncProcessFieldsFromEngine() {
         if let v = engine.getOptionFirst("layer_height") { layerHeight = v }
         if let v = engine.getOptionFirst("wall_loops") { walls = v }
@@ -4037,41 +3740,8 @@ struct OrcaRootView: View {
         .buttonStyle(.plain)
     }
 
-    private func processField(title: String, unit: String, text: Binding<String>, apply: @escaping () -> Void) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.system(size: 13, weight: .medium, design: .monospaced))
-                .foregroundStyle(OrcaTheme.muted)
-            HStack(spacing: 10) {
-                TextField(title, text: text)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .keyboardType(.decimalPad)
-                    .font(.system(size: 16, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(OrcaTheme.text)
-                    .padding(10)
-                    .background(OrcaTheme.field)
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                if !unit.isEmpty {
-                    Text(unit).font(.system(size: 13)).foregroundStyle(OrcaTheme.muted).frame(width: 28)
-                }
-                Button("Apply", action: apply)
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundStyle(OrcaTheme.accent)
-            }
-        }
-        .listRowBackground(OrcaTheme.panel)
-    }
-
-    private var modelTypes: [UTType] {
-        var types: [UTType] = [.data]
-        if let stl = UTType(filenameExtension: "stl") { types.append(stl) }
-        if let m3 = UTType(filenameExtension: "3mf") { types.append(m3) }
-        if let obj = UTType(filenameExtension: "obj") { types.append(obj) }
-        return types
-    }
-
     private func sliceNow() {
+        guard !isSlicing else { return }
         status = ""
         isSlicing = true
         Task {
@@ -4081,23 +3751,19 @@ struct OrcaRootView: View {
                 isSlicing = false
                 if engine.gcodeURL != nil {
                     mainTab = .preview
+                } else if engine.slicePhase != "Cancelled" {
+                    operationError = msg
                 }
             }
         }
     }
 
-    private func exportUserPresetsZip() {
+    private func exportUserPresetsZip(from source: UIView? = nil) {
         // Prefer store-only ZIP of Documents/OrcaSlicer/user_presets (portable bundle)
         if let zipURL = engine.exportPresetBundleZip() {
             presetBundleShareURL = zipURL
             status = engine.lastMessage
-            #if canImport(UIKit)
-            if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-               let root = scene.windows.first?.rootViewController {
-                let av = UIActivityViewController(activityItems: [zipURL], applicationActivities: nil)
-                root.present(av, animated: true)
-            }
-            #endif
+            NativeProjectMenu.share(zipURL, from: source)
             return
         }
         // Fallback: NSFileCoordinator package zip of the directory
@@ -4113,34 +3779,366 @@ struct OrcaRootView: View {
         if FileManager.default.fileExists(atPath: zipURL.path) {
             presetBundleShareURL = zipURL
             status = "Preset bundle ready: \(zipURL.lastPathComponent)"
-            #if canImport(UIKit)
-            if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-               let root = scene.windows.first?.rootViewController {
-                let av = UIActivityViewController(activityItems: [zipURL], applicationActivities: nil)
-                root.present(av, animated: true)
-            }
-            #endif
+            NativeProjectMenu.share(zipURL, from: source)
         } else {
             status = err?.localizedDescription ?? engine.lastMessage
         }
     }
 
-    private func handleImport(_ result: Result<[URL], Error>) {
-        switch result {
-        case .success(let urls):
-            guard let url = urls.first else { return }
-            if importAppend {
-                status = engine.addModel(url: url)
+    private func testDocumentPickerWhenReady() {
+        guard ProcessInfo.processInfo.arguments.contains("--test-document-import"), !didTestImport,
+              engine.startupFinished, !engine.presetsLoading else { return }
+        didTestImport = true
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            if ProcessInfo.processInfo.arguments.contains("--test-native-picker") {
+                requestDocumentPicker(.model(append: false))
             } else {
-                status = engine.loadModel(url: url)
+                documents.receive(testDocumentFixture, kind: .model(append: false))
             }
-            engine.rememberRecent(url: url)
-            // 3MF / profile-bearing loads refresh process sheet fields (config applied in engine)
-            syncProcessFieldsFromEngine()
-            mainTab = .prepare
-        case .failure(let err):
-            status = err.localizedDescription
         }
+    }
+
+    private var testDocumentFixture: URL {
+        let name = ProcessInfo.processInfo.arguments.contains("--test-gcode-import") ? "ios-gcode-smoke.gcode" : "ios-import-smoke.3mf"
+        return StartupRecovery().dataDirectory.deletingLastPathComponent().appendingPathComponent(name)
+    }
+
+    private func requestDocumentPicker(_ kind: DocumentImportKind) {
+        showPreviewControls = false
+        let request = DocumentImportRequest(kind: kind)
+        if showProcess {
+            pendingDocumentPicker = request
+            showProcess = false
+        } else { documentPicker = request }
+    }
+
+    private func presentPendingDocumentPicker() {
+        documentPicker = pendingDocumentPicker
+        pendingDocumentPicker = nil
+    }
+
+    private var editingModalPresented: Bool {
+        showModelLibrary || showPlateInspector || showMeshTools || showProcess || showWizard || showCalibration || showObjectSettings || showLayerHeights || showPreferences || showAbout || showShortcuts
+    }
+
+    private func importCloudPresetsIfReady() {
+        guard let owner = cloudAccount.ownerID, cloudPresetRevision != cloudAccount.profileRevision,
+              !cloudAccount.busy, !processingDocument, !isSlicing, !engine.presetsLoading,
+              !engine.sessionBusy, engine.startupFinished, !editingModalPresented else { return }
+        let revision = cloudAccount.profileRevision
+        let profiles = cloudAccount.profiles
+        guard cloudAccount.lastSynced != nil else { return }
+        cloudPresetRevision = revision
+        Task { @MainActor in
+            let success = await engine.importCloudProfiles(profiles, owner: owner, adoptedIDs: cloudAccount.uploadedProfileIDs)
+            cloudAccount.profileImportMessage = engine.lastMessage
+            if !success { status = engine.lastMessage }
+        }
+    }
+
+    private func importPendingDocuments() {
+        guard !processingDocument, !isSlicing, !engine.presetsLoading, !engine.sessionBusy, engine.startupFinished, !editingModalPresented,
+              let document = documents.takeNext() else { return }
+        processingDocument = true
+        Task { @MainActor in
+            var success = false
+            switch document.kind {
+            case .automatic: break // Resolved before staging.
+            case .toolpath:
+                success = await engine.loadGCode(url: document.url)
+                status = engine.lastMessage
+                if success { fitCameraRequest = UUID(); engine.rememberRecent(url: document.url) }
+            case .model(let append):
+                success = await engine.loadDocumentModel(url: document.url, append: append)
+                if success { fitCameraRequest = UUID() }
+                status = engine.lastMessage
+                if success { engine.rememberRecent(url: document.url) }
+            case .settings(let preset):
+                success = await engine.importConfigJSON(url: document.url, asUserPreset: preset)
+                status = engine.lastMessage
+            }
+            if !success { documents.errorMessage = status }
+            syncProcessFieldsFromEngine()
+            if success, case .toolpath = document.kind { mainTab = .preview }
+            else { mainTab = .prepare }
+            if ProcessInfo.processInfo.arguments.contains("--test-document-import"), success,
+               engine.hasModel, engine.objectCount == 1 {
+                if ProcessInfo.processInfo.arguments.contains("--test-instance-history") {
+                    try? await engine.instanceHistorySmokeTest().write(
+                        to: FileManager.default.temporaryDirectory.appendingPathComponent("orca-instance-history-smoke.txt"),
+                        atomically: true, encoding: .utf8)
+                }
+                if ProcessInfo.processInfo.arguments.contains("--test-session-gate") {
+                    try? await engine.sessionGateSmokeTest().write(
+                        to: FileManager.default.temporaryDirectory.appendingPathComponent("orca-session-gate-smoke.txt"),
+                        atomically: true, encoding: .utf8)
+                }
+                try? "PASS: app document inbox imported a 3MF model".write(
+                    to: FileManager.default.temporaryDirectory.appendingPathComponent("orca-document-import-smoke.txt"),
+                    atomically: true, encoding: .utf8)
+            }
+            if ProcessInfo.processInfo.arguments.contains("--test-show-settings") {
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 600_000_000)
+                    showProcess = true
+                }
+            }
+            processingDocument = false
+            importPendingDocuments()
+            importCloudPresetsIfReady()
+        }
+    }
+
+}
+
+private struct LayerHeightPanel: View {
+    @ObservedObject var engine: OrcaEngine
+    let objectIndex: Int
+    var onChanged: () -> Void
+    @State private var profile: OrcaEngine.LayerHeightProfile?
+    @State private var quality = 0.5
+    @State private var radius = 5
+    @State private var keepMinimum = false
+    @State private var failure: String?
+
+    var body: some View {
+        Form {
+            if engine.objectNames.indices.contains(objectIndex) {
+                Section("Object") { Text(engine.objectNames[objectIndex]) }
+            }
+            if let profile {
+                Section("Layer height along object") {
+                    profileChart(profile)
+                    if profile.custom {
+                        Text("Custom layer heights").font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Text("Using process and object layer heights").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Text("Printer limits: \(profile.minimum.formatted(.number.precision(.fractionLength(2...3))))–\(profile.maximum.formatted(.number.precision(.fractionLength(2...3)))) mm")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Section("Adaptive") {
+                Slider(value: $quality, in: 0...1).accessibilityLabel("Quality and speed balance")
+                HStack { Text("Finer detail"); Spacer(); Text("Faster print") }.font(.caption)
+                Button("Apply adaptive layer heights") { run(.adaptive(Float(quality))) }
+                Text("Uses the model's surfaces and your printer's layer-height limits.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }.disabled(profile == nil)
+            Section("Smooth") {
+                Stepper("Radius: \(radius)", value: $radius, in: 1...10)
+                Toggle("Keep thin layers", isOn: $keepMinimum)
+                Button("Smooth layer heights") { run(.smooth(radius: radius, keepMinimum: keepMinimum)) }
+            }.disabled(profile == nil)
+            Section {
+                Button("Reset layer heights", role: .destructive) { run(.reset) }
+                Text("Changes affect only this object. Slice again to see the resulting layers. Save 3MF to keep the profile; Undo restores the previous one.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if let failure {
+                Section { Text(failure).foregroundStyle(.red); Button("Reload layer heights") { Task { await reload() } } }
+            }
+        }
+        .disabled(engine.sessionBusy)
+        .tint(OrcaTheme.accent)
+        .navigationTitle("Variable layer height").navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(engine.sessionBusy)
+        .overlay {
+            if engine.sessionBusy { ProgressView(engine.sessionBusyMessage).padding(24).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16)) }
+        }
+        .task(id: [objectIndex, engine.meshRevision]) { await reload() }
+    }
+
+    private func profileChart(_ profile: OrcaEngine.LayerHeightProfile) -> some View {
+        let bounds = profile.points.reduce((profile.minimum, profile.maximum)) { (min($0.0, $1.y), max($0.1, $1.y)) }
+        let width = max(bounds.1 - bounds.0, 0.001)
+        return VStack(spacing: 6) {
+            Text("Top · \(profile.objectHeight.formatted(.number.precision(.fractionLength(1...2)))) mm")
+                .font(.caption).frame(maxWidth: .infinity, alignment: .leading)
+            GeometryReader { geometry in
+                Path { path in
+                    for (index, point) in profile.points.enumerated() {
+                        let position = CGPoint(x: CGFloat((point.y - bounds.0) / width) * geometry.size.width,
+                            y: (1 - CGFloat(point.x / max(profile.objectHeight, 0.001))) * geometry.size.height)
+                        if index == 0 { path.move(to: position) } else { path.addLine(to: position) }
+                    }
+                }.stroke(OrcaTheme.accent, lineWidth: 2)
+            }
+            .frame(height: 200).padding(6).background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+            HStack {
+                Text("\(bounds.0.formatted(.number.precision(.fractionLength(2...3)))) mm")
+                Spacer()
+                Text("\(bounds.1.formatted(.number.precision(.fractionLength(2...3)))) mm")
+            }.font(.caption)
+            Text("Bottom · 0 mm").font(.caption).frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text("Layer height profile. Object height: \(profile.objectHeight) mm."))
+    }
+
+    @MainActor
+    private func reload() async {
+        let value = await engine.layerHeightProfile(object: objectIndex)
+        profile = value
+        failure = value == nil ? engine.lastMessage : nil
+    }
+
+    private func run(_ action: OrcaEngine.LayerHeightEdit) {
+        Task { @MainActor in
+            if await engine.editMesh(.layerHeights(action)) { onChanged(); await reload() }
+            else { failure = engine.lastMessage }
+        }
+    }
+}
+
+private struct MeshToolsPanel: View {
+    @ObservedObject var engine: OrcaEngine
+    var onComplete: () -> Void
+    @State private var targetFaces = "0"
+    @State private var cutAxis = 2
+    @State private var cutPosition = "0"
+    @State private var keepUpper = true
+    @State private var keepLower = true
+    @State private var otherObject = -1
+    @State private var booleanOperation = 0
+    @State private var removeOther = true
+    @State private var failure: String?
+    @State private var partNames: [String] = []
+    @State private var selectedPart = 0
+    @State private var dropSplitObjects = true
+    @State private var copyCount = "1"
+
+    private var hasSelection: Bool { engine.objectNames.indices.contains(engine.selectedObjectIndex) }
+    private var currentCopies: Int {
+        engine.objectInstanceCounts.indices.contains(engine.selectedObjectIndex) ? engine.objectInstanceCounts[engine.selectedObjectIndex] : 0
+    }
+    private var secondObject: Int {
+        if engine.objectNames.indices.contains(otherObject), otherObject != engine.selectedObjectIndex { return otherObject }
+        return engine.objectNames.indices.first(where: { $0 != engine.selectedObjectIndex }) ?? -1
+    }
+
+    var body: some View {
+        Form {
+            Section("Selection") {
+                Picker("Object", selection: $engine.selectedObjectIndex) {
+                    Text("All objects").tag(-1)
+                    ForEach(Array(engine.objectNames.enumerated()), id: \.offset) { i, name in Text(name).tag(i) }
+                }
+                if !hasSelection { Text("Select one object for split, simplify, cut and boolean operations.").font(.caption) }
+            }
+            Section("Copies") {
+                LabeledContent("Current copies", value: currentCopies.formatted())
+                HStack {
+                    Button("Add instance") { run(.copies(currentCopies + 1)) }
+                        .disabled(currentCopies >= 1000).accessibilityIdentifier("add-instance")
+                    Spacer()
+                    Button("Fewer instances") { run(.copies(currentCopies - 1)) }
+                        .disabled(currentCopies < 1).accessibilityIdentifier("fewer-instances")
+                }.buttonStyle(.bordered)
+                TextField("Total copies (0–1000)", text: $copyCount).keyboardType(.numberPad)
+                Button("Set number of copies") {
+                    guard let count = Int(copyCount), (0...1000).contains(count) else {
+                        failure = String(localized: "Choose a copy count between 0 and 1000"); return
+                    }
+                    run(.copies(count))
+                }.accessibilityIdentifier("set-object-copies")
+                Text("Copies share this object's parts, paint and settings. Use Duplicate for an independent object. A count of 0 removes the object; Undo restores it. Arrange positions the copies on the bed.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }.disabled(!hasSelection)
+            Section("Repair") {
+                Button(hasSelection ? "Repair selected object" : "Repair all objects") { run(.repair) }.accessibilityIdentifier("repair-mesh")
+                Text("Repair uses the engine's mesh repair tools. It cannot reconstruct every damaged model.").font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Simplify") {
+                TextField("Triangles per part (0 = half)", text: $targetFaces).keyboardType(.numberPad)
+                Button("Simplify selected object") {
+                    guard let target = Int(targetFaces), target == 0 || (target >= 4 && target <= Int(Int32.max)) else {
+                        failure = "Enter 0 or a triangle count of at least 4."; return
+                    }
+                    run(.simplify(target))
+                }
+            }.disabled(!hasSelection)
+            Section("Split") {
+                Toggle("Drop new objects to bed", isOn: $dropSplitObjects)
+                Button("Split to objects") { run(.split(toObjects: true, part: 0, dropToBed: dropSplitObjects)) }
+                    .accessibilityIdentifier("split-to-objects")
+                Text("Creates independent objects. Turn off Drop to keep floating parts at their current height.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("Splitting to objects removes modifier volumes. Undo restores the original object.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Picker("Model part", selection: $selectedPart) {
+                    if partNames.isEmpty { Text("No solid model parts selected").tag(0) }
+                    ForEach(Array(partNames.enumerated()), id: \.offset) { index, name in
+                        Text("\(index + 1): \(name)").tag(index)
+                    }
+                }
+                Button("Split to parts") { run(.split(toObjects: false, part: selectedPart, dropToBed: false)) }
+                    .disabled(partNames.isEmpty).accessibilityIdentifier("split-to-parts")
+                Text("Separates disconnected pieces inside the same object, preserving their placement.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }.disabled(!hasSelection)
+            Section("Cut") {
+                Picker("Plane axis", selection: $cutAxis) { Text("X").tag(0); Text("Y").tag(1); Text("Z").tag(2) }
+                    .pickerStyle(.segmented)
+                TextField("Plane position (mm)", text: $cutPosition).keyboardType(.numbersAndPunctuation)
+                Toggle("Keep upper half", isOn: $keepUpper)
+                Toggle("Keep lower half", isOn: $keepLower)
+                Button("Cut selected object") {
+                    guard let position = Float(cutPosition), position.isFinite else { failure = "Enter a valid plane position."; return }
+                    run(.cut(position: position, axis: cutAxis, upper: keepUpper, lower: keepLower))
+                }.disabled(!keepUpper && !keepLower)
+            }.disabled(!hasSelection)
+            Section("Boolean") {
+                Picker("Second object", selection: Binding(get: { secondObject }, set: { otherObject = $0 })) {
+                    ForEach(Array(engine.objectNames.enumerated()).filter { $0.offset != engine.selectedObjectIndex }, id: \.offset) { i, name in
+                        Text(name).tag(i)
+                    }
+                }
+                Picker("Operation", selection: $booleanOperation) {
+                    Text("Union").tag(0); Text("Subtract").tag(1); Text("Intersect").tag(2)
+                }.pickerStyle(.segmented)
+                Toggle("Remove second object", isOn: $removeOther)
+                Button("Apply boolean") { run(.boolean(other: secondObject, operation: booleanOperation, removeOther: removeOther)) }
+                Text("Subtract removes the second object's volume from the selected object.").font(.caption).foregroundStyle(.secondary)
+            }.disabled(!hasSelection || engine.objectCount < 2)
+        }
+        .disabled(engine.sessionBusy)
+        .navigationTitle("Mesh tools").navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(engine.sessionBusy)
+        .overlay {
+            if engine.sessionBusy {
+                ProgressView(engine.sessionBusyMessage).padding(24)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+            }
+        }
+        .onAppear { setCutMiddle(); refreshParts(); copyCount = String(currentCopies) }
+        .onChange(of: cutAxis) { _ in setCutMiddle() }
+        .onChange(of: engine.selectedObjectIndex) { _ in setCutMiddle(); refreshParts(); copyCount = String(currentCopies) }
+        .onChange(of: engine.objectInstanceCounts) { _ in copyCount = String(currentCopies) }
+        .onChange(of: engine.sessionBusy) { busy in if !busy { refreshParts() } }
+        .alert("Mesh operation failed", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: { Text(failure ?? "") }
+    }
+
+    private func setCutMiddle() {
+        guard engine.objectMeshes.indices.contains(engine.selectedObjectIndex) else { return }
+        let mesh = engine.objectMeshes[engine.selectedObjectIndex]
+        cutPosition = String(format: "%.3f", (mesh.min[cutAxis] + mesh.max[cutAxis]) * 0.5)
+    }
+
+    private func run(_ edit: OrcaEngine.MeshEdit) {
+        Task { @MainActor in
+            if await engine.editMesh(edit) { onComplete() }
+            else { failure = engine.lastMessage }
+        }
+    }
+
+    private func refreshParts() {
+        guard !engine.sessionBusy else { return }
+        partNames = engine.modelPartNames(object: engine.selectedObjectIndex)
+        if !partNames.indices.contains(selectedPart) { selectedPart = 0 }
     }
 }
 

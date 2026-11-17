@@ -1,0 +1,43 @@
+name: iOS Swift and API checks
+on:
+  pull_request:
+    paths:
+      - 'ios/**'
+      - 'src/ios/orca_slice_c_api.h'
+      - 'scripts/check_ios_swift.sh'
+      - 'scripts/test_ios_preview.sh'
+      - 'scripts/check_ios_preview_receipt.py'
+      - 'scripts/ios_simulator_helpers.sh'
+      - 'scripts/tests/test_ios*.py'
+      - '.github/workflows/ios-swift-checks.yml'
+concurrency:
+  group: ios-swift-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  check:
+    # Reuse one acquired Mac. Separate steps retain each SDK's result while
+    # avoiding repeated runner queues and duplicated Mac host fixtures.
+    runs-on: macos-15-intel
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check project generation and preset layout
+        run: python3 -m unittest discover -s scripts/tests -p 'test_ios*.py' -v
+      - name: Check iPhone SDK and Mac host fixtures
+        run: bash scripts/check_ios_swift.sh iphoneos
+      - name: Check simulator SDK and UI test sources
+        if: success() || failure()
+        env:
+          ORCA_IOS_SKIP_HOST_FIXTURES: '1'
+        run: bash scripts/check_ios_swift.sh iphonesimulator
+      - name: Exercise camera and progressive toolpath rendering
+        run: bash scripts/test_ios_preview.sh
+      - name: Preserve renderer evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-renderer
+          path: build_logs/preview-renderer/
+          if-no-files-found: warn

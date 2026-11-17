@@ -12,6 +12,11 @@ import UIKit
 final class OrcaEngine: ObservableObject {
     @Published var modelName: String?
     @Published var hasModel = false
+    @Published private(set) var lastModelImportSucceeded = false
+    @Published private(set) var sessionBusy = false
+    private var optionReadCache: [String: String] = [:]
+    private var filamentNameReadCache: [Int: String] = [:]
+    @Published private(set) var sessionBusyMessage = "Importing…"
     @Published var gcodeURL: URL?
     @Published var lastMessage = ""
     @Published var lastSliceTimeSec: Float = 0
@@ -29,10 +34,22 @@ final class OrcaEngine: ObservableObject {
     @Published var mesh: MeshGeometry?
     /// Per-object meshes for plate hit-test / selection (same order as objectNames)
     @Published var objectMeshes: [MeshGeometry] = []
+    @Published private(set) var paintedFilaments: [PaintedFilamentRegion] = []
+    @Published private(set) var filamentPaintRevision = 0
     @Published var gcodePathNode: SCNNode?
-    @Published var gcodeGeometry: GCodePathGeometry?
+    @Published var gcodeGeometry: GCodePathGeometry? {
+        didSet { resetPreviewSequence() }
+    }
+    @Published var previewIsReduced = false
+    @Published private(set) var previewFromFile = false
+    @Published private(set) var previewBedSize: SIMD2<Float>?
+    var previewBounds: (min: SIMD3<Float>, max: SIMD3<Float>)? {
+        guard let low = gcodeGeometry?.boundsMin, let high = gcodeGeometry?.boundsMax else { return nil }
+        return (low, high)
+    }
     @Published var objectCount: Int = 0
     @Published var objectNames: [String] = []
+    @Published private(set) var objectInstanceCounts: [Int] = []
     @Published var selectedObjectIndex: Int = -1 // -1 = all / none
     @Published var boundsText: String = ""
     /// Model AABB Z (mm) for cut mid-height default
@@ -47,22 +64,30 @@ final class OrcaEngine: ObservableObject {
     /// Layer scrubber: max/min Z shown in Preview (mm) — horizontal clip plane
     @Published var previewMaxZ: Float = 100
     @Published var previewMinZ: Float = 0
+    @Published var previewLayerHeights: [Float] = []
     @Published var gcodeZMin: Float = 0
     @Published var gcodeZMax: Float = 20
     /// Assembly explode factor (0 = collapsed layout)
     @Published var explodeFactor: Float = 0
-    /// Preview feature toggles (wall / infill / support / travel / other)
-    @Published var previewShowWall = true
-    @Published var previewShowInfill = true
-    @Published var previewShowSupport = true
-    @Published var previewShowTravel = false
-    @Published var previewShowOther = true
-    /// Color toolpaths by feature type, height, or feedrate
-    @Published var previewColorMode: GCodePathGeometry.ColorMode = .feature
+    @Published var previewShowShell = false
+    @Published var previewShowToolMarker = false {
+        didSet { if !previewShowToolMarker { pauseToolheadPlayback() } }
+    }
+    @Published var previewShowCenterOfGravity = false
+    @Published var previewHiddenTools: Set<Int> = []
+    @Published var previewHiddenFilaments: Set<Int> = []
+    @Published var previewHiddenFeatures: Set<String> = []
+    @Published var previewEnabledMoves: Set<GCodePathGeometry.MoveKind> = [.extrude]
+    @Published var previewColorMode: GCodePathGeometry.ColorMode = .filament
+    @Published var previewThroughMove = Int.max
+    @Published private(set) var previewBuilding = false
+    @Published private(set) var previewLightweight = false
 
     // MARK: System presets (all vendors / printers / process / filament)
+    @Published private(set) var startupFinished = false
     @Published var presetsLoaded = false
     @Published var presetsLoading = false
+    @Published var presetOrigins: [Int: [String: Int]] = [:]
     @Published var printerNames: [String] = []
     @Published var processNames: [String] = []
     @Published var filamentNames: [String] = []
@@ -152,19 +177,36 @@ final class OrcaEngine: ObservableObject {
         #endif
     }
 
-    init() {
+    let automaticProfileLoading: Bool
+
+    init(loadSystemProfiles: Bool = true) {
+        automaticProfileLoading = loadSystemProfiles
         #if ORCA_LINKED
         let res = Bundle.main.resourcePath
         session = orca_session_create(res)
         if session == nil {
+            startupFinished = true
             lastMessage = "orca_session_create failed"
+            StartupRecovery().finish()
         } else {
             lastMessage = "Engine ready (official libslic3r)"
             applyDefaultFFF()
             // Writable data dir for installed system vendor trees
-            configureDataDir()
-            // Kick off full system profile install+load in background
-            Task { await loadAllSystemPresets() }
+            guard configureDataDir() else {
+                startupFinished = true
+                StartupRecovery().finish()
+                return
+            }
+            if loadSystemProfiles {
+                Task {
+                    await loadAllSystemPresets()
+                    await MainActor.run { self.startupFinished = true }
+                }
+            } else {
+                startupFinished = true
+                lastMessage = "Recovery mode: engine ready without system profiles"
+                StartupRecovery().finish()
+            }
         }
         // Free heavy preview caches under OS memory pressure (full profile tree is large).
         NotificationCenter.default.addObserver(
@@ -175,21 +217,137 @@ final class OrcaEngine: ObservableObject {
             self?.handleMemoryWarning()
         }
         #else
+        startupFinished = true
         lastMessage = "Build with ORCA_LINKED + liborca_engine.a"
+        StartupRecovery().finish()
         #endif
     }
 
-    /// Drop G-code preview + settings-browser caches. Model mesh kept for prepare.
-    func handleMemoryWarning() {
+    // Public edits must honor worker ownership even when invoked by keyboard
+    // commands or notifications rather than disabled SwiftUI controls.
+    private func requireIdleSession() -> Bool {
+        guard !sessionBusy, !sliceRunning, !presetsLoading else {
+            lastMessage = String(localized: "Wait for the current operation to finish")
+            return false
+        }
+        return true
+    }
+
+    /// Integration fixture only: exercise public commands under each worker
+    /// owner without scheduling concurrent native access in the test itself.
+    @MainActor
+    func sessionGateSmokeTest() async -> String {
         #if ORCA_LINKED
-        gcodePathNode = nil
-        gcodeGeometry = nil
+        guard requireIdleSession(), let session, hasModel, objectCount > 0 else {
+            return "FAIL: session ownership fixture needs a loaded, idle model"
+        }
+        let message = lastMessage
+        defer { sessionBusy = false; sliceRunning = false; presetsLoading = false; lastMessage = message }
+        func longOptionRoundTrip() -> Bool {
+            let key = "machine_start_gcode"
+            guard let original = readOption(key) else { return false }
+            defer {
+                _ = original.withCString { orca_session_set_option(session, key, $0) }
+                _ = readOption(key)
+            }
+            let large = String(repeating: "; native option Ω ", count: 512)
+            guard large.withCString({ orca_session_set_option(session, key, $0) }) == 0 else { return false }
+            var expected = [CChar](repeating: 0, count: 65_536)
+            guard orca_session_get_option(session, key, &expected, expected.count) == 0 else { return false }
+            let serialized = String(cString: expected)
+            return serialized.utf8.count > 4096 && getOption(key) == serialized
+        }
+        guard longOptionRoundTrip() else { return "FAIL: native long setting was truncated or could not be read" }
+        func fingerprint() -> String {
+            var bounds = [Float](repeating: 0, count: 6)
+            let code = bounds.withUnsafeMutableBufferPointer { values in
+                orca_session_model_bounds(session, values.baseAddress, values.baseAddress! + 1,
+                    values.baseAddress! + 2, values.baseAddress! + 3, values.baseAddress! + 4, values.baseAddress! + 5)
+            }
+            var support: Int32 = 0, mmu: Int32 = 0
+            _ = orca_session_paint_stats(session, 0, 0, -1, &support)
+            _ = orca_session_paint_stats(session, 0, 2, -1, &mmu)
+            return "\(code)|\(bounds)|\(orca_session_object_count(session))|\(hasModel)|\(meshRevision)|" +
+                "\(readOption("layer_height") ?? "")|\(bedSize)|\(bedHeight)|\(support)|\(mmu)|" +
+                "\(plateCount)|\(currentPlateIndex)|\(undoStack.count)|\(redoStack.count)|\(calibMode)"
+        }
+        let before = fingerprint()
+        let height = getOption("layer_height") ?? "0.2"
+        let actions: [(String, () async -> Void)] = [
+            ("translate", { self.translate(dx: 100, dy: 100) }),
+            ("rotate", { self.rotate(axis: 2, degrees: 45) }),
+            ("scale", { self.scale(factor: 2) }),
+            ("mirror", { self.mirror(axis: 0) }),
+            ("duplicate", { _ = await self.duplicateObject(at: 0) }),
+            ("delete", { _ = await self.deleteObject(at: 0) }),
+            ("clear", { self.clearPlate() }),
+            ("clear with undo", { _ = await self.clearPlateWithUndo() }),
+            ("primitive", { _ = self.addPrimitive(kind: 0, x: 10, y: 10, z: 10) }),
+            ("grid", { _ = self.cloneGrid(nx: 2, ny: 2) }),
+            ("config", { _ = self.applyConfigOption(key: "layer_height", value: "0.6") }),
+            ("option", { self.setOption("layer_height", value: "0.6") }),
+            ("bed", { self.setBedSize(width: 100, depth: 100) }),
+            ("calibration", { _ = self.setCalib(mode: 6, start: 200, end: 220, step: 5) }),
+            ("painting", { _ = self.paintFill(kind: .support, state: 1) }),
+            ("plate", { self.addPlate() }),
+            ("snapshot", { self.pushUndoSnapshot(label: "blocked-test-edit") }),
+            ("undo", { self.undo() }),
+            ("redo", { self.redo() })
+        ]
+        for owner in 0..<3 {
+            sessionBusy = owner == 0; sliceRunning = owner == 1; presetsLoading = owner == 2
+            guard orca_session_set_option(session, "layer_height", "0.31") == 0,
+                  getOption("layer_height") == height else { return "FAIL: owned UI read entered the native configuration" }
+            guard height.withCString({ orca_session_set_option(session, "layer_height", $0) }) == 0 else {
+                return "FAIL: could not restore the read-isolation fixture"
+            }
+            for (name, action) in actions {
+                await action()
+                guard fingerprint() == before else { return "FAIL: \(name) modified a session owned by worker \(owner)" }
+            }
+        }
+        sessionBusy = false; sliceRunning = false; presetsLoading = false
+        guard applyConfigOption(key: "layer_height", value: height) else { return "FAIL: idle session rejects a valid edit" }
+        return "PASS: public model/config/paint/plate/undo edits respect import, slice and preset ownership"
+        #else
+        return "FAIL: native engine is not linked"
+        #endif
+    }
+
+    /// Results belong to one exact model/configuration and cannot survive an edit.
+    private func invalidateSlice() {
+        previewRefreshTask?.cancel()
+        previewBuildTask?.cancel()
+        previewGeneration = UUID()
+        previewBuilding = false
         gcodeURL = nil
-        if let s = session {
+        gcodeGeometry = nil
+        previewLayerHeights = []
+        gcodePathNode = nil
+        previewIsReduced = false
+        previewFromFile = false
+        previewBedSize = nil
+        lastSliceStatsText = ""
+        lastAvgLayerTimeText = ""
+        lastSliceTimeSec = 0
+        lastSliceFilamentMm3 = 0
+        lastSliceLayers = 0
+        filamentByRole = []
+    }
+
+    /// A memory warning must not turn a successful slice into an unsliced plate.
+    /// Retain paths/file/statistics; rebuild compact lines with every move intact.
+    func handleMemoryWarning() {
+        pauseToolheadPlayback()
+        #if ORCA_LINKED
+        if let s = session, !presetsLoading, !sliceRunning, !sessionBusy {
             orca_session_purge_option_caches(s)
         }
-        lastMessage = "Freed preview/settings caches (memory pressure)"
         #endif
+        let wasLightweight = previewLightweight
+        previewLightweight = true
+        if !wasLightweight && gcodeGeometry != nil { applyPreviewLayer() }
+        lastMessage = "Memory-saving preview: all toolpaths retained"
     }
 
     /// Approximate app footprint (MB) for status after profile load.
@@ -210,13 +368,20 @@ final class OrcaEngine: ObservableObject {
     }
 
     #if ORCA_LINKED
-    private func configureDataDir() {
-        guard let s = session else { return }
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
-        let data = (docs ?? FileManager.default.temporaryDirectory)
-            .appendingPathComponent("OrcaSlicer", isDirectory: true)
-        try? FileManager.default.createDirectory(at: data, withIntermediateDirectories: true)
-        _ = data.path.withCString { orca_session_set_data_dir(s, $0) }
+    private func configureDataDir() -> Bool {
+        guard let s = session else { return false }
+        let data = StartupRecovery().dataDirectory
+        do {
+            try FileManager.default.createDirectory(at: data, withIntermediateDirectories: true)
+            guard data.path.withCString({ orca_session_set_data_dir(s, $0) }) == 0 else {
+                lastMessage = "Could not configure writable engine storage"
+                return false
+            }
+            return true
+        } catch {
+            lastMessage = "Could not create engine storage: \(error.localizedDescription)"
+            return false
+        }
     }
     #endif
 
@@ -226,7 +391,17 @@ final class OrcaEngine: ObservableObject {
         #if ORCA_LINKED
         guard let s = session else { return }
         if presetsLoaded || presetsLoading { return }
+        guard !sessionBusy, !sliceRunning else { return }
         presetsLoading = true
+        let recovery = StartupRecovery()
+        recovery.begin()
+        defer {
+            if presetsLoaded {
+                do { try recovery.profilesLoaded() }
+                catch { lastMessage = "Profiles loaded, but cache metadata could not be saved: \(error.localizedDescription)" }
+            }
+            recovery.finish()
+        }
         lastMessage = "Loading all system profiles…"
         let sessionBits = UInt(bitPattern: s)
         let rc = await Task.detached(priority: .userInitiated) {
@@ -250,6 +425,8 @@ final class OrcaEngine: ObservableObject {
         }
         // Restore last selection if still present; else prefer known printers
         let savedPrinter = UserDefaults.standard.string(forKey: prefsPrinterKey) ?? ""
+        let savedProcess = UserDefaults.standard.string(forKey: prefsProcessKey)
+        let savedFilament = UserDefaults.standard.string(forKey: prefsFilamentKey)
         var picked = false
         if !savedPrinter.isEmpty, printerNames.contains(savedPrinter) {
             picked = selectPrinter(savedPrinter)
@@ -269,12 +446,12 @@ final class OrcaEngine: ObservableObject {
             _ = selectPrinter(first)
         }
         // Restore process/filament if still in (filtered) lists
-        if let sp = UserDefaults.standard.string(forKey: prefsProcessKey),
-           !sp.isEmpty, processNames.contains(sp) {
+        if let sp = savedProcess,
+           !sp.isEmpty, processNames.contains(sp) || userProcessNames.contains(sp) {
             _ = selectProcess(sp)
         }
-        if let sf = UserDefaults.standard.string(forKey: prefsFilamentKey),
-           !sf.isEmpty, filamentNames.contains(sf) {
+        if let sf = savedFilament,
+           !sf.isEmpty, filamentNames.contains(sf) || userFilamentNames.contains(sf) {
             _ = selectFilament(sf)
         }
         let mem = reportMemoryMB()
@@ -357,7 +534,15 @@ final class OrcaEngine: ObservableObject {
             }
         }
         userFilamentNames = ufils
+        var origins: [Int: [String: Int]] = [:]
+        for (scope, names) in [0: procs, 1: fils, 2: printers] {
+            origins[scope] = Dictionary(uniqueKeysWithValues: names.map { name in
+                (name, Int(name.withCString { orca_session_preset_origin(s, Int32(scope), $0) }))
+            })
+        }
+        presetOrigins = origins
         compatibleOnly = orca_session_get_compatible_only(s) != 0
+        refreshObjectFilamentColors()
     }
 
     private func refreshCoverAndBedTexture() {
@@ -379,6 +564,7 @@ final class OrcaEngine: ObservableObject {
 
     @discardableResult
     func selectPrinter(_ name: String) -> Bool {
+        guard requireIdleSession() else { return false }
         #if ORCA_LINKED
         guard let s = session, presetsLoaded else { return false }
         let rc = name.withCString { orca_session_select_printer(s, $0) }
@@ -402,7 +588,7 @@ final class OrcaEngine: ObservableObject {
         if let c = orca_session_selected_filament(s) {
             selectedFilament = String(cString: c)
         }
-        refreshBedSize()
+        readBedSize()
         refreshCoverAndBedTexture()
         persistSelection()
         lastMessage = String(
@@ -417,6 +603,7 @@ final class OrcaEngine: ObservableObject {
 
     @discardableResult
     func selectProcess(_ name: String) -> Bool {
+        guard requireIdleSession() else { return false }
         #if ORCA_LINKED
         guard let s = session, presetsLoaded else { return false }
         let rc = name.withCString { orca_session_select_process(s, $0) }
@@ -425,10 +612,11 @@ final class OrcaEngine: ObservableObject {
             return false
         }
         _ = orca_session_apply_presets(s)
+        invalidateSlice()
         selectedProcess = name
         activeProcessProfile = name
         refreshPresetLists()
-        refreshBedSize()
+        readBedSize()
         persistSelection()
         lastMessage = "Process: \(name)"
         return true
@@ -439,6 +627,7 @@ final class OrcaEngine: ObservableObject {
 
     @discardableResult
     func selectFilament(_ name: String) -> Bool {
+        guard requireIdleSession() else { return false }
         #if ORCA_LINKED
         guard let s = session, presetsLoaded else { return false }
         let rc = name.withCString { orca_session_select_filament(s, $0) }
@@ -447,7 +636,9 @@ final class OrcaEngine: ObservableObject {
             return false
         }
         _ = orca_session_apply_presets(s)
+        invalidateSlice()
         selectedFilament = name
+        refreshObjectFilamentColors()
         persistSelection()
         lastMessage = "Filament: \(name)"
         return true
@@ -457,6 +648,7 @@ final class OrcaEngine: ObservableObject {
     }
 
     func setCompatibleOnly(_ on: Bool) {
+        guard requireIdleSession() else { return }
         #if ORCA_LINKED
         guard let s = session else { return }
         compatibleOnly = on
@@ -472,6 +664,7 @@ final class OrcaEngine: ObservableObject {
     /// Persist current process settings as a user preset (Documents/…/user_presets/process).
     @discardableResult
     func saveUserProcess(name: String) -> Bool {
+        guard requireIdleSession() else { return false }
         #if ORCA_LINKED
         guard let s = session else { return false }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -485,8 +678,7 @@ final class OrcaEngine: ObservableObject {
             return false
         }
         refreshPresetLists()
-        selectedProcess = trimmed
-        activeProcessProfile = trimmed
+        activeProcessProfile = selectedProcess
         persistSelection()
         lastMessage = "Saved user process “\(trimmed)”"
         return true
@@ -498,6 +690,7 @@ final class OrcaEngine: ObservableObject {
     /// Persist current filament settings as user preset (Documents/…/user_presets/filament).
     @discardableResult
     func saveUserFilament(name: String) -> Bool {
+        guard requireIdleSession() else { return false }
         #if ORCA_LINKED
         guard let s = session else { return false }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -511,7 +704,6 @@ final class OrcaEngine: ObservableObject {
             return false
         }
         refreshPresetLists()
-        selectedFilament = trimmed
         persistSelection()
         lastMessage = "Saved user filament “\(trimmed)”"
         return true
@@ -523,6 +715,7 @@ final class OrcaEngine: ObservableObject {
     /// Export current DynamicPrintConfig to Documents (or given URL) as JSON.
     @discardableResult
     func exportConfigJSON(to url: URL? = nil) -> URL? {
+        guard requireIdleSession() else { return nil }
         #if ORCA_LINKED
         guard let s = session else {
             lastMessage = "No session"
@@ -552,46 +745,107 @@ final class OrcaEngine: ObservableObject {
         #endif
     }
 
-    /// Import config JSON as overlay (or as user process/filament if kind set).
-    /// kind: nil = overlay only; 0 = user process; 1 = user filament
+    @MainActor
+    func importCloudProfiles(_ profiles: [OrcaCloudProfile], owner: String, adoptedIDs: Set<String> = []) async -> Bool {
+        guard !sessionBusy, !presetsLoading, !sliceRunning, startupFinished else { return false }
+        #if ORCA_LINKED
+        guard let session else { return false }
+        sessionBusyMessage = "Importing…"
+        sessionBusy = true
+        defer { sessionBusy = false }
+        do {
+            let records = try profiles.map { profile -> [String: Any] in
+                var record = try profile.record()
+                record["adopt_local"] = adoptedIDs.contains(profile.id)
+                return record
+            }
+            let data = try JSONSerialization.data(withJSONObject: records)
+            let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".json")
+            try data.write(to: path, options: .atomic)
+            defer { try? FileManager.default.removeItem(at: path) }
+            let bits = UInt(bitPattern: session)
+            let result = await Task.detached(priority: .userInitiated) {
+                path.path.withCString { path in owner.withCString { owner in
+                    orca_session_import_cloud_presets(OpaquePointer(bitPattern: bits)!, path, owner)
+                } }
+            }.value
+            guard result >= 0 else {
+                lastMessage = orca_session_last_error(session).map { String(cString: $0) } ?? "Cloud preset import failed"
+                return false
+            }
+            refreshPresetLists()
+            lastMessage = String(localized: "Imported \(result) cloud printer, filament and process presets.")
+            return true
+        } catch { lastMessage = error.localizedDescription; return false }
+        #else
+        return false
+        #endif
+    }
+
+    func exportLocalCloudProfiles() throws -> [OrcaCloudProfile] {
+        #if ORCA_LINKED
+        guard let session, !sessionBusy, !presetsLoading, !sliceRunning else { throw OrcaCloudError.unavailable }
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".json")
+        defer { try? FileManager.default.removeItem(at: path) }
+        guard path.path.withCString({ orca_session_export_user_profiles(session, $0) }) >= 0,
+              let records = try JSONSerialization.jsonObject(with: Data(contentsOf: path)) as? [[String: Any]] else {
+            throw OrcaCloudError.invalidResponse
+        }
+        return try records.map(OrcaCloudProfile.init(record:))
+        #else
+        throw OrcaCloudError.unavailable
+        #endif
+    }
+
+    /// Catalog imports preserve preset type/inheritance. Untyped session JSON is
+    /// a settings overlay; it must not become a printer merely because it has IDs.
+    @MainActor
     @discardableResult
-    func importConfigJSON(url: URL, asUserPreset kind: Int? = nil) -> Bool {
+    func importConfigJSON(url: URL, asUserPreset kind: Int? = nil) async -> Bool {
+        guard !sessionBusy, !presetsLoading, !sliceRunning else { return false }
         #if ORCA_LINKED
         guard let s = session else { return false }
         let accessed = url.startAccessingSecurityScopedResource()
         defer { if accessed { url.stopAccessingSecurityScopedResource() } }
         guard let dest = copyToTemp(url) else { return false }
-        if let kind {
-            let rc = dest.path.withCString { orca_session_import_user_preset(s, $0, Int32(kind)) }
-            if rc != 0 {
-                lastMessage = orca_session_last_error(s).map { String(cString: $0) } ?? "import preset failed"
+        sessionBusyMessage = "Importing…"
+        sessionBusy = true
+        defer { sessionBusy = false }
+        let bits = UInt(bitPattern: s)
+        do {
+            let (result, catalog) = try await Task.detached(priority: .userInitiated) { () throws -> (Int32, Bool) in
+                let session = OpaquePointer(bitPattern: bits)!
+                let catalog = try DocumentImportStore.isPresetCatalog(dest)
+                let result = dest.path.withCString { path -> Int32 in
+                    if catalog { return orca_session_import_preset_catalog(session, path) }
+                    if let kind { return orca_session_import_user_preset(session, path, Int32(kind)) }
+                    return orca_session_import_config(session, path)
+                }
+                return (result, catalog)
+            }.value
+            guard catalog ? result > 0 : result == 0 else {
+                lastMessage = orca_session_last_error(s).map { String(cString: $0) } ?? "Settings import failed"
                 return false
             }
             refreshPresetLists()
-            if kind == 0 {
-                if let c = orca_session_selected_process(s) {
-                    selectedProcess = String(cString: c)
+            if catalog {
+                lastMessage = String(localized: "Imported \(result) presets. Select them in Process settings.")
+            } else if let kind {
+                if kind == 0, let selected = orca_session_selected_process(s) {
+                    selectedProcess = String(cString: selected)
                     activeProcessProfile = selectedProcess
+                } else if let selected = orca_session_selected_filament(s) {
+                    selectedFilament = String(cString: selected)
                 }
+                persistSelection()
+                lastMessage = String(localized: "Imported user preset from \(url.lastPathComponent).")
             } else {
-                if let c = orca_session_selected_filament(s) {
-                    selectedFilament = String(cString: c)
-                }
+                invalidateSlice()
+                readBedSize()
+                lastMessage = String(localized: "Imported settings from \(url.lastPathComponent).")
             }
-            persistSelection()
-            lastMessage = kind == 0
-                ? "Imported user process from \(url.lastPathComponent)"
-                : "Imported user filament from \(url.lastPathComponent)"
             return true
-        } else {
-            let rc = dest.path.withCString { orca_session_import_config(s, $0) }
-            if rc != 0 {
-                lastMessage = orca_session_last_error(s).map { String(cString: $0) } ?? "import config failed"
-                return false
-            }
-            lastMessage = "Imported config overlay from \(url.lastPathComponent)"
-            return true
-        }
+        } catch { lastMessage = error.localizedDescription; return false }
         #else
         return false
         #endif
@@ -601,6 +855,7 @@ final class OrcaEngine: ObservableObject {
 
     @discardableResult
     func cloneGrid(nx: Int, ny: Int, spacingMm: Float = 15) -> Bool {
+        guard requireIdleSession() else { return false }
         #if ORCA_LINKED
         guard let s = session, hasModel else { return false }
         let idx = selectedObjectIndex >= 0 ? selectedObjectIndex : 0
@@ -622,6 +877,11 @@ final class OrcaEngine: ObservableObject {
 
     @discardableResult
     func refreshMeshHealth() -> Bool {
+        guard !sessionBusy, !sliceRunning, !presetsLoading else { return false }
+        return readMeshHealth()
+    }
+
+    private func readMeshHealth() -> Bool {
         #if ORCA_LINKED
         guard let s = session, hasModel else {
             meshHealthText = ""
@@ -641,53 +901,6 @@ final class OrcaEngine: ObservableObject {
             meshHealthText = "Non-manifold · \(openEdges) open edges · \(facets) facets"
         }
         lastMessage = meshHealthText
-        return true
-        #else
-        return false
-        #endif
-    }
-
-    @discardableResult
-    func repairMesh() -> Bool {
-        #if ORCA_LINKED
-        guard let s = session, hasModel else { return false }
-        let idx = selectedObjectIndex >= 0 ? Int32(selectedObjectIndex) : Int32(-1)
-        let rc = orca_session_repair_mesh(s, idx)
-        if rc != 0 {
-            lastMessage = orca_session_last_error(s).map { String(cString: $0) } ?? "repair failed"
-            _ = refreshMeshHealth()
-            return false
-        }
-        refreshMesh()
-        refreshBounds()
-        refreshModelInfo()
-        _ = refreshMeshHealth()
-        lastMessage = "Repair done · \(meshHealthText)"
-        return true
-        #else
-        return false
-        #endif
-    }
-
-    /// Horizontal plane cut at world Z (mm). keep both halves by default.
-    @discardableResult
-    func cutObjectZ(_ zMm: Float, keepUpper: Bool = true, keepLower: Bool = true) -> Bool {
-        #if ORCA_LINKED
-        guard let s = session, hasModel else { return false }
-        let idx = selectedObjectIndex >= 0 ? selectedObjectIndex : 0
-        let rc = orca_session_cut_object_z(
-            s, Int32(idx), zMm, keepUpper ? 1 : 0, keepLower ? 1 : 0
-        )
-        if rc < 0 {
-            lastMessage = orca_session_last_error(s).map { String(cString: $0) } ?? "cut failed"
-            return false
-        }
-        selectedObjectIndex = -1
-        refreshObjectList()
-        refreshMesh()
-        refreshBounds()
-        refreshModelInfo()
-        lastMessage = String(format: "Cut at Z=%.2f mm → %d object(s)", zMm, objectCount)
         return true
         #else
         return false
@@ -726,6 +939,7 @@ final class OrcaEngine: ObservableObject {
     }
 
     deinit {
+        previewPlaybackTask?.cancel()
         #if ORCA_LINKED
         if let s = session { orca_session_destroy(s) }
         #endif
@@ -735,16 +949,21 @@ final class OrcaEngine: ObservableObject {
     @discardableResult
     private func setOptionRaw(_ key: String, _ value: String) -> Int32 {
         guard let s = session else { return -1 }
-        return key.withCString { k in
+        let rc = key.withCString { k in
             value.withCString { v in
                 orca_session_set_option(s, k, v)
             }
         }
+        if rc == 0 { invalidateSlice() }
+        return rc
     }
     #endif
 
     private func applyDefaultFFF() {
         #if ORCA_LINKED
+        // Minimal printer defaults must agree with upstream's extrusion-mode validation.
+        _ = setOptionRaw("use_relative_e_distances", "1")
+        _ = setOptionRaw("layer_change_gcode", "G92 E0")
         _ = setOptionRaw("layer_height", "0.2")
         _ = setOptionRaw("wall_loops", "2")
         _ = setOptionRaw("sparse_infill_density", "15%")
@@ -754,11 +973,16 @@ final class OrcaEngine: ObservableObject {
         _ = setOptionRaw("printable_height", "250")
         bedSize = SIMD2(220, 220)
         bedHeight = 250
-        refreshBedSize()
+        readBedSize()
         #endif
     }
 
     func refreshBedSize() {
+        guard !sessionBusy, !sliceRunning, !presetsLoading else { return }
+        readBedSize()
+    }
+
+    private func readBedSize() {
         #if ORCA_LINKED
         guard let s = session else { return }
         var w: Float = 220, d: Float = 220, h: Float = 250
@@ -774,6 +998,7 @@ final class OrcaEngine: ObservableObject {
         guard let s = session, hasModel else {
             objectNames = []
             objectCount = 0
+            objectInstanceCounts = []
             return
         }
         let n = Int(orca_session_object_count(s))
@@ -788,6 +1013,7 @@ final class OrcaEngine: ObservableObject {
             }
         }
         objectNames = names
+        objectInstanceCounts = (0..<n).map { max(0, Int(orca_session_object_instance_count(s, Int32($0)))) }
         if selectedObjectIndex >= n {
             selectedObjectIndex = n > 0 ? 0 : -1
         }
@@ -811,6 +1037,7 @@ final class OrcaEngine: ObservableObject {
     /// Re-applies bed defaults after load because process profiles omit printable_area.
     @discardableResult
     func loadProcessProfile(_ resourceName: String) -> Bool {
+        guard requireIdleSession() else { return false }
         #if ORCA_LINKED
         guard let s = session else { return false }
         guard let url = Bundle.main.url(forResource: resourceName, withExtension: "json") else {
@@ -839,6 +1066,7 @@ final class OrcaEngine: ObservableObject {
     }
 
     func loadConfig(url: URL) -> String {
+        guard requireIdleSession() else { return lastMessage }
         #if ORCA_LINKED
         guard let s = session else { return "No session" }
         let rc = url.path.withCString { orca_session_load_config(s, $0) }
@@ -847,7 +1075,8 @@ final class OrcaEngine: ObservableObject {
             lastMessage = "load_config rc=\(rc): \(err)"
             return lastMessage
         }
-        refreshBedSize()
+        invalidateSlice()
+        readBedSize()
         lastMessage = "Loaded config \(url.lastPathComponent)"
         return lastMessage
         #else
@@ -857,14 +1086,9 @@ final class OrcaEngine: ObservableObject {
 
     /// Copy security-scoped URL into temp for the C engine.
     private func copyToTemp(_ url: URL) -> URL? {
-        let dest = FileManager.default.temporaryDirectory
-            .appendingPathComponent(url.lastPathComponent)
         do {
-            if FileManager.default.fileExists(atPath: dest.path) {
-                try FileManager.default.removeItem(at: dest)
-            }
-            try FileManager.default.copyItem(at: url, to: dest)
-            return dest
+            if DocumentImportStore.models.owns(url) { return url }
+            return try DocumentImportStore.temporary.copy(url)
         } catch {
             lastMessage = "Copy failed: \(error.localizedDescription)"
             return nil
@@ -882,6 +1106,8 @@ final class OrcaEngine: ObservableObject {
     }
 
     func loadModel(url: URL, append: Bool) -> String {
+        guard requireIdleSession() else { return lastMessage }
+        lastModelImportSucceeded = false
         let accessed = url.startAccessingSecurityScopedResource()
         defer { if accessed { url.stopAccessingSecurityScopedResource() } }
 
@@ -899,15 +1125,51 @@ final class OrcaEngine: ObservableObject {
                 return orca_session_load_model(s, path)
             }
         }
+        return finishModelImport(url: url, append: append, rc: rc)
+        #else
+        modelName = url.lastPathComponent + " (engine not linked)"
+        hasModel = false
+        lastMessage = "Engine not linked"
+        return lastMessage
+        #endif
+    }
+
+    /// The document inbox owns these files, so native parsing can run off the UI
+    /// thread while controls and memory-pressure native cache mutation are paused.
+    @MainActor
+    func loadDocumentModel(url: URL, append: Bool, includeSettings: Bool = true) async -> Bool {
+        guard !sessionBusy, !presetsLoading, !sliceRunning else { return false }
+        sessionBusyMessage = "Importing…"
+        sessionBusy = true
+        lastModelImportSucceeded = false
+        defer { sessionBusy = false }
+        #if ORCA_LINKED
+        guard let session else { lastMessage = "No session"; return false }
+        let bits = UInt(bitPattern: session)
+        let rc = await Task.detached(priority: .userInitiated) {
+            let session = OpaquePointer(bitPattern: bits)!
+            return url.path.withCString {
+                if append && !includeSettings { return orca_session_add_model_geometry(session, $0) }
+                return append ? orca_session_add_model(session, $0) : orca_session_load_model(session, $0)
+            }
+        }.value
+        _ = finishModelImport(url: url, append: append, rc: rc)
+        return lastModelImportSucceeded
+        #else
+        lastMessage = "Engine not linked"
+        return false
+        #endif
+    }
+
+    #if ORCA_LINKED
+    private func finishModelImport(url: URL, append: Bool, rc: Int32) -> String {
+        guard let s = session else { return "No session" }
         if rc != 0 {
             let err = orca_session_last_error(s).map { String(cString: $0) } ?? "error"
             lastMessage = "\(append ? "add" : "load")_model rc=\(rc): \(err)"
-            if !append {
-                hasModel = false
-                mesh = nil
-            }
             return lastMessage
         }
+        lastModelImportSucceeded = true
         modelName = append
             ? "\(objectCount + 1) objects · last \(url.lastPathComponent)"
             : url.lastPathComponent
@@ -923,53 +1185,154 @@ final class OrcaEngine: ObservableObject {
         refreshMesh()
         refreshBounds()
         refreshModelInfo()
-        refreshBedSize()
+        readBedSize()
         gcodeURL = nil
         gcodePathNode = nil
         gcodeGeometry = nil
+        previewLayerHeights = []
         if is3MF && !append {
             lastMessage = "Opened project \(url.lastPathComponent) · \(objectCount) object(s) · config restored"
         } else {
             lastMessage = "Loaded \(url.lastPathComponent) · \(objectCount) object(s) · mesh ready"
         }
         return lastMessage
-        #else
-        modelName = url.lastPathComponent + " (engine not linked)"
-        hasModel = false
-        lastMessage = "Engine not linked"
-        return lastMessage
-        #endif
+    }
+    #endif
+
+    @Published var previewToolheadPosition: SCNVector3?
+    @Published var smoothToolheadMovement = true
+    @Published private(set) var previewToolheadMove: Double?
+    @Published private(set) var previewPlaybackRunning = false
+    @Published var previewPlaybackRate = 1.0
+    private var previewPlaybackTask: Task<Void, Never>?
+
+    func resetPreviewSequence() {
+        pauseToolheadPlayback()
+        previewThroughMove = .max
+        previewToolheadMove = nil
+        previewToolheadPosition = nil
     }
 
-    /// Rebuild G-code SceneKit node from geometry filtered by min/max Z clip + feature toggles
+    func pauseToolheadPlayback() {
+        previewPlaybackTask?.cancel()
+        previewPlaybackTask = nil
+        previewPlaybackRunning = false
+    }
+
+    func playToolhead() {
+        guard let geometry = gcodeGeometry, geometry.moveCount > 0 else { return }
+        pauseToolheadPlayback()
+        // Restrict playback to the selected layer range; feature filters affect
+        // visibility, while physical nozzle travel still belongs to the route.
+        var first: Int?, last: Int?
+        for segment in geometry.segments {
+            guard let a = segment.points.first, let b = segment.points.last,
+                  max(a.z, b.z) >= previewMinZ - 0.001,
+                  min(a.z, b.z) <= previewMaxZ + 0.001 else { continue }
+            first = first ?? segment.firstMove
+            last = segment.lastMove
+        }
+        guard let first, let last else { return }
+        let start = Double(first - 1), end = Double(last)
+        let cursor = previewToolheadMove ?? start
+        updateToolhead(to: cursor < start || cursor >= end ? start : cursor)
+        previewPlaybackRunning = true
+        previewPlaybackTask = Task { @MainActor [weak self] in
+            var timestamp = ProcessInfo.processInfo.systemUptime
+            while !Task.isCancelled {
+                do { try await Task.sleep(nanoseconds: 50_000_000) } catch { return }
+                guard let self, self.previewPlaybackRunning, let geometry = self.gcodeGeometry else { return }
+                let now = ProcessInfo.processInfo.systemUptime
+                if self.previewBuilding { timestamp = now; continue }
+                let elapsed = min(0.25, max(0, now - timestamp))
+                timestamp = now
+                let next = min(end, geometry.advanceToolhead(from: self.previewToolheadMove ?? start,
+                    seconds: elapsed * self.previewPlaybackRate))
+                self.updateToolhead(to: next)
+                if next >= end { self.pauseToolheadPlayback(); return }
+            }
+        }
+    }
+
+    private func updateToolhead(to value: Double) {
+        guard let geometry = gcodeGeometry, value.isFinite else { return }
+        let cursor = max(-1, min(value, Double(max(0, geometry.moveCount - 1))))
+        previewThroughMove = max(0, Int(cursor))
+        previewToolheadMove = cursor
+        previewShowToolMarker = true
+        previewToolheadPosition = geometry.position(atMove: cursor)
+    }
+
+    func scrubToolhead(to value: Double) {
+        pauseToolheadPlayback()
+        updateToolhead(to: value)
+    }
+
+    func setToolheadScrubbing(_ editing: Bool) {
+        if editing { pauseToolheadPlayback() }
+    }
+
+    func stepToolhead(_ direction: Int) {
+        guard let geometry = gcodeGeometry, geometry.moveCount > 0 else { return }
+        let cursor = previewToolheadMove ?? Double(min(previewThroughMove, geometry.moveCount - 1))
+        scrubToolhead(to: max(-1, direction > 0 ? floor(cursor) + 1 : ceil(cursor) - 1))
+    }
+
+    private var previewRefreshTask: Task<Void, Never>?
+
+    func requestPreviewLayer() {
+        previewRefreshTask?.cancel()
+        previewRefreshTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(nanoseconds: 60_000_000) } catch { return }
+            guard !Task.isCancelled else { return }
+            self?.applyPreviewLayer()
+        }
+    }
+
+    private var previewBuildTask: Task<SCNNode, Never>?
+    private var previewGeneration = UUID()
+
+    /// Build CPU geometry away from UIKit's event/termination thread. A cancelled
+    /// slider build must never replace a newer result or a different project's slice.
     func applyPreviewLayer() {
+        previewBuildTask?.cancel()
+        let generation = UUID()
+        previewGeneration = generation
         guard let geo = gcodeGeometry else {
             gcodePathNode = nil
+            previewBuilding = false
             return
         }
-        var groups = Set<GCodePathGeometry.FeatureGroup>()
-        if previewShowWall { groups.insert(.wall) }
-        if previewShowInfill { groups.insert(.infill) }
-        if previewShowSupport { groups.insert(.support) }
-        if previewShowTravel { groups.insert(.travel) }
-        if previewShowOther { groups.insert(.other) }
-        // Clamp min ≤ max
-        let lo = min(previewMinZ, previewMaxZ)
-        let hi = max(previewMinZ, previewMaxZ)
-        let filtered = geo.filtered(
-            minZ: lo,
-            maxZ: hi,
-            enabledGroups: groups
-        )
-        #if canImport(UIKit)
-        gcodePathNode = filtered.makeNode(
-            color: UIColor(red: 0, green: 150 / 255, blue: 136 / 255, alpha: 1),
-            colorMode: previewColorMode
-        )
-        #endif
+        let lo = min(previewMinZ, previewMaxZ), hi = max(previewMinZ, previewMaxZ)
+        let hidden = previewHiddenFeatures, moves = previewEnabledMoves
+        let tools = previewHiddenTools, filaments = previewHiddenFilaments
+        let through = previewToolheadMove != nil ? Int.max : previewThroughMove
+        let mode = previewColorMode
+        let toolMarker = previewShowToolMarker, cog = previewShowCenterOfGravity
+        let lightweight = previewLightweight || geo.moveCount > 250_000
+        previewBuilding = true
+        let work = Task.detached(priority: .userInitiated) {
+            let filtered = geo.filtered(minZ: lo, maxZ: hi, hiddenFeatures: hidden,
+                enabledMoves: moves, hiddenTools: tools, hiddenFilaments: filaments, throughMove: through, cancelled: { Task.isCancelled })
+            return filtered.makeNode(color: .white, colorMode: mode, showToolMarker: toolMarker, showCenterOfGravity: cog, lightweight: lightweight, trackCursor: true, cursorSource: geo, cancelled: { Task.isCancelled })
+        }
+        previewBuildTask = work
+        Task { @MainActor [weak self] in
+            let node = await work.value
+            guard let self, self.previewGeneration == generation, !work.isCancelled else { return }
+            self.gcodePathNode = node
+            self.previewBuilding = false
+        }
     }
 
+    @Published private(set) var meshRevision = 0
+
     func refreshMesh() {
+        meshRevision += 1
+        invalidateSlice()
+        // Imported projects, undo, mesh edits and instance transforms can all
+        // change the world-space annotation geometry.
+        defer { refreshFilamentPaint() }
         #if ORCA_LINKED
         guard let s = session, hasModel else {
             mesh = nil
@@ -986,13 +1349,15 @@ final class OrcaEngine: ObservableObject {
             if let p = posPtr { orca_free(p) }
             if let i = idxPtr { orca_free(i) }
         }
-        guard rc == 0, let posPtr, let idxPtr, vcount > 0, icount > 0 else {
+        guard rc == 0, let positionData = posPtr, let indexData = idxPtr, vcount > 0, icount > 0 else {
             mesh = nil
             objectMeshes = []
             return
         }
-        let positions = Array(UnsafeBufferPointer(start: posPtr, count: vcount * 3))
-        let indices = Array(UnsafeBufferPointer(start: idxPtr, count: icount))
+        let positions = Array(UnsafeBufferPointer(start: positionData, count: vcount * 3))
+        let indices = Array(UnsafeBufferPointer(start: indexData, count: icount))
+        orca_free(posPtr); posPtr = nil
+        orca_free(idxPtr); idxPtr = nil
         var bmin = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
         var bmax = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
         for i in 0..<vcount {
@@ -1004,6 +1369,13 @@ final class OrcaEngine: ObservableObject {
 
         // Per-object meshes so the user can tap/select on the plate
         let n = Int(orca_session_object_count(s))
+        if n == 1, let mesh {
+            // Model::mesh() is this same object's world-space mesh. Swift's
+            // immutable array storage can serve framing and selection together.
+            objectMeshes = [mesh]
+            refreshObjectFilamentColors()
+            return
+        }
         var per: [MeshGeometry] = []
         per.reserveCapacity(max(n, 0))
         for oi in 0..<n {
@@ -1031,6 +1403,7 @@ final class OrcaEngine: ObservableObject {
             per.append(MeshGeometry(positions: pos, indices: ind, min: omin, max: omax))
         }
         objectMeshes = per
+        refreshObjectFilamentColors()
         #endif
     }
 
@@ -1092,6 +1465,7 @@ final class OrcaEngine: ObservableObject {
     }
 
     func setOption(_ key: String, value: String) {
+        guard requireIdleSession() else { return }
         #if ORCA_LINKED
         guard let s = session else { return }
         let rc = key.withCString { k in
@@ -1100,6 +1474,7 @@ final class OrcaEngine: ObservableObject {
             }
         }
         if rc == 0 {
+            invalidateSlice()
             lastMessage = "set \(key)=\(value)"
         } else {
             let err = orca_session_last_error(s).map { String(cString: $0) } ?? "unknown"
@@ -1117,6 +1492,7 @@ final class OrcaEngine: ObservableObject {
 
     /// index -1 = all objects; default uses selectedObjectIndex
     func translate(dx: Float, dy: Float, dz: Float = 0, index: Int? = nil, recordUndo: Bool = true) {
+        guard requireIdleSession() else { return }
         #if ORCA_LINKED
         guard let s = session, hasModel else { return }
         // Prefer explicit index from drag; fall back to selection. Never silently no-op on bad index.
@@ -1149,6 +1525,7 @@ final class OrcaEngine: ObservableObject {
 
     /// axis: 0=X, 1=Y, 2=Z
     func rotate(axis: Int, degrees: Float, index: Int? = nil) {
+        guard requireIdleSession() else { return }
         #if ORCA_LINKED
         guard let s = session, hasModel else { return }
         pushUndoSnapshot(label: "rotate")
@@ -1166,6 +1543,7 @@ final class OrcaEngine: ObservableObject {
 
     /// axis: 0=X, 1=Y, 2=Z
     func mirror(axis: Int, index: Int? = nil) {
+        guard requireIdleSession() else { return }
         #if ORCA_LINKED
         guard let s = session, hasModel else { return }
         pushUndoSnapshot(label: "mirror")
@@ -1181,7 +1559,45 @@ final class OrcaEngine: ObservableObject {
         #endif
     }
 
+    func scale(x: Float, y: Float, z: Float, index: Int? = nil) {
+        guard requireIdleSession() else { return }
+        #if ORCA_LINKED
+        guard let s = session, hasModel, [x, y, z].allSatisfy({ $0.isFinite && $0 > 0 }) else { return }
+        pushUndoSnapshot(label: "scale")
+        let rc = orca_session_scale_object_axes(s, Int32(index ?? selectedObjectIndex), x, y, z)
+        if rc == 0 {
+            refreshMesh(); refreshBounds(); refreshModelInfo()
+            lastMessage = "Scaled selection"
+        } else {
+            lastMessage = orca_session_last_error(s).map { String(cString: $0) } ?? "Scale failed"
+        }
+        #endif
+    }
+
+    @discardableResult
+    func addPrimitive(kind: Int, x: Float, y: Float, z: Float) -> Bool {
+        guard requireIdleSession() else { return false }
+        #if ORCA_LINKED
+        guard let s = session else { return false }
+        pushUndoSnapshot(label: "add-primitive")
+        let index = orca_session_add_primitive(s, Int32(kind), x, y, z)
+        guard index >= 0 else {
+            lastMessage = orca_session_last_error(s).map { String(cString: $0) } ?? "Invalid primitive dimensions"
+            return false
+        }
+        hasModel = true
+        selectedObjectIndex = Int(index)
+        explodeFactor = 0
+        refreshObjectList(); refreshMesh(); refreshBounds(); refreshModelInfo()
+        lastMessage = "Added primitive"
+        return true
+        #else
+        return false
+        #endif
+    }
+
     func scale(factor: Float, index: Int? = nil) {
+        guard requireIdleSession() else { return }
         #if ORCA_LINKED
         guard let s = session, hasModel else { return }
         pushUndoSnapshot(label: "scale")
@@ -1197,8 +1613,10 @@ final class OrcaEngine: ObservableObject {
     }
 
     func scaleToFit(marginMm: Float = 5, index: Int? = nil) {
+        guard requireIdleSession() else { return }
         #if ORCA_LINKED
         guard let s = session, hasModel else { return }
+        pushUndoSnapshot(label: "scale-to-fit")
         let idx = Int32(index ?? selectedObjectIndex)
         let rc = orca_session_scale_to_fit(s, idx, marginMm)
         if rc == 0 {
@@ -1211,8 +1629,10 @@ final class OrcaEngine: ObservableObject {
     }
 
     func autoOrient(index: Int? = nil) {
+        guard requireIdleSession() else { return }
         #if ORCA_LINKED
         guard let s = session, hasModel else { return }
+        pushUndoSnapshot(label: "auto-orient")
         let idx = Int32(index ?? selectedObjectIndex)
         let rc = orca_session_orient_object(s, idx)
         if rc == 0 {
@@ -1225,6 +1645,7 @@ final class OrcaEngine: ObservableObject {
     }
 
     func centerOnBed() {
+        guard requireIdleSession() else { return }
         #if ORCA_LINKED
         guard let s = session, hasModel else { return }
         if orca_session_center_on_bed(s) == 0 {
@@ -1235,6 +1656,7 @@ final class OrcaEngine: ObservableObject {
     }
 
     func arrange() {
+        guard requireIdleSession() else { return }
         #if ORCA_LINKED
         guard let s = session, hasModel else { return }
         if orca_session_arrange(s) == 0 {
@@ -1307,19 +1729,225 @@ final class OrcaEngine: ObservableObject {
         set { UserDefaults.standard.set(newValue, forKey: prefsRegionKey) }
     }
 
-    var extruderCount: Int {
+    var maximumProjectFilaments: Int {
         #if ORCA_LINKED
-        guard let s = session else { return 1 }
-        return max(1, Int(orca_session_extruder_count(s)))
+        return Int(orca_max_project_filaments())
         #else
-        return 1
+        return 64
         #endif
     }
 
+    var maximumPaintFilaments: Int {
+        #if ORCA_LINKED
+        return Int(orca_max_paint_filaments())
+        #else
+        return 32
+        #endif
+    }
+
+    private static func filamentColors(from text: String?) -> [String] {
+        let colors = (text ?? "#009688").split(separator: ";").map(String.init)
+        return colors.isEmpty ? ["#009688"] : colors
+    }
+
+    var projectFilamentColors: [String] { Self.filamentColors(from: getOption("filament_colour")) }
+
+    @discardableResult
+    func setProjectFilamentColor(_ index: Int, hex: String) -> Bool {
+        var colors = projectFilamentColors
+        guard colors.indices.contains(index) else { return false }
+        colors[index] = hex
+        let ok = applyConfigOption(key: "filament_colour", value: colors.joined(separator: ";"))
+        if ok { refreshObjectFilamentColors() }
+        return ok
+    }
+
+    @discardableResult
+    func addProjectFilament() -> Bool {
+        #if ORCA_LINKED
+        guard let session, !sessionBusy, !sliceRunning, !presetsLoading else { return false }
+        let result = orca_session_add_project_filament(session)
+        lastMessage = result == 0 ? "Filament added" :
+            (orca_session_last_error(session).map { String(cString: $0) } ?? "Cannot add filament")
+        if result == 0 { refreshObjectFilamentColors(); invalidateSlice() }
+        return result == 0
+        #else
+        return false
+        #endif
+    }
+
+    @Published private(set) var objectFilamentColors: [UIColor] = []
+    @Published private(set) var projectDisplayColors: [UIColor] = []
+
+    private func refreshObjectFilamentColors() {
+        let colors = Self.filamentColors(from: readOption("filament_colour"))
+        projectDisplayColors = colors.map(FilamentColor.uiColor)
+        filamentPaintRevision += 1
+        objectFilamentColors = objectNames.indices.map { index in
+            let slot = max(0, (Int(readObjectOption(index: index, key: "extruder") ?? "1") ?? 1) - 1)
+            return FilamentColor.uiColor(colors[min(slot, colors.count - 1)])
+        }
+    }
+
+    var physicalFilamentIndices: [Int] {
+        let flags = (getOption("filament_is_mixed") ?? "").split(separator: ",").map(String.init)
+        return projectFilamentColors.indices.filter { $0 >= flags.count || flags[$0] != "1" }
+    }
+
+    struct MixedGradientEdit {
+        let enabled: Bool
+        let range: String
+        let curve: String
+        let perPart: Bool
+    }
+
+    struct GradientAnchor: Decodable, Equatable {
+        var x: Double
+        var y: Double
+        var incoming: Double?
+        var outgoing: Double?
+    }
+
+    struct GradientCurve: Decodable {
+        let points: [GradientAnchor]
+        let samples: [Double]
+    }
+
+    func gradientCurve(_ encoded: String) -> GradientCurve? {
+        #if ORCA_LINKED
+        guard let raw = encoded.withCString({ orca_gradient_curve_json($0) }) else { return nil }
+        return try? JSONDecoder().decode(GradientCurve.self, from: Data(String(cString: raw).utf8))
+        #else
+        return nil
+        #endif
+    }
+
+    func gradientCurveString(_ points: [GradientAnchor]) -> String? {
+        #if ORCA_LINKED
+        let anchors = points.map { orca_gradient_anchor_t(x: $0.x, y: $0.y,
+            m_in: $0.incoming ?? .nan, m_out: $0.outgoing ?? .nan) }
+        guard let raw = anchors.withUnsafeBufferPointer({ orca_gradient_curve_encode($0.baseAddress, $0.count) }) else { return nil }
+        return String(cString: raw)
+        #else
+        return nil
+        #endif
+    }
+
+    func gradientCurveSample(_ encoded: String, at position: Double) -> Double? {
+        #if ORCA_LINKED
+        let value = encoded.withCString { orca_gradient_curve_sample($0, position) }
+        return value.isFinite ? value : nil
+        #else
+        return nil
+        #endif
+    }
+
+    var mixedGradientBounds: ClosedRange<Double> {
+        #if ORCA_LINKED
+        var lower = 0.1, upper = 0.9
+        orca_mixed_gradient_limits(&lower, &upper)
+        return lower...upper
+        #else
+        return 0.1...0.9
+        #endif
+    }
+
+    func addMixedFilament(components: [Int], ratios: [Int], gradient: Bool, reverse: Bool, perPart: Bool,
+                          gradientEdit: MixedGradientEdit? = nil) -> Bool {
+        #if ORCA_LINKED
+        guard let session, !sessionBusy, !sliceRunning, !presetsLoading, components.count == ratios.count else { return false }
+        let ids = components.map { Int32($0 + 1) }, weights = ratios.map(Int32.init)
+        let result = ids.withUnsafeBufferPointer { ids in
+            weights.withUnsafeBufferPointer { weights in
+                if let gradientEdit {
+                    return gradientEdit.range.withCString { range in gradientEdit.curve.withCString { curve in
+                        orca_session_add_mixed_gradient(session, ids.baseAddress, weights.baseAddress, ids.count,
+                            gradientEdit.enabled ? 1 : 0, range, curve, gradientEdit.perPart ? 1 : 0)
+                    } }
+                }
+                return orca_session_add_mixed_filament(session, ids.baseAddress, weights.baseAddress, ids.count,
+                    gradient ? 1 : 0, reverse ? 1 : 0, perPart ? 1 : 0)
+            }
+        }
+        lastMessage = result == 0 ? "Mixed filament added" :
+            (orca_session_last_error(session).map { String(cString: $0) } ?? "Cannot add mixed filament")
+        if result == 0 { refreshObjectFilamentColors(); invalidateSlice() }
+        return result == 0
+        #else
+        return false
+        #endif
+    }
+
+    struct MixedFilamentInfo: Decodable {
+        let components: [Int]
+        let ratios: [Double]
+        let gradient: Bool
+        let range: String
+        let curve: String
+        let perPart: Bool
+    }
+
+    func mixedFilamentInfo(_ slot: Int) -> MixedFilamentInfo? {
+        #if ORCA_LINKED
+        guard let session, !sessionBusy, !sliceRunning, !presetsLoading else { return nil }
+        guard let text = orca_session_mixed_filament_json(session, Int32(slot)) else {
+            lastMessage = orca_session_last_error(session).map { String(cString: $0) } ?? "Cannot read mixed filament"
+            return nil
+        }
+        do { return try JSONDecoder().decode(MixedFilamentInfo.self, from: Data(String(cString: text).utf8)) }
+        catch { lastMessage = error.localizedDescription; return nil }
+        #else
+        return nil
+        #endif
+    }
+
+    func updateMixedFilament(_ slot: Int, components: [Int]? = nil, ratios: [Int], gradientMode: Int, perPart: Bool,
+                             gradientEdit: MixedGradientEdit? = nil) -> Bool {
+        #if ORCA_LINKED
+        guard let session, !sessionBusy, !sliceRunning, !presetsLoading else { return false }
+        let weights = ratios.map(Int32.init)
+        let result = weights.withUnsafeBufferPointer { weights in
+            if let gradientEdit {
+                let ids = (components ?? []).map { Int32($0 + 1) }
+                return ids.withUnsafeBufferPointer { ids in
+                    gradientEdit.range.withCString { range in gradientEdit.curve.withCString { curve in
+                        orca_session_edit_mixed_gradient(session, Int32(slot), components == nil ? nil : ids.baseAddress,
+                            ids.count, weights.baseAddress, weights.count, gradientEdit.enabled ? 1 : 0,
+                            range, curve, gradientEdit.perPart ? 1 : 0)
+                    } }
+                }
+            }
+            if let components {
+                let ids = components.map { Int32($0 + 1) }
+                return ids.withUnsafeBufferPointer {
+                    orca_session_replace_mixed_components(session, Int32(slot), $0.baseAddress, $0.count,
+                        weights.baseAddress, weights.count, Int32(gradientMode), perPart ? 1 : 0)
+                }
+            }
+            return orca_session_update_mixed_filament(session, Int32(slot), weights.baseAddress, weights.count,
+                Int32(gradientMode), perPart ? 1 : 0)
+        }
+        if result == 0 {
+            refreshObjectFilamentColors(); invalidateSlice()
+            lastMessage = "Updated mixed filament \(slot + 1)"
+        } else { lastMessage = orca_session_last_error(session).map { String(cString: $0) } ?? "Cannot update mixed filament" }
+        return result == 0
+        #else
+        return false
+        #endif
+    }
+
+    var extruderCount: Int {
+        max(1, (getOption("nozzle_diameter") ?? "0.4").split(separator: ",").count)
+    }
+
     func filamentSlotName(_ slot: Int) -> String {
+        guard !sessionBusy, !sliceRunning, !presetsLoading else { return filamentNameReadCache[slot] ?? "" }
         #if ORCA_LINKED
         guard let s = session, let c = orca_session_filament_slot_name(s, Int32(slot)) else { return "" }
-        return String(cString: c)
+        let name = String(cString: c)
+        filamentNameReadCache[slot] = name
+        return name
         #else
         return ""
         #endif
@@ -1328,10 +1956,13 @@ final class OrcaEngine: ObservableObject {
     @discardableResult
     func setFilamentSlot(_ slot: Int, name: String) -> Bool {
         #if ORCA_LINKED
-        guard let s = session else { return false }
+        guard let s = session, !sessionBusy, !sliceRunning, !presetsLoading else { return false }
         let rc = name.withCString { orca_session_set_filament_slot(s, Int32(slot), $0) }
         if rc == 0 {
             if slot == 0 { selectedFilament = name }
+            invalidateSlice()
+            refreshPresetLists()
+            if slot == 0 { persistSelection() }
             lastMessage = "Slot \(slot + 1): \(name)"
             return true
         }
@@ -1354,80 +1985,60 @@ final class OrcaEngine: ObservableObject {
         UserDefaults.standard.set(list, forKey: Self.recentKey)
     }
 
-    func duplicateObject(at index: Int) {
-        #if ORCA_LINKED
-        guard let s = session, hasModel, index >= 0 else { return }
-        let rc = orca_session_duplicate_object(s, Int32(index))
-        if rc >= 0 {
-            hasModel = true
-            refreshObjectList()
-            selectedObjectIndex = Int(rc)
-            refreshMesh(); refreshBounds(); refreshModelInfo()
-            lastMessage = "Duplicated object → index \(rc)"
-        } else {
-            lastMessage = orca_session_last_error(s).map { String(cString: $0) } ?? "duplicate failed"
-        }
-        #endif
+    @discardableResult
+    func duplicateObject(at index: Int) async -> Bool {
+        guard requireIdleSession() else { return false }
+        return await editMesh(.duplicate(index))
     }
 
-    func duplicateSelected() {
-        let idx = selectedObjectIndex >= 0 ? selectedObjectIndex : 0
-        duplicateObject(at: idx)
+    @discardableResult
+    func duplicateSelected() async -> Bool {
+        guard requireIdleSession() else { return false }
+        return await editMesh(.duplicate(selectedObjectIndex >= 0 ? selectedObjectIndex : nil))
     }
 
-    func deleteObject(at index: Int) {
-        #if ORCA_LINKED
-        guard let s = session, hasModel, index >= 0 else { return }
-        let rc = orca_session_delete_object(s, Int32(index))
-        if rc == 0 {
-            let n = Int(orca_session_object_count(s))
-            hasModel = n > 0
-            if !hasModel {
-                mesh = nil
-                modelName = nil
-                objectNames = []
-                objectCount = 0
-                modelVolumeMm3 = 0
-                selectedObjectIndex = -1
-                lastMessage = "Plate empty"
-            } else {
-                if selectedObjectIndex >= n {
-                    selectedObjectIndex = n - 1
-                }
-                refreshObjectList()
-                refreshMesh(); refreshBounds(); refreshModelInfo()
-                lastMessage = "Deleted object \(index)"
-            }
-        } else {
-            lastMessage = orca_session_last_error(s).map { String(cString: $0) } ?? "delete failed"
-        }
-        #endif
+    @discardableResult
+    func deleteObject(at index: Int) async -> Bool {
+        guard requireIdleSession() else { return false }
+        return await editMesh(.delete(index))
     }
 
-    func deleteSelected() {
-        let idx = selectedObjectIndex >= 0 ? selectedObjectIndex : 0
-        deleteObject(at: idx)
+    @discardableResult
+    func deleteSelected() async -> Bool {
+        guard requireIdleSession() else { return false }
+        if selectedObjectIndex >= 0 { return await editMesh(.delete(selectedObjectIndex)) }
+        return await clearPlateWithUndo()
+    }
+
+    @discardableResult
+    func clearPlateWithUndo() async -> Bool {
+        guard requireIdleSession() else { return false }
+        if !hasModel { return true }
+        return await editMesh(.clearPlate)
     }
 
     func clearPlate() {
+        guard requireIdleSession() else { return }
         #if ORCA_LINKED
         guard let s = session else { return }
         _ = orca_session_clear_model(s)
         hasModel = false
-        mesh = nil
         modelName = nil
         objectNames = []
         objectCount = 0
+        objectInstanceCounts = []
         modelVolumeMm3 = 0
-        gcodeURL = nil
-        gcodePathNode = nil
-        gcodeGeometry = nil
+        selectedObjectIndex = -1
+        refreshMesh()
+        clearPaintOverlay()
+        refreshBounds()
         lastMessage = "Plate cleared"
         #endif
     }
 
     /// Common bed sizes (mm) — prefers orca_session_set_printable_area, falls back to options
     func setBedSize(width: Float, depth: Float, height: Float = 250) {
+        guard requireIdleSession() else { return }
         #if ORCA_LINKED
         guard let s = session else { return }
         let rc = orca_session_set_printable_area(s, width, depth, height)
@@ -1437,7 +2048,8 @@ final class OrcaEngine: ObservableObject {
             _ = setOptionRaw("printable_area", area)
             _ = setOptionRaw("printable_height", String(format: "%.0f", height))
         }
-        refreshBedSize()
+        invalidateSlice()
+        readBedSize()
         lastMessage = String(
             format: "Bed %.0f×%.0f×%.0f mm",
             bedSize.x, bedSize.y, bedHeight
@@ -1446,14 +2058,20 @@ final class OrcaEngine: ObservableObject {
     }
 
     func getOption(_ key: String) -> String? {
+        guard !sessionBusy, !sliceRunning, !presetsLoading else { return optionReadCache[key] }
+        return readOption(key)
+    }
+
+    // Call only while idle or after this owner's native task has completed.
+    private func readOption(_ key: String) -> String? {
         #if ORCA_LINKED
         guard let s = session else { return nil }
-        var buf = [CChar](repeating: 0, count: 4096)
-        let rc = key.withCString { k in
-            orca_session_get_option(s, k, &buf, buf.count)
+        let value = key.withCString { k in
+            NativeOptionReader.read { buffer, count in orca_session_get_option(s, k, buffer, count) }
         }
-        guard rc == 0 else { return nil }
-        return String(cString: buf)
+        guard let value else { return nil }
+        optionReadCache[key] = value
+        return value
         #else
         return nil
         #endif
@@ -1461,9 +2079,22 @@ final class OrcaEngine: ObservableObject {
 
     // MARK: - Full settings browser (print_config_def + session values)
 
+    func postProcessingScripts() -> [String] {
+        guard !sessionBusy, !sliceRunning, !presetsLoading else { return [] }
+        #if ORCA_LINKED
+        guard let session else { return [] }
+        return (0..<orca_session_post_process_count(session)).compactMap { index in
+            orca_session_post_process_script(session, index).map { String(cString: $0) }
+        }
+        #else
+        return []
+        #endif
+    }
+
     /// Snapshot of DynamicPrintConfig keys for the searchable browser.
     /// Enum choice lists are loaded lazily via `enumChoices(for:)` to save RAM.
     func allConfigOptions() -> [ConfigOptionEntry] {
+        guard !sessionBusy, !sliceRunning, !presetsLoading else { return [] }
         #if ORCA_LINKED
         guard let s = session else { return [] }
         let n = Int(orca_session_option_count(s))
@@ -1473,6 +2104,9 @@ final class OrcaEngine: ObservableObject {
         for i in 0..<n {
             guard let ck = orca_session_option_key(s, Int32(i)) else { continue }
             let key = String(cString: ck)
+            var scope: Int32 = -1
+            let mode = key.withCString { orca_session_option_presentation($0, &scope) }
+            guard mode >= 0, mode <= 2, scope >= 0 else { continue }
             var type: Int32 = 6
             var labelBuf = [CChar](repeating: 0, count: 256)
             var catBuf = [CChar](repeating: 0, count: 128)
@@ -1492,12 +2126,15 @@ final class OrcaEngine: ObservableObject {
             // Defer enum choice materialization — hundreds of keys × N labels was costly
             out.append(ConfigOptionEntry(
                 key: key,
+                scope: Int(scope),
+                mode: Int(mode),
                 label: label.isEmpty ? key : label,
                 category: category,
                 sidetext: sidetext,
                 type: ConfigOptionEntry.Kind(rawValue: Int(type)) ?? .other,
                 value: value,
-                enumChoices: []
+                enumChoices: [],
+                supportsObjectOverride: key.withCString { orca_object_option_supported($0) == 1 }
             ))
         }
         return out
@@ -1506,8 +2143,18 @@ final class OrcaEngine: ObservableObject {
         #endif
     }
 
+    /// Read help lazily instead of retaining every desktop tooltip in the catalog.
+    func optionHelp(_ key: String) -> String? {
+        #if ORCA_LINKED
+        return key.withCString { orca_option_tooltip($0).map { String(cString: $0) } }
+        #else
+        return nil
+        #endif
+    }
+
     /// Load enum serialize keys for one option (call when user expands an enum row).
     func enumChoices(for key: String) -> [ProcessEnumChoice] {
+        guard !sessionBusy, !sliceRunning, !presetsLoading else { return [] }
         #if ORCA_LINKED
         guard let s = session else { return [] }
         let ec = Int(key.withCString { orca_session_option_enum_count(s, $0) })
@@ -1532,6 +2179,7 @@ final class OrcaEngine: ObservableObject {
     /// Apply option; returns true on success. Updates lastMessage with engine error text.
     @discardableResult
     func applyConfigOption(key: String, value: String) -> Bool {
+        guard requireIdleSession() else { return false }
         #if ORCA_LINKED
         guard let s = session else {
             lastMessage = "No session"
@@ -1543,6 +2191,7 @@ final class OrcaEngine: ObservableObject {
             }
         }
         if rc == 0 {
+            invalidateSlice()
             lastMessage = "set \(key)=\(value)"
             return true
         }
@@ -1560,6 +2209,7 @@ final class OrcaEngine: ObservableObject {
     /// Set calibration sweep for next slice. mode matches CalibMode enum.
     @discardableResult
     func setCalib(mode: Int, start: Double, end: Double, step: Double) -> Bool {
+        guard requireIdleSession() else { return false }
         #if ORCA_LINKED
         guard let s = session else {
             lastMessage = "No session"
@@ -1571,6 +2221,7 @@ final class OrcaEngine: ObservableObject {
             lastMessage = "set_calib rc=\(rc): \(err)"
             return false
         }
+        invalidateSlice()
         calibMode = mode
         calibSummary = Self.calibLabel(mode: mode, start: start, end: end, step: step)
         lastMessage = "Calibration: \(calibSummary)"
@@ -1583,9 +2234,11 @@ final class OrcaEngine: ObservableObject {
 
     @discardableResult
     func clearCalib() -> Bool {
+        guard requireIdleSession() else { return false }
         #if ORCA_LINKED
         guard let s = session else { return false }
         _ = orca_session_clear_calib(s)
+        invalidateSlice()
         calibMode = 0
         calibSummary = ""
         lastMessage = "Calibration cleared"
@@ -1613,6 +2266,7 @@ final class OrcaEngine: ObservableObject {
     /// Load official bundled calib mesh under Resources/calib/…
     @discardableResult
     func loadBundledCalib(relativePath: String) -> Bool {
+        guard requireIdleSession() else { return false }
         // Try folder-reference layout (Resources/calib/…) then flat lookup
         let candidates: [URL?] = [
             Bundle.main.resourceURL?.appendingPathComponent("calib").appendingPathComponent(relativePath),
@@ -1692,11 +2346,37 @@ final class OrcaEngine: ObservableObject {
     @Published var slicePercent: Int = 0
     @Published var slicePhase: String = ""
 
+    @MainActor
+    func cancelSlice() {
+        #if ORCA_LINKED
+        guard sliceRunning, let s = session else { return }
+        postProcessingTask?.cancel()
+        orca_session_cancel_slice(s)
+        slicePhase = "Cancelling…"
+        #endif
+    }
+
+    @Published private(set) var sliceRunning = false
+    private var postProcessingTask: Task<Void, Error>?
+
+    @MainActor
     func slice() async -> String {
         #if ORCA_LINKED
         guard let s = session else { return "No session" }
+        guard !sliceRunning else { return "A slice is already running" }
+        guard !presetsLoading else { return "Wait for printer profiles to finish loading" }
+        guard !sessionBusy else { return "Wait for the current model operation to finish" }
+        let defaultWidth: Float = {
+            if let width = getOptionFirst("line_width").flatMap(Float.init), width > 0.05 { return width }
+            return (getOptionFirst("nozzle_diameter").flatMap(Float.init) ?? 0.4) * 1.1
+        }()
+        let densities = (getOption("filament_density") ?? "1.24").split(separator: ",").compactMap { Float($0.trimmingCharacters(in: .whitespaces)) }
+        sliceRunning = true
+        defer { sliceRunning = false }
         let out = FileManager.default.temporaryDirectory
-            .appendingPathComponent("plate_1.gcode")
+            .appendingPathComponent("plate_\(UUID().uuidString).gcode")
+        // A failed attempt must never expose the previous job as its result.
+        invalidateSlice()
         await MainActor.run {
             self.slicePercent = 0
             self.slicePhase = "Starting"
@@ -1729,83 +2409,36 @@ final class OrcaEngine: ObservableObject {
             return outPath.withCString { orca_session_slice_to_gcode(sess, $0) }
         }.value
         if rc != 0 {
+            try? FileManager.default.removeItem(at: out)
+            slicePhase = rc == -7 ? "Cancelled" : "Failed"
             let err = orca_session_last_error(s).map { String(cString: $0) } ?? "slice failed"
             return "slice rc=\(rc): \(err)"
         }
-        await MainActor.run { [sessionBits] in
-            let sess = OpaquePointer(bitPattern: sessionBits)!
-            self.gcodeURL = out
-            self.slicePercent = 100
-            self.slicePhase = "Done"
-            var t: Float = 0, fil: Float = 0
-            var layers: Int32 = 0
-            if orca_session_last_slice_stats(sess, &t, &fil, &layers) == 0 {
-                self.lastSliceTimeSec = t
-                self.lastSliceFilamentMm3 = fil
-                self.lastSliceLayers = Int(layers)
-                let mins = Int(t) / 60
-                let secs = Int(t) % 60
-                let grams = fil * 0.00124 // approx PLA density g/mm³
-                self.lastSliceStatsText = String(
-                    format: "~%dm %02ds · %.1f g filament · %d layers",
-                    mins, secs, grams, Int(layers)
-                )
-            } else {
-                self.lastSliceStatsText = ""
-            }
-            // Extended analysis (layer times + role usage)
-            var initT: Float = 0, avgT: Float = 0, sup: Float = 0, wipe: Float = 0
-            var t2: Float = 0, fil2: Float = 0
-            var layers2: Int32 = 0
-            if orca_session_last_slice_analysis(sess, &t2, &initT, &avgT, &fil2, &sup, &wipe, &layers2) == 0 {
-                self.lastInitialLayerTimeSec = initT
-                self.lastAvgLayerTimeSec = avgT
-                self.lastSupportMm3 = sup
-                self.lastWipeTowerMm3 = wipe
-                if avgT > 0 {
-                    let am = Int(avgT) / 60
-                    let as_ = Int(avgT) % 60
-                    let im = Int(initT) / 60
-                    let is_ = Int(initT) % 60
-                    self.lastAvgLayerTimeText = String(
-                        format: "avg layer ~%dm %02ds · 1st ~%dm %02ds",
-                        am, as_, im, is_
-                    )
-                } else {
-                    self.lastAvgLayerTimeText = ""
-                }
-            } else {
-                self.lastAvgLayerTimeText = ""
-            }
-            let rc = Int(orca_session_filament_role_count(sess))
-            var roles: [(name: String, meters: Float, grams: Float)] = []
-            roles.reserveCapacity(rc)
-            for i in 0..<rc {
-                guard let c = orca_session_filament_role_name(sess, Int32(i)) else { continue }
-                let name = String(cString: c)
-                let m = orca_session_filament_role_meters(sess, Int32(i))
-                let g = orca_session_filament_role_grams(sess, Int32(i))
-                roles.append((name, m, g))
-            }
-            roles.sort { $0.grams > $1.grams }
-            self.filamentByRole = roles
-            // Default ribbon width from official line_width / nozzle_diameter
-            var defW: Float = 0.45
-            if let lw = self.getOptionFirst("line_width").flatMap(Float.init), lw > 0.05 {
-                defW = lw
-            } else if let nd = self.getOptionFirst("nozzle_diameter").flatMap(Float.init), nd > 0.05 {
-                defW = nd * 1.1
-            }
-            // Cap path points for mobile RAM (ribbons are heavier than lines)
-            if let path = GCodePathGeometry.parse(url: out, maxPoints: 60_000, defaultWidth: defW) {
-                self.gcodeGeometry = path
-                self.gcodeZMin = path.zMin
-                self.gcodeZMax = max(path.zMax, path.zMin + 0.2)
-                self.previewMinZ = self.gcodeZMin
-                self.previewMaxZ = self.gcodeZMax
-                self.applyPreviewLayer()
-            }
+        let commands = (0..<orca_session_post_process_count(s)).compactMap { index in
+            orca_session_post_process_script(s, index).map { String(cString: $0) }
         }
+        do {
+            self.slicePhase = "Post-processing"
+            let processing = Task.detached { try NativePostProcessing.run(file: out, commands: commands) }
+            postProcessingTask = processing
+            defer { postProcessingTask = nil }
+            try await processing.value
+            if processing.isCancelled { throw CancellationError() }
+        } catch is CancellationError {
+            try? FileManager.default.removeItem(at: out)
+            self.slicePhase = "Cancelled"
+            return "Cancelled"
+        } catch {
+            try? FileManager.default.removeItem(at: out)
+            self.slicePhase = "Post-processing failed"
+            return error.localizedDescription
+        }
+        slicePhase = "Preparing preview"
+        let preview = await Task.detached(priority: .userInitiated) {
+            Self.processedPreview(sessionBits: sessionBits, defaultWidth: defaultWidth, densities: densities)
+        }.value
+        publishPreview(preview, url: out)
+
         let stats = await MainActor.run { self.lastSliceStatsText }
         if stats.isEmpty {
             return "G-code written: \(out.lastPathComponent) (Print::export_gcode)"
@@ -1816,9 +2449,222 @@ final class OrcaEngine: ObservableObject {
         #endif
     }
 
+    private typealias ProcessedPreview = (geometry: GCodePathGeometry, layers: [Float], reduced: Bool, bed: SIMD2<Float>?)
+    private struct PreviewMetadata: Decodable {
+        let bed_width: Float?
+        let bed_depth: Float?
+        let filament_densities: [Float]
+    }
+
+    @MainActor
+    func loadGCode(url: URL) async -> Bool {
+        guard !sessionBusy, !presetsLoading, !sliceRunning else { return false }
+        sessionBusy = true
+        sessionBusyMessage = "Reading G-code…"
+        defer { sessionBusy = false }
+        #if ORCA_LINKED
+        guard let session else { lastMessage = "No session"; return false }
+        let bits = UInt(bitPattern: session)
+        let result = await Task.detached(priority: .userInitiated) {
+            let session = OpaquePointer(bitPattern: bits)!
+            let rc = url.path.withCString { orca_session_load_gcode(session, $0) }
+            let preview = rc == 0 ? Self.processedPreview(sessionBits: bits, defaultWidth: 0.45, densities: []) : nil
+            return (rc, preview)
+        }.value
+        guard result.0 == 0, let preview = result.1 else {
+            lastMessage = orca_session_last_error(session).map { String(cString: $0) } ?? "G-code preview could not be loaded"
+            return false
+        }
+        previewFromFile = true
+        previewShowShell = false
+        previewBedSize = preview.bed
+        publishPreview(preview, url: url)
+        lastMessage = "Opened G-code \(url.lastPathComponent)"
+        return true
+        #else
+        lastMessage = "Engine not linked"
+        return false
+        #endif
+    }
+
+    #if ORCA_LINKED
+    @MainActor
+    private func publishPreview(_ preview: ProcessedPreview?, url: URL) {
+        guard let sess = session else { return }
+        gcodeURL = url
+        slicePercent = 100
+        slicePhase = "Done"
+        var t: Float = 0, fil: Float = 0
+        var layers: Int32 = 0
+        if orca_session_last_slice_stats(sess, &t, &fil, &layers) == 0 {
+            self.lastSliceTimeSec = t
+            self.lastSliceFilamentMm3 = fil
+            self.lastSliceLayers = Int(layers)
+            let mins = Int(t) / 60
+            let secs = Int(t) % 60
+            let grams = fil * 0.00124 // approx PLA density g/mm³
+            self.lastSliceStatsText = String(
+                format: "~%dm %02ds · %.1f g filament · %d layers",
+                mins, secs, grams, Int(layers)
+            )
+        } else {
+            self.lastSliceStatsText = ""
+        }
+        // Extended analysis (layer times + role usage)
+        var initT: Float = 0, avgT: Float = 0, sup: Float = 0, wipe: Float = 0
+        var t2: Float = 0, fil2: Float = 0
+        var layers2: Int32 = 0
+        if orca_session_last_slice_analysis(sess, &t2, &initT, &avgT, &fil2, &sup, &wipe, &layers2) == 0 {
+            self.lastInitialLayerTimeSec = initT
+            self.lastAvgLayerTimeSec = avgT
+            self.lastSupportMm3 = sup
+            self.lastWipeTowerMm3 = wipe
+            if avgT > 0 {
+                let am = Int(avgT) / 60
+                let as_ = Int(avgT) % 60
+                let im = Int(initT) / 60
+                let is_ = Int(initT) % 60
+                self.lastAvgLayerTimeText = String(
+                    format: "avg layer ~%dm %02ds · 1st ~%dm %02ds",
+                    am, as_, im, is_
+                )
+            } else {
+                self.lastAvgLayerTimeText = ""
+            }
+        } else {
+            self.lastAvgLayerTimeText = ""
+        }
+        let rc = Int(orca_session_filament_role_count(sess))
+        var roles: [(name: String, meters: Float, grams: Float)] = []
+        roles.reserveCapacity(rc)
+        for i in 0..<rc {
+            guard let c = orca_session_filament_role_name(sess, Int32(i)) else { continue }
+            let name = String(cString: c)
+            let m = orca_session_filament_role_meters(sess, Int32(i))
+            let g = orca_session_filament_role_grams(sess, Int32(i))
+            roles.append((name, m, g))
+        }
+        roles.sort { $0.grams > $1.grams }
+        self.filamentByRole = roles
+        if let preview {
+            // Filters belong to this job, not a previously opened project.
+            self.previewHiddenFeatures = []
+            self.previewHiddenTools = []
+            self.previewHiddenFilaments = []
+            self.previewEnabledMoves = [.extrude]
+            self.previewThroughMove = .max
+            self.previewToolheadPosition = nil
+            self.previewIsReduced = preview.reduced
+            self.previewLayerHeights = preview.layers
+            self.gcodeGeometry = preview.geometry
+            self.gcodeZMin = preview.geometry.zMin
+            self.gcodeZMax = max(preview.geometry.zMax, preview.geometry.zMin)
+            self.previewMinZ = self.gcodeZMin
+            self.previewMaxZ = self.gcodeZMax
+            self.applyPreviewLayer()
+            if ProcessInfo.processInfo.arguments.contains("--test-preview-memory-warning") {
+                handleMemoryWarning()
+                handleMemoryWarning() // Repeated warnings must not restart the build.
+            }
+        } else {
+            self.slicePhase = "G-code exported; preview unavailable"
+        }
+    }
+
+    private static func processedPreview(sessionBits: UInt, defaultWidth: Float, densities: [Float]) ->
+        ProcessedPreview? {
+        guard let session = OpaquePointer(bitPattern: sessionBits) else { return nil }
+        let metadata = orca_session_preview_metadata_json(session).flatMap { text -> PreviewMetadata? in
+            let data = Data(String(cString: text).utf8)
+            return try? JSONDecoder().decode(PreviewMetadata.self, from: data)
+        }
+        let fileDensities = metadata?.filament_densities ?? []
+        let filamentDensities = fileDensities.isEmpty ? densities : fileDensities
+        var segments: UnsafePointer<orca_preview_segment_t>?
+        var count = 0
+        var totalCount = 0
+        if let owner = orca_session_take_preview(session, &segments, &count, &totalCount) {
+            defer { orca_preview_buffer_destroy(owner) }
+            guard let segments else { return nil }
+            let defW = defaultWidth
+            let records = UnsafeBufferPointer(start: segments, count: count)
+            var paths: [GCodePathGeometry.Segment] = []
+            paths.reserveCapacity(count)
+            var roleLabels: [Int32: String] = [:]
+            var layerZ: [UInt32: Float] = [:]
+            var minZ = Float.greatestFiniteMagnitude, maxZ = -Float.greatestFiniteMagnitude
+            var minFeed = Float.greatestFiniteMagnitude, maxFeed: Float = 0
+            var minWidth = Float.greatestFiniteMagnitude, maxWidth: Float = 0
+            var minHeight = Float.greatestFiniteMagnitude, maxHeight: Float = 0
+            for (ordinal, move) in records.enumerated() {
+                let start = SCNVector3(move.start_x, move.start_y, move.start_z)
+                let end = SCNVector3(move.end_x, move.end_y, move.end_z)
+                let kind = GCodePathGeometry.MoveKind(rawValue: Int(move.move_type)) ?? .travel
+                if kind == .extrude && roleLabels[move.role] == nil {
+                    roleLabels[move.role] = String(cString: orca_preview_role_name(move.role))
+                }
+                let feature = kind == .extrude ? (roleLabels[move.role] ?? "Undefined") : kind.label
+                if move.feedrate > 0 { minFeed = min(minFeed, move.feedrate); maxFeed = max(maxFeed, move.feedrate) }
+                if kind == .extrude {
+                    if move.width > 0 { minWidth = min(minWidth, move.width); maxWidth = max(maxWidth, move.width) }
+                    if move.height > 0 { minHeight = min(minHeight, move.height); maxHeight = max(maxHeight, move.height) }
+                    // Desktop Layers excludes startup/custom extrusion from layer
+                    // stops: a purge at Z=10 must not replace the first layer's Z.
+                    if feature != "Custom" {
+                        minZ = min(minZ, move.end_z); maxZ = max(maxZ, move.end_z)
+                        layerZ[move.layer_id] = max(layerZ[move.layer_id] ?? move.end_z, move.end_z)
+                    }
+                }
+                let tool = Int(move.extruder_id)
+                let density = filamentDensities.indices.contains(tool) ? filamentDensities[tool] : (filamentDensities.first ?? 1.24)
+                let massPerMM = move.feedrate > 0 ? move.volumetric_flow / (move.feedrate / 60) * density : 0
+                let metrics = GCodePathGeometry.Metrics(massPerMM: massPerMM, actualSpeed: move.actual_speed,
+                    flow: move.volumetric_flow, actualFlow: move.actual_volumetric_flow,
+                    fan: move.fan_speed, temperature: move.temperature, pressureAdvance: move.pressure_advance,
+                    acceleration: move.acceleration, jerk: move.jerk, layerTime: move.layer_duration,
+                    tool: Int(move.extruder_id), colorID: Int(move.color_id), rgba: move.color_rgba)
+                if !kind.isMarker, !paths.isEmpty {
+                    let index = paths.count - 1
+                    if let previousEnd = paths[index].points.last,
+                       paths[index].feature == feature, paths[index].width == move.width, paths[index].height == move.height,
+                       paths[index].feedrate == move.feedrate, paths[index].kind == kind,
+                       paths[index].metrics == metrics,
+                       previousEnd.x == start.x, previousEnd.y == start.y, previousEnd.z == start.z {
+                        paths[index].points.append(end)
+                        paths[index].lastMove = ordinal
+                        continue
+                    }
+                }
+                paths.append(GCodePathGeometry.Segment(points: [start, end],
+                    feature: feature, width: move.width, feedrate: move.feedrate, height: move.height,
+                    kind: kind, metrics: metrics, firstMove: ordinal, lastMove: ordinal))
+            }
+            // Accumulate ranges in the conversion pass instead of copying large
+            // arrays of bridge records with filter/map for each numeric field.
+            var path = GCodePathGeometry(segments: paths,
+                zMin: minZ.isFinite && minZ <= maxZ ? minZ : 0, zMax: maxZ >= minZ ? maxZ : 0.2,
+                feedMin: minFeed <= maxFeed ? minFeed : 0, feedMax: maxFeed,
+                widthRange: (minWidth <= maxWidth ? minWidth : defW)...(maxWidth > 0 ? maxWidth : defW),
+                layerHeightRange: (minHeight <= maxHeight ? minHeight : 0.2)...(maxHeight > 0 ? maxHeight : 0.2),
+                defaultWidth: defW)
+            path.prepareColorRanges()
+            var bed: SIMD2<Float>?
+            if let width = metadata?.bed_width, let depth = metadata?.bed_depth, width > 0, depth > 0 {
+                bed = SIMD2(width, depth)
+            }
+            return (path, Array(Set(layerZ.values)).sorted(), totalCount > count, bed)
+        }
+        return nil
+    }
+    #endif
+
     /// Save plate + config as 3MF via official store_3mf.
     func saveProject3MF() -> URL? {
         #if ORCA_LINKED
+        guard !sessionBusy, !sliceRunning, !presetsLoading else {
+            lastMessage = "Wait for the current operation to finish"
+            return nil
+        }
         guard let s = session, hasModel else {
             lastMessage = "Nothing to save"
             return nil
@@ -1861,6 +2707,7 @@ final class OrcaEngine: ObservableObject {
     /// Persist current plate to its slot file (no-op if empty).
     @discardableResult
     func saveCurrentPlateSlot() -> Bool {
+        guard requireIdleSession() else { return false }
         #if ORCA_LINKED
         ensurePlateSlots()
         guard currentPlateIndex >= 0, currentPlateIndex < platePaths.count else { return false }
@@ -1880,6 +2727,7 @@ final class OrcaEngine: ObservableObject {
 
     /// Switch to plate index (saves current first). Loads slot 3MF or clears if empty.
     func selectPlate(_ index: Int) {
+        guard requireIdleSession() else { return }
         #if ORCA_LINKED
         guard index >= 0, index < plateCount else { return }
         if index == currentPlateIndex { return }
@@ -1899,6 +2747,7 @@ final class OrcaEngine: ObservableObject {
 
     /// Add a new empty plate and switch to it.
     func addPlate() {
+        guard requireIdleSession() else { return }
         #if ORCA_LINKED
         _ = saveCurrentPlateSlot()
         plateCount += 1
@@ -1911,6 +2760,7 @@ final class OrcaEngine: ObservableObject {
 
     /// Remove current plate if more than one remain.
     func removeCurrentPlate() {
+        guard requireIdleSession() else { return }
         #if ORCA_LINKED
         guard plateCount > 1 else {
             lastMessage = "Need at least one plate"
@@ -1965,10 +2815,13 @@ final class OrcaEngine: ObservableObject {
     }
 
     private func writeSnapshotFile(session s: OpaquePointer, prefix: String) -> URL? {
-        let url = undoDir().appendingPathComponent("\(prefix)_\(UUID().uuidString).3mf")
-        let rc = url.path.withCString { orca_session_snapshot(s, $0) }
+        // Native 3MF saving requires a model. An empty plate still needs its
+        // configuration in history, using the existing native JSON serializer.
+        let suffix = hasModel ? "3mf" : "json"
+        let url = undoDir().appendingPathComponent("\(prefix)_\(UUID().uuidString).\(suffix)")
+        let rc = url.path.withCString { hasModel ? orca_session_snapshot(s, $0) : orca_session_export_config(s, $0) }
         guard rc == 0 else { return nil }
-        // Verify non-empty file — empty 3MF means store failed silently
+        // A successful return without data cannot be used as a history entry.
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
               let size = attrs[.size] as? NSNumber, size.intValue > 64
         else {
@@ -1981,6 +2834,13 @@ final class OrcaEngine: ObservableObject {
     private func applySnapshotFile(_ url: URL) -> Bool {
         #if ORCA_LINKED
         guard let s = session else { return false }
+        if url.pathExtension == "json" {
+            guard url.path.withCString({ orca_session_load_config(s, $0) }) == 0 else { return false }
+            clearPlate()
+            readBedSize()
+            refreshObjectFilamentColors()
+            return true
+        }
         let rc = url.path.withCString { orca_session_restore_snapshot(s, $0) }
         guard rc == 0 else { return false }
         let n = Int(orca_session_object_count(s))
@@ -1990,7 +2850,7 @@ final class OrcaEngine: ObservableObject {
             refreshMesh()
             refreshBounds()
             refreshModelInfo()
-            refreshBedSize()
+            readBedSize()
             // Keep selection if still valid
             if selectedObjectIndex >= n {
                 selectedObjectIndex = n > 0 ? 0 : -1
@@ -2006,12 +2866,19 @@ final class OrcaEngine: ObservableObject {
 
     /// Call before destructive/transform operations (desktop Edit → Undo stack).
     func pushUndoSnapshot(label: String = "edit") {
+        guard requireIdleSession() else { return }
         #if ORCA_LINKED
-        guard let s = session, hasModel else { return }
+        guard let s = session else { return }
         guard let url = writeSnapshotFile(session: s, prefix: "undo") else {
             // Don't wipe existing stack if this push fails
             return
         }
+        recordUndoSnapshot(url, label: label)
+        // Don't stomp lastMessage (caller sets "Moved…" etc.)
+        #endif
+    }
+
+    private func recordUndoSnapshot(_ url: URL, label: String) {
         undoStack.append(UndoEntry(url: url, label: label))
         while undoStack.count > maxUndo {
             let old = undoStack.removeFirst()
@@ -2021,31 +2888,32 @@ final class OrcaEngine: ObservableObject {
         for e in redoStack { try? FileManager.default.removeItem(at: e.url) }
         redoStack.removeAll()
         refreshUndoFlags()
-        // Don't stomp lastMessage (caller sets "Moved…" etc.)
-        #endif
     }
 
     func undo() {
         #if ORCA_LINKED
-        guard let s = session, let entry = undoStack.popLast() else {
+        guard !sessionBusy, !sliceRunning, !presetsLoading else {
+            lastMessage = "Wait for the current operation to finish"
+            return
+        }
+        guard let s = session, let entry = undoStack.last else {
             lastMessage = "Nothing to undo"
             refreshUndoFlags()
             return
         }
-        // Save current as redo (post-action state)
-        if hasModel, let redoURL = writeSnapshotFile(session: s, prefix: "redo") {
-            redoStack.append(UndoEntry(url: redoURL, label: entry.label))
+        // Commit stack changes only after capture and restore both succeed.
+        guard let redoURL = writeSnapshotFile(session: s, prefix: "redo") else {
+            lastMessage = String(localized: "Could not save the current state for Redo. The model was not changed.")
+            return
         }
         if applySnapshotFile(entry.url) {
+            undoStack.removeLast()
+            redoStack.append(UndoEntry(url: redoURL, label: entry.label))
             lastMessage = "Undo · \(entry.label) · \(undoStack.count) left"
+            try? FileManager.default.removeItem(at: entry.url)
         } else {
             lastMessage = orca_session_last_error(s).map { String(cString: $0) } ?? "undo failed"
-            // Put entry back if restore failed
-            undoStack.append(entry)
-        }
-        // Drop used undo file only after successful restore
-        if lastMessage.hasPrefix("Undo") {
-            try? FileManager.default.removeItem(at: entry.url)
+            try? FileManager.default.removeItem(at: redoURL)
         }
         refreshUndoFlags()
         #endif
@@ -2053,39 +2921,139 @@ final class OrcaEngine: ObservableObject {
 
     func redo() {
         #if ORCA_LINKED
-        guard let s = session, let entry = redoStack.popLast() else {
+        guard !sessionBusy, !sliceRunning, !presetsLoading else {
+            lastMessage = "Wait for the current operation to finish"
+            return
+        }
+        guard let s = session, let entry = redoStack.last else {
             lastMessage = "Nothing to redo"
             refreshUndoFlags()
             return
         }
-        if hasModel, let undoURL = writeSnapshotFile(session: s, prefix: "undo") {
-            undoStack.append(UndoEntry(url: undoURL, label: entry.label))
+        guard let undoURL = writeSnapshotFile(session: s, prefix: "undo") else {
+            lastMessage = String(localized: "Could not save the current state for Undo. The model was not changed.")
+            return
         }
         if applySnapshotFile(entry.url) {
+            redoStack.removeLast()
+            undoStack.append(UndoEntry(url: undoURL, label: entry.label))
             lastMessage = "Redo · \(entry.label)"
             try? FileManager.default.removeItem(at: entry.url)
         } else {
             lastMessage = orca_session_last_error(s).map { String(cString: $0) } ?? "redo failed"
-            redoStack.append(entry)
+            try? FileManager.default.removeItem(at: undoURL)
         }
         refreshUndoFlags()
+        #endif
+    }
+
+    /// Full-app integration fixture using real native history snapshots.
+    @MainActor
+    func instanceHistorySmokeTest() async -> String {
+        #if ORCA_LINKED
+        guard requireIdleSession(), hasModel, objectCount == 1, undoStack.isEmpty, redoStack.isEmpty,
+              let originalCopies = objectInstanceCounts.first else {
+            return "FAIL: instance history fixture needs a fresh single-object plate"
+        }
+        let selection = selectedObjectIndex
+        let message = lastMessage
+        defer { selectedObjectIndex = selection; lastMessage = message }
+        selectedObjectIndex = 0
+        let originalHeight = getOption("layer_height") ?? ""
+        guard await editMesh(.copies(0)), !hasModel, canUndo else { return "FAIL: zero copies did not create undo" }
+        setOption("layer_height", value: "0.31")
+        undo()
+        guard hasModel, objectInstanceCounts == [originalCopies], getOption("layer_height") == originalHeight, canRedo else {
+            return "FAIL: Undo did not restore the deleted object/settings or preserve Redo"
+        }
+        redo()
+        guard !hasModel, objectCount == 0, getOption("layer_height") == "0.31", canUndo else {
+            return "FAIL: Redo did not restore the empty plate and its own settings"
+        }
+        guard addPrimitive(kind: 0, x: 5, y: 5, z: 5), objectCount == 1 else { return "FAIL: add on empty plate" }
+        undo()
+        guard !hasModel, canRedo else { return "FAIL: adding the first primitive is not undoable" }
+        redo()
+        guard hasModel, objectInstanceCounts == [1] else { return "FAIL: first primitive Redo" }
+        undo()
+        undo()
+        guard hasModel, objectInstanceCounts == [originalCopies], getOption("layer_height") == originalHeight else {
+            return "FAIL: history did not return to the imported model"
+        }
+        selectedObjectIndex = 0
+        let depths = (undoStack.count, redoStack.count)
+        guard await editMesh(.copies(originalCopies)), await editMesh(.copies(-1)) == false,
+              undoStack.count == depths.0, redoStack.count == depths.1 else {
+            return "FAIL: unchanged/invalid copies changed history"
+        }
+        guard await duplicateSelected(), objectCount == 2, canUndo, !canRedo else {
+            return "FAIL: public Duplicate did not create an independent undoable object"
+        }
+        undo()
+        guard objectCount == 1, canRedo else { return "FAIL: Duplicate Undo" }
+        redo()
+        guard objectCount == 2, await deleteSelected(), objectCount == 1 else { return "FAIL: public Delete" }
+        undo()
+        guard objectCount == 2, await clearPlateWithUndo(), !hasModel else { return "FAIL: public Clear" }
+        undo()
+        guard objectCount == 2, canRedo else { return "FAIL: Clear Undo" }
+        redo()
+        guard !hasModel else { return "FAIL: Clear Redo" }
+        undo()
+        undo()
+        guard objectCount == 1 else { return "FAIL: restore original before whole-plate actions" }
+        selectedObjectIndex = -1
+        guard await duplicateSelected(), objectCount == 2 else { return "FAIL: duplicate whole selection" }
+        selectedObjectIndex = -1
+        guard await duplicateSelected(), objectCount == 4 else { return "FAIL: duplicate all objects did not include every source" }
+        guard await deleteSelected(), !hasModel else { return "FAIL: Delete with All selected did not clear the whole selection" }
+        undo()
+        guard objectCount == 4 else { return "FAIL: whole selection Delete Undo" }
+        undo()
+        guard objectCount == 2 else { return "FAIL: whole selection Duplicate Undo" }
+        undo()
+        guard objectCount == 1, objectInstanceCounts == [originalCopies] else { return "FAIL: original plate after bulk history" }
+        for entry in undoStack + redoStack { try? FileManager.default.removeItem(at: entry.url) }
+        undoStack.removeAll(); redoStack.removeAll(); refreshUndoFlags()
+        let broken = undoDir().appendingPathComponent("invalid-history-\(UUID().uuidString).json")
+        do { try Data("invalid config".utf8).write(to: broken) }
+        catch { return "FAIL: cannot create history failure fixture" }
+        defer { try? FileManager.default.removeItem(at: broken) }
+        undoStack.append(UndoEntry(url: broken, label: "invalid-test")); refreshUndoFlags()
+        let revision = meshRevision
+        undo()
+        guard undoStack.count == 1, redoStack.isEmpty, hasModel, meshRevision == revision,
+              getOption("layer_height") == originalHeight, objectInstanceCounts == [originalCopies] else {
+            return "FAIL: failed restore changed the model/settings/history"
+        }
+        undoStack.removeAll(); refreshUndoFlags()
+        return "PASS: native copies, empty-plate config/first primitive Undo/Redo, public/bulk Duplicate/Delete/Clear, no-op/invalid edits and failed restore"
+        #else
+        return "FAIL: engine not linked"
         #endif
     }
 
     @discardableResult
     func setObjectOption(index: Int, key: String, value: String) -> Bool {
         #if ORCA_LINKED
-        guard let s = session, index >= 0 else { return false }
-        pushUndoSnapshot(label: key)
+        guard let s = session, objectNames.indices.contains(index), !sessionBusy, !sliceRunning, !presetsLoading else {
+            lastMessage = "Wait for the current operation to finish, then select an object"; return false
+        }
+        if getObjectOption(index: index, key: key) == value { return true }
+        let snapshot = writeSnapshotFile(session: s, prefix: "undo")
         let rc = key.withCString { k in
             value.withCString { v in
                 orca_session_set_object_option(s, Int32(index), k, v)
             }
         }
         if rc == 0 {
+            if let snapshot { recordUndoSnapshot(snapshot, label: key) }
+            invalidateSlice()
+            if key == "extruder" { refreshObjectFilamentColors() }
             lastMessage = "Object \(index + 1): \(key)=\(value)"
             return true
         }
+        if let snapshot { try? FileManager.default.removeItem(at: snapshot) }
         lastMessage = orca_session_last_error(s).map { String(cString: $0) } ?? "object option failed"
         return false
         #else
@@ -2094,36 +3062,47 @@ final class OrcaEngine: ObservableObject {
     }
 
     func getObjectOption(index: Int, key: String) -> String? {
+        guard !sessionBusy, !sliceRunning, !presetsLoading else { return nil }
+        return readObjectOption(index: index, key: key)
+    }
+
+    // Internal refreshes run after the native task finishes, while the host's
+    // busy flag remains set until its enclosing import/edit method returns.
+    private func readObjectOption(index: Int, key: String) -> String? {
         #if ORCA_LINKED
         guard let s = session, index >= 0 else { return nil }
-        var buf = [CChar](repeating: 0, count: 512)
-        let rc = key.withCString { k in
-            orca_session_get_object_option(s, Int32(index), k, &buf, buf.count)
+        return key.withCString { k in
+            NativeOptionReader.read { buffer, count in orca_session_get_object_option(s, Int32(index), k, buffer, count) }
         }
-        guard rc == 0 else { return nil }
-        return String(cString: buf)
         #else
         return nil
         #endif
     }
 
-    func eraseObjectOption(index: Int, key: String) {
+    @discardableResult
+    func eraseObjectOption(index: Int, key: String) -> Bool {
         #if ORCA_LINKED
-        guard let s = session, index >= 0 else { return }
-        _ = key.withCString { orca_session_erase_object_option(s, Int32(index), $0) }
-        lastMessage = "Cleared object \(key)"
+        guard let s = session, objectNames.indices.contains(index), !sessionBusy, !sliceRunning, !presetsLoading else {
+            lastMessage = "Wait for the current operation to finish, then select an object"; return false
+        }
+        guard getObjectOption(index: index, key: key) != nil else { return true }
+        let snapshot = writeSnapshotFile(session: s, prefix: "undo")
+        let rc = key.withCString { orca_session_erase_object_option(s, Int32(index), $0) }
+        if rc == 0 {
+            if let snapshot { recordUndoSnapshot(snapshot, label: "Reset " + key) }
+            invalidateSlice()
+            if key == "extruder" { refreshObjectFilamentColors() }
+        } else if let snapshot { try? FileManager.default.removeItem(at: snapshot) }
+        lastMessage = rc == 0 ? "Object now uses global \(key)"
+            : (orca_session_last_error(s).map { String(cString: $0) } ?? "Reset object setting failed")
+        return rc == 0
+        #else
+        return false
         #endif
     }
 
     func setObjectExtruder(index: Int, extruder1Based: Int) {
-        #if ORCA_LINKED
-        guard let s = session, index >= 0 else { return }
-        pushUndoSnapshot(label: "extruder")
-        let rc = orca_session_set_object_extruder(s, Int32(index), Int32(extruder1Based))
-        lastMessage = rc == 0
-            ? "Object \(index + 1) → extruder \(extruder1Based)"
-            : (orca_session_last_error(s).map { String(cString: $0) } ?? "extruder failed")
-        #endif
+        _ = setObjectOption(index: index, key: "extruder", value: String(extruder1Based))
     }
 
     // MARK: - wx-parity W1: facet painting (support / seam / MMU / fuzzy)
@@ -2154,6 +3133,7 @@ final class OrcaEngine: ObservableObject {
         radiusMm: Float,
         recordUndo: Bool = false
     ) -> Int {
+        guard requireIdleSession() else { return -1 }
         #if ORCA_LINKED
         guard let s = session, hasModel else { return -1 }
         if recordUndo { pushUndoSnapshot(label: "paint-\(kind.label)") }
@@ -2163,6 +3143,7 @@ final class OrcaEngine: ObservableObject {
         )
         lastPaintCount = max(0, Int(n))
         if n >= 0 {
+            invalidateSlice()
             refreshPaintOverlay(kind: kind)
             refreshPaintStats(kind: kind)
             lastMessage = n > 0
@@ -2179,6 +3160,7 @@ final class OrcaEngine: ObservableObject {
 
     @discardableResult
     func paintFill(kind: PaintKind, state: Int) -> Int {
+        guard requireIdleSession() else { return -1 }
         #if ORCA_LINKED
         guard let s = session, hasModel else { return -1 }
         let idx = selectedObjectIndex >= 0 ? selectedObjectIndex : 0
@@ -2186,6 +3168,7 @@ final class OrcaEngine: ObservableObject {
         let n = orca_session_paint_fill(s, Int32(idx), Int32(kind.rawValue), Int32(state))
         lastPaintCount = max(0, Int(n))
         if n >= 0 {
+            invalidateSlice()
             refreshPaintOverlay(kind: kind)
             refreshPaintStats(kind: kind)
             lastMessage = "Fill \(kind.label) · \(n) facets"
@@ -2200,6 +3183,7 @@ final class OrcaEngine: ObservableObject {
 
     @discardableResult
     func paintClear(kind: PaintKind, allObjects: Bool = false) -> Bool {
+        guard requireIdleSession() else { return false }
         #if ORCA_LINKED
         guard let s = session, hasModel else { return false }
         pushUndoSnapshot(label: "paint-clear-\(kind.label)")
@@ -2208,7 +3192,11 @@ final class OrcaEngine: ObservableObject {
             : Int32(selectedObjectIndex >= 0 ? selectedObjectIndex : 0)
         let rc = orca_session_paint_clear(s, idx, Int32(kind.rawValue))
         if rc == 0 {
-            refreshPaintOverlay(kind: kind)
+            invalidateSlice()
+            if kind == .mmu && allObjects {
+                refreshFilamentPaint()
+                paintOverlayMesh = nil
+            } else { refreshPaintOverlay(kind: kind) }
             refreshPaintStats(kind: kind)
             lastMessage = "Cleared \(kind.label) paint"
             return true
@@ -2221,6 +3209,7 @@ final class OrcaEngine: ObservableObject {
     }
 
     func refreshPaintStats(kind: PaintKind) {
+        guard !sessionBusy, !sliceRunning, !presetsLoading else { return }
         #if ORCA_LINKED
         guard let s = session, hasModel else {
             paintStatsText = ""
@@ -2239,18 +3228,42 @@ final class OrcaEngine: ObservableObject {
 
     /// Load world-space painted facets for SceneKit overlay (any non-NONE state).
     func refreshPaintOverlay(kind: PaintKind?) {
-        #if ORCA_LINKED
-        guard let s = session, hasModel, let kind else {
+        guard !sessionBusy, !sliceRunning, !presetsLoading else { return }
+        if kind == .mmu {
+            // MMU paint is persistent material coloring, not a single brush mask.
+            refreshFilamentPaint(objectIndex: selectedObjectIndex >= 0 ? selectedObjectIndex : nil)
             paintOverlayMesh = nil
             return
         }
-        let idx = selectedObjectIndex >= 0 ? Int32(selectedObjectIndex) : Int32(-1)
+        guard let kind else { paintOverlayMesh = nil; return }
+        paintOverlayMesh = exportedPaintMesh(objectIndex: selectedObjectIndex, kind: kind, state: -1)
+    }
+
+    private func refreshFilamentPaint(objectIndex: Int? = nil) {
+        var regions = objectIndex.map { index in paintedFilaments.filter { $0.objectIndex != index } } ?? []
+        if hasModel {
+            let objects = objectIndex.map { [$0] } ?? Array(objectMeshes.indices)
+            for index in objects {
+                for state in 1...maximumPaintFilaments {
+                    if let mesh = exportedPaintMesh(objectIndex: index, kind: .mmu, state: state) {
+                        regions.append(PaintedFilamentRegion(objectIndex: index, filamentIndex: state - 1, mesh: mesh))
+                    }
+                }
+            }
+        }
+        paintedFilaments = regions
+        filamentPaintRevision += 1
+    }
+
+    private func exportedPaintMesh(objectIndex: Int, kind: PaintKind, state: Int) -> MeshGeometry? {
+        #if ORCA_LINKED
+        guard let s = session, hasModel else { return nil }
         var posPtr: UnsafeMutablePointer<Float>?
         var idxPtr: UnsafeMutablePointer<UInt32>?
         var vcount: Int = 0
         var icount: Int = 0
         let rc = orca_session_export_paint_mesh(
-            s, idx, Int32(kind.rawValue), -1,
+            s, Int32(objectIndex), Int32(kind.rawValue), Int32(state),
             &posPtr, &vcount, &idxPtr, &icount
         )
         defer {
@@ -2258,13 +3271,10 @@ final class OrcaEngine: ObservableObject {
             if let i = idxPtr { orca_free(i) }
         }
         guard rc == 0, let posPtr, let idxPtr, vcount > 0, icount > 0 else {
-            paintOverlayMesh = nil
-            return
+            return nil
         }
-        var positions = [Float](repeating: 0, count: vcount * 3)
-        var indices = [UInt32](repeating: 0, count: icount)
-        for i in 0..<(vcount * 3) { positions[i] = posPtr[i] }
-        for i in 0..<icount { indices[i] = idxPtr[i] }
+        let positions = Array(UnsafeBufferPointer(start: posPtr, count: vcount * 3))
+        let indices = Array(UnsafeBufferPointer(start: idxPtr, count: icount))
         var bmin = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
         var bmax = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
         for i in 0..<vcount {
@@ -2272,9 +3282,9 @@ final class OrcaEngine: ObservableObject {
             bmin = min(bmin, p)
             bmax = max(bmax, p)
         }
-        paintOverlayMesh = MeshGeometry(positions: positions, indices: indices, min: bmin, max: bmax)
+        return MeshGeometry(positions: positions, indices: indices, min: bmin, max: bmax)
         #else
-        paintOverlayMesh = nil
+        return nil
         #endif
     }
 
@@ -2290,6 +3300,7 @@ final class OrcaEngine: ObservableObject {
     /// Place a brim ear at world XY (desktop GLGizmoBrimEars). radiusMm ≤ 0 → auto.
     @discardableResult
     func brimEarAdd(x: Float, y: Float, radiusMm: Float = 0, recordUndo: Bool = true) -> Int {
+        guard requireIdleSession() else { return -1 }
         #if ORCA_LINKED
         guard let s = session, hasModel else { return -1 }
         if recordUndo { pushUndoSnapshot(label: "brim-ear-add") }
@@ -2313,6 +3324,7 @@ final class OrcaEngine: ObservableObject {
     /// Remove nearest brim ear within maxDistMm of world XY.
     @discardableResult
     func brimEarRemoveNearest(x: Float, y: Float, maxDistMm: Float = 8, recordUndo: Bool = true) -> Int {
+        guard requireIdleSession() else { return -1 }
         #if ORCA_LINKED
         guard let s = session, hasModel else { return -1 }
         if recordUndo { pushUndoSnapshot(label: "brim-ear-remove") }
@@ -2333,6 +3345,7 @@ final class OrcaEngine: ObservableObject {
 
     @discardableResult
     func brimEarClear(allObjects: Bool = false) -> Bool {
+        guard requireIdleSession() else { return false }
         #if ORCA_LINKED
         guard let s = session, hasModel else { return false }
         pushUndoSnapshot(label: "brim-ear-clear")
@@ -2352,6 +3365,7 @@ final class OrcaEngine: ObservableObject {
     }
 
     func refreshBrimEarCount() {
+        guard !sessionBusy, !sliceRunning, !presetsLoading else { return }
         #if ORCA_LINKED
         guard let s = session, hasModel else {
             brimEarCount = 0
@@ -2367,6 +3381,7 @@ final class OrcaEngine: ObservableObject {
     }
 
     func refreshBrimEarOverlay() {
+        guard !sessionBusy, !sliceRunning, !presetsLoading else { return }
         #if ORCA_LINKED
         guard let s = session, hasModel else {
             paintOverlayMesh = nil
@@ -2406,101 +3421,231 @@ final class OrcaEngine: ObservableObject {
         #endif
     }
 
-    // MARK: - wx-parity W2: mesh boolean / simplify / plane cut
+    struct LayerHeightProfile: Sendable {
+        let minimum: Double
+        let maximum: Double
+        let objectHeight: Double
+        let custom: Bool
+        let points: [SIMD2<Double>]
+    }
 
-    /// op: 0=union, 1=difference (A−B), 2=intersection. Deletes B by default.
-    @discardableResult
-    func meshBoolean(objectA: Int? = nil, objectB: Int? = nil, op: Int, deleteB: Bool = true) -> Bool {
+    enum LayerHeightEdit: Sendable {
+        case adaptive(Float)
+        case smooth(radius: Int, keepMinimum: Bool)
+        case reset
+    }
+
+    @MainActor
+    func layerHeightProfile(object index: Int) async -> LayerHeightProfile? {
         #if ORCA_LINKED
-        guard let s = session, hasModel, objectCount >= 2 else {
-            lastMessage = "Boolean needs ≥2 objects"
-            return false
-        }
-        let a = objectA ?? (selectedObjectIndex >= 0 ? selectedObjectIndex : 0)
-        var b = objectB ?? booleanOtherObjectIndex
-        if b < 0 || b == a {
-            b = (a + 1) % objectCount
-        }
-        if b == a {
-            lastMessage = "Boolean: pick a different second object"
-            return false
-        }
-        pushUndoSnapshot(label: "mesh-boolean-\(op)")
-        let rc = orca_session_mesh_boolean(s, Int32(a), Int32(b), Int32(op), deleteB ? 1 : 0)
-        if rc != 0 {
-            lastMessage = orca_session_last_error(s).map { String(cString: $0) } ?? "boolean failed"
-            return false
-        }
-        selectedObjectIndex = min(a, objectCount - 2) // B deleted may shift indices
-        refreshObjectList()
-        refreshMesh()
-        refreshBounds()
-        refreshModelInfo()
-        let opName = op == 0 ? "Union" : (op == 1 ? "Difference" : "Intersect")
-        lastMessage = "\(opName) → \(objectCount) object(s)"
-        return true
+        guard let session, objectNames.indices.contains(index), !sessionBusy, !sliceRunning, !presetsLoading else { return nil }
+        sessionBusy = true
+        sessionBusyMessage = String(localized: "Reading layer heights…")
+        defer { sessionBusy = false }
+        let bits = UInt(bitPattern: session)
+        let result = await Task.detached(priority: .userInitiated) { () -> (LayerHeightProfile?, String) in
+            guard let session = OpaquePointer(bitPattern: bits) else { return (nil, String(localized: "Engine unavailable")) }
+            var info = orca_layer_profile_info_t()
+            var points: UnsafeMutablePointer<orca_layer_height_point_t>?
+            let code = orca_session_export_layer_profile(session, Int32(index), &info, &points)
+            defer { orca_free(points) }
+            guard code == 0, let points else {
+                return (nil, orca_session_last_error(session).map { String(cString: $0) } ?? String(localized: "Cannot read layer heights"))
+            }
+            let values = UnsafeBufferPointer(start: points, count: info.point_count).map { SIMD2($0.z, $0.height) }
+            return (LayerHeightProfile(minimum: info.min_height, maximum: info.max_height,
+                objectHeight: info.object_height, custom: info.is_custom != 0, points: values), "")
+        }.value
+        if result.0 == nil { lastMessage = result.1 }
+        return result.0
         #else
-        return false
+        return nil
         #endif
     }
 
-    /// Simplify selected object (targetFaces 0 = ~50%).
+    enum MeshEdit: Sendable {
+        case repair
+        case duplicate(Int?)
+        case delete(Int)
+        case clearPlate
+        case split(toObjects: Bool, part: Int, dropToBed: Bool)
+        case layOnFace(SIMD3<Float>)
+        case layerHeights(LayerHeightEdit)
+        case copies(Int)
+        case simplify(Int)
+        case cut(position: Float, axis: Int, upper: Bool, lower: Bool)
+        case boolean(other: Int, operation: Int, removeOther: Bool)
+
+        var undoLabel: String {
+            switch self {
+            case .repair: return String(localized: "Repair mesh")
+            case .duplicate: return String(localized: "Duplicate objects")
+            case .delete: return String(localized: "Delete object")
+            case .clearPlate: return String(localized: "Clear plate")
+            case .split(let objects, _, _): return objects ? String(localized: "Split to objects") : String(localized: "Split to parts")
+            case .layOnFace: return String(localized: "Lay on face")
+            case .layerHeights: return String(localized: "Variable layer height")
+            case .copies: return String(localized: "Set number of copies")
+            case .simplify: return String(localized: "Simplify mesh")
+            case .cut: return String(localized: "Cut model")
+            case .boolean: return String(localized: "Boolean operation")
+            }
+        }
+
+        var preservesModelOnFailure: Bool {
+            switch self {
+            case .split, .layOnFace, .layerHeights, .copies: return true
+            default: return false
+            }
+        }
+    }
+
+    /// The same session gate used by imports excludes slicing, preset imports
+    /// and memory-pressure mutation while a native mesh algorithm is running.
+    @MainActor
     @discardableResult
-    func simplifyMesh(targetFaces: Int = 0) -> Bool {
+    func editMesh(_ edit: MeshEdit) async -> Bool {
+        guard !sessionBusy, !sliceRunning, !presetsLoading, hasModel else { return false }
         #if ORCA_LINKED
-        guard let s = session, hasModel else { return false }
-        let idx = selectedObjectIndex >= 0 ? selectedObjectIndex : 0
-        pushUndoSnapshot(label: "simplify-mesh")
-        let n = orca_session_simplify_mesh(s, Int32(idx), Int32(targetFaces))
-        if n < 0 {
-            lastMessage = orca_session_last_error(s).map { String(cString: $0) } ?? "simplify failed"
+        guard let session else { return false }
+        let index: Int
+        let wholePlate: Bool
+        switch edit {
+        case .duplicate(let target): index = target ?? -1; wholePlate = target == nil
+        case .delete(let target): index = target; wholePlate = false
+        case .clearPlate: index = -1; wholePlate = true
+        case .repair: index = selectedObjectIndex; wholePlate = index < 0
+        default: index = selectedObjectIndex; wholePlate = false
+        }
+        if !wholePlate && !objectNames.indices.contains(index) {
+            lastMessage = "Select one object first"; return false
+        }
+        switch edit {
+        case .copies(let count):
+            guard (0...1000).contains(count) else { lastMessage = String(localized: "Choose a copy count between 0 and 1000"); return false }
+            if objectInstanceCounts.indices.contains(index), objectInstanceCounts[index] == count { return true }
+        case .simplify(let target):
+            guard target >= 0 && target <= Int(Int32.max) else { lastMessage = "Invalid triangle count"; return false }
+        case .cut(let position, let axis, let upper, let lower):
+            guard position.isFinite, (0...2).contains(axis), upper || lower else { lastMessage = "Choose a valid cut plane and at least one half"; return false }
+        case .boolean(let other, let operation, _):
+            guard objectNames.indices.contains(other), other != index, (0...2).contains(operation) else {
+                lastMessage = "Choose two different objects and a valid operation"; return false
+            }
+        case .layerHeights(let action):
+            if case .adaptive(let quality) = action, !quality.isFinite || !(0...1).contains(quality) {
+                lastMessage = String(localized: "Choose adaptive quality between 0 and 1"); return false
+            }
+            if case .smooth(let radius, _) = action, !(1...10).contains(radius) {
+                lastMessage = String(localized: "Choose a smoothing radius between 1 and 10"); return false
+            }
+        case .repair, .duplicate, .delete, .clearPlate: break
+        case .split(_, let part, _):
+            guard part >= 0 && part <= Int(Int32.max) else { lastMessage = "Choose a valid part"; return false }
+        case .layOnFace(let point):
+            guard point.x.isFinite, point.y.isFinite, point.z.isFinite else { lastMessage = "Choose a valid face"; return false }
+        }
+        sessionBusyMessage = "Updating model…"
+        sessionBusy = true
+        defer { sessionBusy = false }
+        let snapshot = undoDir().appendingPathComponent("mesh_\(UUID().uuidString).3mf")
+        let bits = UInt(bitPattern: session)
+        let result = await Task.detached(priority: .userInitiated) {
+            let s = OpaquePointer(bitPattern: bits)!
+            let saved = snapshot.path.withCString { orca_session_snapshot(s, $0) }
+            let bytes = (try? snapshot.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+            guard saved == 0 && bytes > 64 else {
+                return (Int32(-1), "Could not prepare an undo snapshot; the model was not changed.", false, false)
+            }
+            let code: Int32
+            switch edit {
+            case .duplicate(let target):
+                let targets = target.map { [$0] } ?? Array(0..<Int(orca_session_object_count(s)))
+                var last: Int32 = -1
+                for object in targets {
+                    last = orca_session_duplicate_object(s, Int32(object))
+                    if last < 0 { break }
+                }
+                code = last
+            case .delete: code = orca_session_delete_object(s, Int32(index))
+            case .clearPlate: code = orca_session_clear_model(s)
+            case .copies(let count): code = orca_session_set_object_instances(s, Int32(index), Int32(count))
+            case .repair: code = orca_session_repair_mesh(s, Int32(index))
+            case .split(let objects, let part, let drop):
+                code = orca_session_split_model(s, Int32(index), Int32(part), objects ? 1 : 0, drop ? 1 : 0)
+            case .layOnFace(let point):
+                code = orca_session_lay_on_face(s, Int32(index), point.x, point.y, point.z)
+            case .layerHeights(let action):
+                switch action {
+                case .adaptive(let quality): code = orca_session_edit_layer_profile(s, Int32(index), 0, quality, 0, 0)
+                case .smooth(let radius, let keep): code = orca_session_edit_layer_profile(s, Int32(index), 1, 0, Int32(radius), keep ? 1 : 0)
+                case .reset: code = orca_session_edit_layer_profile(s, Int32(index), 2, 0, 0, 0)
+                }
+            case .simplify(let target): code = orca_session_simplify_mesh(s, Int32(index), Int32(target))
+            case .cut(let position, let axis, let upper, let lower):
+                var point = SIMD3<Float>(repeating: 0), normal = SIMD3<Float>(repeating: 0)
+                point[axis] = position; normal[axis] = 1
+                code = orca_session_cut_object_plane(s, Int32(index), point.x, point.y, point.z,
+                    normal.x, normal.y, normal.z, upper ? 1 : 0, lower ? 1 : 0)
+            case .boolean(let other, let operation, let removeOther):
+                code = orca_session_mesh_boolean(s, Int32(index), Int32(other), Int32(operation), removeOther ? 1 : 0)
+            }
+            let error = orca_session_last_error(s).map { String(cString: $0) } ?? ""
+            var restoreFailed = false
+            // Staged operations leave the original and its preview untouched.
+            if code < 0 && !edit.preservesModelOnFailure {
+                restoreFailed = snapshot.path.withCString { orca_session_restore_snapshot(s, $0) } != 0
+            }
+            return (code, error.isEmpty ? "Mesh operation failed" : error, restoreFailed, true)
+        }.value
+        if result.0 >= 0 || result.2 { recordUndoSnapshot(snapshot, label: edit.undoLabel) }
+        else { try? FileManager.default.removeItem(at: snapshot) }
+        if result.0 < 0 && (!result.3 || edit.preservesModelOnFailure) { lastMessage = result.1; return false }
+        if result.0 >= 0, case .layerHeights = edit {
+            invalidateSlice()
+            lastMessage = String(localized: "Updated variable layer heights")
+            return true
+        }
+        if result.0 >= 0, case .boolean(let other, _, let removeOther) = edit {
+            selectedObjectIndex = index - (removeOther && other < index ? 1 : 0)
+        } else if result.0 >= 0, case .duplicate(let target) = edit {
+            selectedObjectIndex = target == nil ? -1 : Int(result.0)
+        } else if result.0 >= 0, case .delete = edit {
+            selectedObjectIndex = index
+        } else if result.0 >= 0, case .cut = edit { selectedObjectIndex = -1 }
+        else if result.0 >= 0, case .split(let objects, _, _) = edit, objects { selectedObjectIndex = -1 }
+        refreshObjectList()
+        hasModel = objectCount > 0
+        if !hasModel { modelName = nil; selectedObjectIndex = -1; clearPaintOverlay() }
+        refreshMesh(); refreshBounds(); refreshModelInfo()
+        if result.0 < 0 {
+            lastMessage = result.1 + (result.2 ? " The previous model could not be restored; its snapshot is available in Undo." : "")
             return false
         }
-        refreshMesh()
-        refreshBounds()
-        refreshModelInfo()
-        _ = refreshMeshHealth()
-        lastMessage = "Simplified → \(n) triangles"
+        _ = readMeshHealth()
+        lastMessage = "Updated model · \(objectCount) objects"
+        if case .split(let objects, _, _) = edit {
+            explodeFactor = 0
+            lastMessage = "Split into \(result.0) \(objects ? "objects" : "parts")"
+        }
+        if case .layOnFace = edit { explodeFactor = 0; lastMessage = "Placed selected face on the bed" }
+        if case .copies = edit { lastMessage = String(localized: "Updated object copies") }
         return true
         #else
-        return false
+        lastMessage = "Engine not linked"; return false
         #endif
     }
 
-    /// Plane cut with arbitrary normal (world mm). Default normal = +Z (horizontal).
-    @discardableResult
-    func cutObjectPlane(
-        point: SIMD3<Float>,
-        normal: SIMD3<Float> = SIMD3(0, 0, 1),
-        keepUpper: Bool = true,
-        keepLower: Bool = true
-    ) -> Bool {
+    func modelPartNames(object index: Int) -> [String] {
         #if ORCA_LINKED
-        guard let s = session, hasModel else { return false }
-        let idx = selectedObjectIndex >= 0 ? selectedObjectIndex : 0
-        pushUndoSnapshot(label: "cut-plane")
-        let rc = orca_session_cut_object_plane(
-            s, Int32(idx),
-            point.x, point.y, point.z,
-            normal.x, normal.y, normal.z,
-            keepUpper ? 1 : 0, keepLower ? 1 : 0
-        )
-        if rc < 0 {
-            lastMessage = orca_session_last_error(s).map { String(cString: $0) } ?? "plane cut failed"
-            return false
+        guard let session, !sessionBusy, !sliceRunning, !presetsLoading else { return [] }
+        let count = Int(orca_session_model_part_count(session, Int32(index)))
+        return (0..<count).map { part in
+            let name = orca_session_model_part_name(session, Int32(index), Int32(part)).map { String(cString: $0) } ?? ""
+            return name.isEmpty ? "Part \(part + 1)" : name
         }
-        selectedObjectIndex = -1
-        refreshObjectList()
-        refreshMesh()
-        refreshBounds()
-        refreshModelInfo()
-        lastMessage = String(
-            format: "Plane cut n=(%.1f,%.1f,%.1f) → %d object(s)",
-            normal.x, normal.y, normal.z, objectCount
-        )
-        return true
         #else
-        return false
+        return []
         #endif
     }
 
@@ -2509,6 +3654,7 @@ final class OrcaEngine: ObservableObject {
     /// Explode objects radially from bed center. factor 0 = collapse to saved layout.
     @discardableResult
     func explodeObjects(factor: Float, spacingMm: Float = 20) -> Bool {
+        guard requireIdleSession() else { return false }
         #if ORCA_LINKED
         guard let s = session, hasModel, objectCount >= 1 else {
             lastMessage = "Explode needs objects on plate"
@@ -2543,6 +3689,7 @@ final class OrcaEngine: ObservableObject {
         sizeY: Float = 10,
         sizeZ: Float = 2
     ) -> Bool {
+        guard requireIdleSession() else { return false }
         #if ORCA_LINKED
         guard let s = session else { return false }
         pushUndoSnapshot(label: "add-text-plate")

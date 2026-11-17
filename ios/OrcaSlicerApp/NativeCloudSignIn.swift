@@ -1,0 +1,177 @@
+import Foundation
+import AuthenticationServices
+import Network
+import UIKit
+
+@MainActor
+final class NativeCloudSignIn: NSObject, ASWebAuthenticationPresentationContextProviding, OrcaCloudAuthenticating {
+    private var browser: ASWebAuthenticationSession?
+    private var server: OrcaOAuthLoopbackServer?
+    private var continuation: CheckedContinuation<(code: String, verifier: String), Error>?
+    private var timeout: Task<Void, Never>?
+
+    private var flowID: UUID?
+
+    func signIn(provider: String) async throws -> (code: String, verifier: String) {
+        try await authorize { try $0.authorizationURL(provider: provider) }
+    }
+
+    func signInSSO(domain: String) async throws -> (code: String, verifier: String) {
+        try await authorize { try await OrcaCloudAPI().singleSignOn(domain: domain, pkce: $0) }
+    }
+
+    private func authorize(makeURL: @escaping (OrcaPKCE) async throws -> URL) async throws -> (code: String, verifier: String) {
+        guard continuation == nil else { throw OrcaCloudError.unavailable }
+        let pkce = try OrcaPKCE()
+        let identifier = UUID()
+        flowID = identifier
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                self.continuation = continuation
+                do {
+                    let server = try OrcaOAuthLoopbackServer(pkce: pkce)
+                    self.server = server
+                    server.start(onReady: { [weak self] in
+                        Task { @MainActor in
+                            do {
+                                let url = try await makeURL(pkce)
+                                self?.openBrowser(url: url, identifier: identifier)
+                            } catch { self?.finish(.failure(error), identifier: identifier) }
+                        }
+                    }, onCode: { [weak self] code in
+                        Task { @MainActor in self?.finish(.success((code, pkce.verifier)), identifier: identifier) }
+                    }, onFailure: { [weak self] in
+                        Task { @MainActor in self?.finish(.failure(OrcaCloudError.unavailable), identifier: identifier) }
+                    })
+                    timeout = Task { [weak self] in
+                        do { try await Task.sleep(nanoseconds: 300_000_000_000) }
+                        catch { return }
+                        self?.finish(.failure(OrcaCloudError.timedOut), identifier: identifier)
+                    }
+                } catch { finish(.failure(error), identifier: identifier) }
+            }
+        } onCancel: {
+            Task { @MainActor in self.finish(.failure(OrcaCloudError.cancelled), identifier: identifier) }
+        }
+    }
+
+    func cancel() {
+        if let flowID { finish(.failure(OrcaCloudError.cancelled), identifier: flowID) }
+    }
+
+    private func openBrowser(url: URL, identifier: UUID) {
+        guard flowID == identifier, continuation != nil else { return }
+        let browser = ASWebAuthenticationSession(url: url, callbackURLScheme: nil) { [weak self] _, _ in
+            Task { @MainActor in self?.finish(.failure(OrcaCloudError.cancelled), identifier: identifier) }
+        }
+        browser.presentationContextProvider = self
+        browser.prefersEphemeralWebBrowserSession = false
+        self.browser = browser
+        if !browser.start() { finish(.failure(OrcaCloudError.unavailable), identifier: identifier) }
+    }
+
+    private func finish(_ result: Result<(code: String, verifier: String), Error>, identifier: UUID) {
+        guard flowID == identifier, let continuation else { return }
+        self.continuation = nil
+        flowID = nil
+        timeout?.cancel()
+        timeout = nil
+        server?.cancel()
+        server = nil
+        browser?.cancel()
+        browser = nil
+        continuation.resume(with: result)
+    }
+
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .filter { $0.activationState == .foregroundActive }
+            .flatMap(\.windows).first(where: \.isKeyWindow) ?? ASPresentationAnchor()
+    }
+}
+
+/// The registered desktop callback uses localhost. Only loopback peers are
+/// accepted, with a bounded HTTP request, exact host/path and one-time PKCE state.
+private final class OrcaOAuthLoopbackServer {
+    private let pkce: OrcaPKCE
+    private let listener: NWListener
+    private let queue = DispatchQueue(label: "com.orcaslicer.ios.oauth-loopback")
+    private var consumed = false
+
+    init(pkce: OrcaPKCE) throws {
+        self.pkce = pkce
+        listener = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: pkce.port)!)
+    }
+
+    func start(onReady: @escaping () -> Void, onCode: @escaping (String) -> Void, onFailure: @escaping () -> Void) {
+        listener.stateUpdateHandler = { state in
+            switch state {
+            case .ready: onReady()
+            case .failed: onFailure()
+            default: break
+            }
+        }
+        listener.newConnectionHandler = { [weak self] connection in
+            guard let self, Self.isLoopback(connection.endpoint) else { connection.cancel(); return }
+            connection.start(queue: self.queue)
+            let expiry = DispatchWorkItem { connection.cancel() }
+            self.queue.asyncAfter(deadline: .now() + 10, execute: expiry)
+            self.read(connection, buffer: Data(), expiry: expiry, onCode: onCode)
+        }
+        listener.start(queue: queue)
+    }
+
+    func cancel() { listener.cancel() }
+
+    private static func isLoopback(_ endpoint: NWEndpoint) -> Bool {
+        guard case .hostPort(let host, _) = endpoint else { return false }
+        switch host {
+        case .ipv4(let address): return address.rawValue == Data([127, 0, 0, 1])
+        case .ipv6(let address):
+            let bytes = [UInt8](address.rawValue)
+            return bytes == [UInt8](repeating: 0, count: 15) + [1] ||
+                bytes == [UInt8](repeating: 0, count: 10) + [255, 255, 127, 0, 0, 1]
+        default: return false
+        }
+    }
+
+    private func read(_ connection: NWConnection, buffer: Data, expiry: DispatchWorkItem, onCode: @escaping (String) -> Void) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] data, _, complete, error in
+            guard let self else { expiry.cancel(); connection.cancel(); return }
+            var buffer = buffer
+            if let data { buffer.append(data) }
+            guard buffer.count <= 8192, error == nil else { expiry.cancel(); connection.cancel(); return }
+            if let headerEnd = buffer.range(of: Data("\r\n\r\n".utf8)) {
+                let header = String(decoding: buffer[..<headerEnd.lowerBound], as: UTF8.self)
+                let lines = header.components(separatedBy: "\r\n")
+                let request = (lines.first ?? "").components(separatedBy: " ")
+                let hosts = lines.dropFirst().filter { $0.lowercased().hasPrefix("host:") }
+                    .map { $0.dropFirst(5).trimmingCharacters(in: .whitespaces).lowercased() }
+                let allowedHosts = ["localhost:\(self.pkce.port)", "127.0.0.1:\(self.pkce.port)", "[::1]:\(self.pkce.port)"]
+                let code: String?
+                if !self.consumed, request.count == 3, request[0] == "GET", request[2].hasPrefix("HTTP/1."),
+                   hosts.count == 1, allowedHosts.contains(hosts[0]) {
+                    code = try? self.pkce.code(from: request[1])
+                } else { code = nil }
+                if code != nil { self.consumed = true }
+                let body = code == nil ? "Invalid sign-in callback." : "Sign-in received. You can return to OrcaSlicer."
+                let response = "HTTP/1.1 \(code == nil ? "400 Bad Request" : "200 OK")\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: \(body.utf8.count)\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n\(body)"
+                connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in
+                    expiry.cancel()
+                    connection.cancel()
+                    if let code { onCode(code) }
+                })
+            } else if complete {
+                expiry.cancel()
+                connection.cancel()
+            } else {
+                self.read(connection, buffer: buffer, expiry: expiry, onCode: onCode)
+            }
+        }
+    }
+}
+
+@MainActor
+extension OrcaCloudAccount {
+    convenience init() { self.init(authentication: NativeCloudSignIn()) }
+}

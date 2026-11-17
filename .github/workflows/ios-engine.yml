@@ -1,0 +1,144 @@
+name: iOS engine and app
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'ios/**'
+      - 'src/**'
+      - 'deps/**'
+      - 'deps_src/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - 'scripts/*ios*'
+      - 'scripts/bundle_engine_libs.sh'
+      - 'scripts/tests/test_ios_project.py'
+      - 'resources/**'
+      - '.github/workflows/ios-engine.yml'
+permissions:
+  contents: read
+jobs:
+  build:
+    # Retain the legacy device group so its in-flight dependency build can
+    # finish. Simulator validation must not wait behind a device cross-build.
+    concurrency:
+      group: ios-engine-${{ github.event.pull_request.number || github.ref }}${{ matrix.sdk == 'iphonesimulator' && '-simulator' || '' }}
+      cancel-in-progress: false
+    # Intel hosts cross-compile device ARM64 and run native Intel simulators.
+    runs-on: macos-15-intel
+    timeout-minutes: 360
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.cache/ios-ccache-${{ matrix.sdk }}
+      ORCA_IOS_COMPILER_LAUNCHER: ccache
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sdk: iphoneos
+            arch: arm64
+          - sdk: iphonesimulator
+            arch: x86_64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Check project generation
+        run: python3 -m unittest discover -s scripts/tests -p test_ios_project.py -v
+      - name: Check Swift and C interface
+        run: bash scripts/check_ios_swift.sh "${{ matrix.sdk }}"
+      - name: Identify Apple toolchain
+        id: toolchain
+        run: echo "id=$(xcodebuild -version | shasum -a 256 | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+      - name: Restore compiled engine
+        id: engine-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build-ios-${{ matrix.sdk }}-${{ matrix.arch }}/engine_bundle
+          key: ios-engine-${{ runner.os }}-${{ runner.arch }}-${{ matrix.sdk }}-${{ matrix.arch }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('src/**', 'deps_src/**', 'deps/**', 'cmake/**', 'version.inc', 'CMakeLists.txt', 'scripts/build_ios_deps.sh', 'scripts/build_ios_engine_after_deps.sh', 'scripts/bundle_engine_libs.sh', '.github/workflows/ios-engine.yml') }}
+      - name: Install build tools
+        if: steps.engine-cache.outputs.cache-hit != 'true'
+        run: brew install cmake autoconf automake libtool pkg-config ccache
+      - name: Restore SDK dependencies
+        if: steps.engine-cache.outputs.cache-hit != 'true'
+        id: deps-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: deps/build-ios-${{ matrix.sdk }}-${{ matrix.arch }}
+          key: ios-deps-${{ runner.os }}-${{ runner.arch }}-${{ matrix.sdk }}-${{ matrix.arch }}-${{ hashFiles('deps/**', 'cmake/**', 'scripts/build_ios_deps.sh') }}
+      - name: Build dependencies
+        if: steps.engine-cache.outputs.cache-hit != 'true'
+        run: bash scripts/build_ios_deps.sh "${{ matrix.sdk }}" "${{ matrix.arch }}"
+      - name: Save SDK dependencies
+        if: steps.engine-cache.outputs.cache-hit != 'true' && steps.deps-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: deps/build-ios-${{ matrix.sdk }}-${{ matrix.arch }}
+          key: ${{ steps.deps-cache.outputs.cache-primary-key }}
+      - name: Restore compiler cache
+        if: steps.engine-cache.outputs.cache-hit != 'true'
+        id: compiler-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ios-ccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.sdk }}-${{ matrix.arch }}-${{ github.sha }}
+          restore-keys: ios-ccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.sdk }}-${{ matrix.arch }}-
+      - name: Bound compiler cache
+        if: steps.engine-cache.outputs.cache-hit != 'true'
+        run: ccache --max-size 1G
+      - name: Build and bundle engine
+        id: build-engine
+        if: steps.engine-cache.outputs.cache-hit != 'true'
+        run: bash scripts/build_ios_engine_after_deps.sh "${{ matrix.sdk }}" "${{ matrix.arch }}"
+      - name: Save compiled engine
+        if: steps.build-engine.outcome == 'success'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: build-ios-${{ matrix.sdk }}-${{ matrix.arch }}/engine_bundle
+          key: ${{ steps.engine-cache.outputs.cache-primary-key }}
+      - name: Save compiler cache
+        if: always() && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
+      - name: Require linked engine and current profiles
+        run: python3 ios/generate_xcodeproj.py --require-engine "${{ matrix.sdk }}" --simulator-arch "${{ matrix.arch }}"
+      - name: Compile unsigned app
+        run: |
+          xcodebuild -project ios/OrcaSlicer.xcodeproj -scheme OrcaSlicer \
+            -sdk "${{ matrix.sdk }}" -configuration Release \
+            -derivedDataPath build-ios-app ARCHS="${{ matrix.arch }}" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+      - name: Exercise simulator engine
+        if: matrix.sdk == 'iphonesimulator'
+        run: bash scripts/test_ios_simulator.sh "${{ matrix.arch }}"
+      - name: Package unsigned app
+        env:
+          IOS_SDK: ${{ matrix.sdk }}
+        run: |
+          mkdir -p build-artifacts
+          app="build-ios-app/Build/Products/Release-${IOS_SDK}/OrcaSlicer.app"
+          python3 scripts/audit_ios_app.py "$app" "$IOS_SDK" --arch "${{ matrix.arch }}"
+          if [[ "$IOS_SDK" == iphoneos ]]; then
+            package_dir="$RUNNER_TEMP/orca-unsigned-package"
+            mkdir -p "$package_dir/Payload"
+            ditto "$app" "$package_dir/Payload/OrcaSlicer.app"
+            ditto -c -k --sequesterRsrc --keepParent "$package_dir/Payload" \
+              build-artifacts/OrcaSlicer-iphoneos-unsigned.ipa
+          else
+            ditto -c -k --sequesterRsrc --keepParent "$app" \
+              "build-artifacts/OrcaSlicer-${IOS_SDK}.zip"
+          fi
+      - name: Preserve unsigned app
+        uses: actions/upload-artifact@v4
+        with:
+          name: OrcaSlicer-${{ matrix.sdk }}
+          path: build-artifacts/
+          if-no-files-found: error
+      - name: Preserve build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-logs-${{ matrix.sdk }}
+          path: build_logs/

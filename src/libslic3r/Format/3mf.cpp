@@ -3,17 +3,42 @@
 #include "../Model.hpp"
 #include "../Utils.hpp"
 #include "../LocalesUtils.hpp"
-#include "../GCode.hpp"
 #include "../Geometry.hpp"
 #include "../GCode/ThumbnailData.hpp"
 #include "../Semver.hpp"
-#include "../Time.hpp"
 
 #include "../I18N.hpp"
+#include "libslic3r/Point.hpp"
+#include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/Slicing.hpp"
+#include "libslic3r/SLA/SupportPoint.hpp"
+#include "libslic3r/SLA/Hollowing.hpp"
+#include "libslic3r/Config.hpp"
+#include "libslic3r_version.h"
+#include "libslic3r/PrintConfig.hpp"
 
 #include "3mf.hpp"
 
+#include <cstring>
+#include <boost/spirit/home/qi/parse.hpp>
+#include <boost/spirit/home/qi/numeric/int.hpp>
+#include <cstdlib>
+#include <boost/algorithm/string/constants.hpp>
+#include <cstddef>
+#include <boost/optional/optional.hpp>
+#include <cassert>
+#include <algorithm>
+#include <exception>
+#include <cstdio>
+#include <iomanip>
+#include <cstdint>
+#include <boost/spirit/home/karma/generate.hpp>
+#include <boost/spirit/home/support/common_terminals.hpp>
+#include <boost/spirit/home/karma.hpp>
 #include <limits>
+#include <miniz.h>
+#include <map>
+#include <sstream>
 #include <stdexcept>
 
 #include <boost/algorithm/string/classification.hpp>
@@ -28,6 +53,9 @@
 #include <boost/property_tree/ptree.hpp>
 #include <boost/property_tree/xml_parser.hpp>
 #include <boost/foreach.hpp>
+#include <string>
+#include <vector>
+#include <utility>
 namespace pt = boost::property_tree;
 
 #include <expat.h>
@@ -125,6 +153,10 @@ static constexpr const char* VOLUME_TYPE = "volume";
 static constexpr const char* NAME_KEY = "name";
 static constexpr const char* MODIFIER_KEY = "modifier";
 static constexpr const char* VOLUME_TYPE_KEY = "volume_type";
+// Keep seam modes separate from the base type so older readers see a non-printing modifier.
+static constexpr const char* PRECISE_SEAM_TYPE_KEY = "precise_seam_type";
+// Preserve dormant settings without turning an older reader's modifier into an active override.
+static constexpr char PRECISE_SEAM_CONFIG_PREFIX[] = "precise_seam_config:";
 static constexpr const char* MATRIX_KEY = "matrix";
 static constexpr const char* SOURCE_FILE_KEY = "source_file";
 static constexpr const char* SOURCE_OBJECT_ID_KEY = "source_object_id";
@@ -307,14 +339,17 @@ bool PrusaFileParser::check_3mf_from_prusa(const std::string filename)
 
             mz_zip_archive_file_stat stat;
             if (!mz_zip_reader_file_stat(&archive, model_file_index, &stat)) goto EXIT;
+            // expat sizes its buffer with an int, so a larger entry cannot be parsed in one piece.
+            if (stat.m_uncomp_size > static_cast<mz_uint64>(std::numeric_limits<int>::max())) goto EXIT;
 
-            void *parser_buffer = XML_GetBuffer(m_parser, (int) stat.m_uncomp_size);
+            const int xml_size = static_cast<int>(stat.m_uncomp_size);
+            void *parser_buffer = XML_GetBuffer(m_parser, xml_size);
             if (parser_buffer == nullptr) goto EXIT;
 
-            mz_bool res = mz_zip_reader_extract_file_to_mem(&archive, stat.m_filename, parser_buffer, (size_t) stat.m_uncomp_size, 0);
+            mz_bool res = mz_zip_reader_extract_file_to_mem(&archive, stat.m_filename, parser_buffer, static_cast<size_t>(xml_size), 0);
             if (res == 0) goto EXIT;
 
-            XML_ParseBuffer(m_parser, (int) stat.m_uncomp_size, 1);
+            XML_ParseBuffer(m_parser, xml_size, 1);
         }
     }
 
@@ -368,7 +403,14 @@ ModelVolumeType type_from_string(const std::string &s)
     if (s == "ParameterModifier") return ModelVolumeType::PARAMETER_MODIFIER;
     if (s == "SupportEnforcer") return ModelVolumeType::SUPPORT_ENFORCER;
     if (s == "SupportBlocker") return ModelVolumeType::SUPPORT_BLOCKER;
-    // Default value if invalud type string received.
+    // Precise Seam types (snake_case strings from ModelVolume::type_to_string)
+    if (s == "precise_seam_center")   return ModelVolumeType::PRECISE_SEAM_CENTER;
+    if (s == "precise_seam_left")     return ModelVolumeType::PRECISE_SEAM_LEFT;
+    if (s == "precise_seam_right")    return ModelVolumeType::PRECISE_SEAM_RIGHT;
+    if (s == "precise_seam_enforced") return ModelVolumeType::PRECISE_SEAM_ENFORCED;
+    if (s == "precise_seam_blocked")  return ModelVolumeType::PRECISE_SEAM_BLOCKED;
+    if (s == "precise_seam_neutral")  return ModelVolumeType::PRECISE_SEAM_NEUTRAL;
+    // Default value if invalid type string received.
     return ModelVolumeType::MODEL_PART;
 }
 
@@ -521,6 +563,9 @@ ModelVolumeType type_from_string(const std::string &s)
         // Version of the 3mf file
         unsigned int m_version;
         bool m_check_version;
+        // Project saves/Undo need the full Orca state. Ordinary Prusa import
+        // deliberately filters settings and separates instances for desktop.
+        bool m_restore_project = false;
 
         // Semantic version of PrusaSlicer, that generated this 3MF.
         boost::optional<Semver> m_prusaslicer_generator_version;
@@ -554,7 +599,7 @@ ModelVolumeType type_from_string(const std::string &s)
         _3MF_Importer();
         ~_3MF_Importer();
 
-        bool load_model_from_file(const std::string& filename, Model& model, DynamicPrintConfig& config, ConfigSubstitutionContext& config_substitutions, bool check_version);
+        bool load_model_from_file(const std::string& filename, Model& model, DynamicPrintConfig& config, ConfigSubstitutionContext& config_substitutions, bool check_version, bool restore_project = false);
         unsigned int version() const { return m_version; }
 
     private:
@@ -677,13 +722,14 @@ ModelVolumeType type_from_string(const std::string &s)
         _destroy_xml_parser();
     }
 
-    bool _3MF_Importer::load_model_from_file(const std::string& filename, Model& model, DynamicPrintConfig& config, ConfigSubstitutionContext& config_substitutions, bool check_version)
+    bool _3MF_Importer::load_model_from_file(const std::string& filename, Model& model, DynamicPrintConfig& config, ConfigSubstitutionContext& config_substitutions, bool check_version, bool restore_project)
     {
         m_version = 0;
         m_fdm_supports_painting_version = 0;
         m_seam_painting_version = 0;
         m_mm_painting_version = 0;
         m_check_version = check_version;
+        m_restore_project = restore_project;
         m_model = &model;
         m_unit_factor = 1.0f;
         m_curr_object.reset();
@@ -770,32 +816,26 @@ ModelVolumeType type_from_string(const std::string &s)
                 std::string name(stat.m_filename);
                 std::replace(name.begin(), name.end(), '\\', '/');
 
-                /*
-                if (boost::algorithm::iequals(name, LAYER_HEIGHTS_PROFILE_FILE)) {
+                if (m_restore_project && boost::algorithm::iequals(name, LAYER_HEIGHTS_PROFILE_FILE)) {
                     // extract slic3r layer heights profile file
                     _extract_layer_heights_profile_config_from_archive(archive, stat);
                 }
-                else if (boost::algorithm::iequals(name, LAYER_CONFIG_RANGES_FILE)) {
+                else if (m_restore_project && boost::algorithm::iequals(name, LAYER_CONFIG_RANGES_FILE)) {
                     // extract slic3r layer config ranges file
                     _extract_layer_config_ranges_from_archive(archive, stat, config_substitutions);
                 }
-                else if (boost::algorithm::iequals(name, SLA_SUPPORT_POINTS_FILE)) {
+                else if (m_restore_project && boost::algorithm::iequals(name, SLA_SUPPORT_POINTS_FILE)) {
                     // extract sla support points file
                     _extract_sla_support_points_from_archive(archive, stat);
                 }
-                else if (boost::algorithm::iequals(name, SLA_DRAIN_HOLES_FILE)) {
+                else if (m_restore_project && boost::algorithm::iequals(name, SLA_DRAIN_HOLES_FILE)) {
                     // extract sla support points file
                     _extract_sla_drain_holes_from_archive(archive, stat);
                 }
-                else if (boost::algorithm::iequals(name, PRINT_CONFIG_FILE)) {
+                else if (m_restore_project && boost::algorithm::iequals(name, PRINT_CONFIG_FILE)) {
                     // extract slic3r print config file
                     _extract_print_config_from_archive(archive, stat, config, config_substitutions, filename);
                 }
-                else if (boost::algorithm::iequals(name, CUSTOM_GCODE_PER_PRINT_Z_FILE)) {
-                    // extract slic3r layer config ranges file
-                    _extract_custom_gcode_per_print_z_from_archive(archive, stat);
-                }
-                */
                 // only read the model config for Prusa 3mf
                 if (boost::algorithm::iequals(name, MODEL_CONFIG_FILE)) {
                     // extract slic3r model config file
@@ -810,7 +850,7 @@ ModelVolumeType type_from_string(const std::string &s)
 
         close_zip_reader(&archive);
 
-        if (m_version == 0) {
+        if (!m_restore_project && m_version == 0) {
             // if the 3mf was not produced by PrusaSlicer and there is more than one instance,
             // split the object in as many objects as instances
             size_t curr_models_count = m_model->objects.size();
@@ -939,7 +979,7 @@ ModelVolumeType type_from_string(const std::string &s)
 
         //BBS: copy object isteadof instance
         int object_size = model.objects.size();
-        for (int obj_index = 0; obj_index < object_size; obj_index ++) {
+        for (int obj_index = 0; !m_restore_project && obj_index < object_size; obj_index ++) {
             ModelObject* object = model.objects[obj_index];
             while (object->instances.size() > 1) {
                 ModelObject* new_model_object = model.add_object(*object);
@@ -1346,19 +1386,26 @@ ModelVolumeType type_from_string(const std::string &s)
         XML_SetUserData(m_xml_parser, (void*)this);
         XML_SetElementHandler(m_xml_parser, _3MF_Importer::_handle_start_config_xml_element, _3MF_Importer::_handle_end_config_xml_element);
 
-        void* parser_buffer = XML_GetBuffer(m_xml_parser, (int)stat.m_uncomp_size);
+        // expat sizes its buffer with an int, so a larger entry cannot be parsed in one piece.
+        if (stat.m_uncomp_size > static_cast<mz_uint64>(std::numeric_limits<int>::max())) {
+            add_error("Found invalid size");
+            return false;
+        }
+        const int xml_size = static_cast<int>(stat.m_uncomp_size);
+
+        void* parser_buffer = XML_GetBuffer(m_xml_parser, xml_size);
         if (parser_buffer == nullptr) {
             add_error("Unable to create buffer");
             return false;
         }
 
-        mz_bool res = mz_zip_reader_extract_file_to_mem(&archive, stat.m_filename, parser_buffer, (size_t)stat.m_uncomp_size, 0);
+        mz_bool res = mz_zip_reader_extract_file_to_mem(&archive, stat.m_filename, parser_buffer, static_cast<size_t>(xml_size), 0);
         if (res == 0) {
             add_error("Error while reading config data to buffer");
             return false;
         }
 
-        if (!XML_ParseBuffer(m_xml_parser, (int)stat.m_uncomp_size, 1)) {
+        if (!XML_ParseBuffer(m_xml_parser, xml_size, 1)) {
             char error_buf[1024];
             ::sprintf(error_buf, "Error (%s) while parsing xml file at line %d", XML_ErrorString(XML_GetErrorCode(m_xml_parser)), (int)XML_GetCurrentLineNumber(m_xml_parser));
             add_error(error_buf);
@@ -1922,12 +1969,12 @@ ModelVolumeType type_from_string(const std::string &s)
 
     void _3MF_Importer::_apply_transform(ModelInstance& instance, const Transform3d& transform)
     {
-        Slic3r::Geometry::Transformation t(transform);
-        // invalid scale value, return
-        if (!t.get_scaling_factor().all())
+        // Validate the affine matrix directly. Decomposing a valid mirrored transform to
+        // rotation and scale is not stable across Eigen versions and may yield a zero diagonal.
+        if (!transform.matrix().allFinite() || !transform.linear().fullPivLu().isInvertible())
             return;
 
-        instance.set_transformation(t);
+        instance.set_transformation(Slic3r::Geometry::Transformation(transform));
     }
 
     bool _3MF_Importer::_handle_start_config(const char** attributes, unsigned int num_attributes)
@@ -2035,6 +2082,7 @@ ModelVolumeType type_from_string(const std::string &s)
         std::vector<std::string> valid_keys = {
             "name",
             "volume_type",
+            PRECISE_SEAM_TYPE_KEY,
             "matrix",
             "source_file",
             "source_object_id",
@@ -2047,7 +2095,7 @@ ModelVolumeType type_from_string(const std::string &s)
         };
 
         auto itor = std::find(valid_keys.begin(), valid_keys.end(), key);
-        if (itor == valid_keys.end()) {
+        if (!m_restore_project && itor == valid_keys.end() && !(type == VOLUME_TYPE && boost::starts_with(key, PRECISE_SEAM_CONFIG_PREFIX))) {
             // do nothing if not valid keys
             return true;
         }
@@ -2180,6 +2228,8 @@ ModelVolumeType type_from_string(const std::string &s)
             volume->mmu_segmentation_facets.shrink_to_fit();
             volume->fuzzy_skin_facets.shrink_to_fit();
 
+            // Apply the seam mode after all base-type metadata, regardless of XML key order.
+            ModelVolumeType precise_seam_type = ModelVolumeType::INVALID;
             // apply the remaining volume's metadata
             for (const Metadata& metadata : volume_data.metadata) {
                 if (metadata.key == NAME_KEY)
@@ -2188,6 +2238,10 @@ ModelVolumeType type_from_string(const std::string &s)
 					volume->set_type(ModelVolumeType::PARAMETER_MODIFIER);
                 else if (metadata.key == VOLUME_TYPE_KEY)
                     volume->set_type(type_from_string(metadata.value));
+                else if (metadata.key == PRECISE_SEAM_TYPE_KEY)
+                    precise_seam_type = ModelVolume::type_from_string(metadata.value);
+                else if (boost::starts_with(metadata.key, PRECISE_SEAM_CONFIG_PREFIX))
+                    continue; // Restore dormant settings only after the final volume type is known.
                 else if (metadata.key == SOURCE_FILE_KEY)
                     volume->source.input_file = metadata.value;
                 else if (metadata.key == SOURCE_OBJECT_ID_KEY)
@@ -2206,6 +2260,22 @@ ModelVolumeType type_from_string(const std::string &s)
                     volume->source.is_converted_from_meters = metadata.value == "1";
                 else
                     volume->config.set_deserialize(metadata.key, metadata.value, config_substitutions);
+            }
+
+            // Missing or unknown seam modes retain the ordinary modifier fallback.
+            // Ignore seam metadata on other base types; legacy inline seam types still load above.
+            if (volume->is_modifier() && is_precise_seam(precise_seam_type))
+                volume->set_type(precise_seam_type);
+
+            // Unknown seam modes must remain inert modifiers, even when dormant settings are present.
+            if (volume->is_precise_seam()) {
+                for (const Metadata& metadata : volume_data.metadata) {
+                    if (boost::starts_with(metadata.key, PRECISE_SEAM_CONFIG_PREFIX)) {
+                        const std::string key = metadata.key.substr(sizeof(PRECISE_SEAM_CONFIG_PREFIX) - 1);
+                        if (!key.empty())
+                            volume->config.set_deserialize(key, metadata.value, config_substitutions);
+                    }
+                }
             }
 
             // this may happen for 3mf saved by 3rd part softwares
@@ -3123,11 +3193,18 @@ ModelVolumeType type_from_string(const std::string &s)
                                 stream << "   <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << VOLUME_TYPE << "\" " << KEY_ATTR << "=\"" << NAME_KEY << "\" " << VALUE_ATTR << "=\"" << xml_escape(volume->name) << "\"/>\n";
 
                             // stores volume's modifier field (legacy, to support old slicers)
-                            if (volume->is_modifier())
+                            // Readers with only the legacy flag still see helper geometry as a modifier.
+                            if (volume->is_modifier() || volume->is_precise_seam())
                                 stream << "   <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << VOLUME_TYPE << "\" " << KEY_ATTR << "=\"" << MODIFIER_KEY << "\" " << VALUE_ATTR << "=\"1\"/>\n";
-                            // stores volume's type (overrides the modifier field above)
+                            // This Prusa-format reader uses ParameterModifier, not Bambu's modifier_part.
+                            // The base type overrides the legacy flag, so it must also be backward-compatible.
+                            // Use the same spelling for ordinary modifiers, including a downgraded seam helper.
+                            const bool store_as_modifier = volume->is_modifier() || volume->is_precise_seam();
                             stream << "   <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << VOLUME_TYPE << "\" " << KEY_ATTR << "=\"" << VOLUME_TYPE_KEY << "\" " <<
-                                VALUE_ATTR << "=\"" << ModelVolume::type_to_string(volume->type()) << "\"/>\n";
+                                VALUE_ATTR << "=\"" << (store_as_modifier ? "ParameterModifier" : ModelVolume::type_to_string(volume->type())) << "\"/>\n";
+                            if (volume->is_precise_seam())
+                                stream << "   <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << VOLUME_TYPE << "\" " << KEY_ATTR << "=\"" << PRECISE_SEAM_TYPE_KEY << "\" " <<
+                                    VALUE_ATTR << "=\"" << ModelVolume::type_to_string(volume->type()) << "\"/>\n";
 
                             // stores volume's local matrix
                             stream << "   <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << VOLUME_TYPE << "\" " << KEY_ATTR << "=\"" << MATRIX_KEY << "\" " << VALUE_ATTR << "=\"";
@@ -3162,7 +3239,12 @@ ModelVolumeType type_from_string(const std::string &s)
 
                             // stores volume's config data
                             for (const std::string& key : volume->config.keys()) {
-                                stream << "   <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << VOLUME_TYPE << "\" " << KEY_ATTR << "=\"" << key << "\" " << VALUE_ATTR << "=\"" << volume->config.opt_serialize(key) << "\"/>\n";
+                                // Seam settings are inactive but must survive changing the helper back into a part/modifier.
+                                const bool dormant = volume->is_precise_seam();
+                                const std::string stored_key = dormant ? PRECISE_SEAM_CONFIG_PREFIX + key : key;
+                                const std::string value = volume->config.opt_serialize(key);
+                                // Config serialization is C-style, not XML: escape active settings too, including tabs.
+                                stream << "   <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << VOLUME_TYPE << "\" " << KEY_ATTR << "=\"" << stored_key << "\" " << VALUE_ATTR << "=\"" << xml_escape_double_quotes_attribute_value(value) << "\"/>\n";
                             }
 
                             // stores mesh's statistics
@@ -3270,6 +3352,18 @@ bool load_3mf(const char* path, DynamicPrintConfig& config, ConfigSubstitutionCo
     CNumericLocalesSetter locales_setter;
     _3MF_Importer         importer;
     bool res = importer.load_model_from_file(path, *model, config, config_substitutions, check_version);
+    importer.log_errors();
+    handle_legacy_project_loaded(importer.version(), config);
+    return res;
+}
+
+bool restore_3mf(const char* path, DynamicPrintConfig& config, ConfigSubstitutionContext& config_substitutions, Model* model)
+{
+    if (path == nullptr || model == nullptr)
+        return false;
+    CNumericLocalesSetter locales_setter;
+    _3MF_Importer importer;
+    const bool res = importer.load_model_from_file(path, *model, config, config_substitutions, true, true);
     importer.log_errors();
     handle_legacy_project_loaded(importer.version(), config);
     return res;

@@ -1,3 +1,6 @@
+> Historical checklist: completion claims below are not current verification.
+> See [current integration status](IOS_MODERNIZATION.md) and `IOS_PORT_STATUS.json`.
+
 # iOS ↔ desktop wxWidgets feature parity
 
 **wxWidgets does not run on iOS.** Desktop Orca uses wx + OpenGL; the iOS port is **SwiftUI + SceneKit** over the **same libslic3r**.

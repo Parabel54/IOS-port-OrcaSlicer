@@ -1,6 +1,6 @@
 # iOS port — build notes
 
-Branch: `ios-port`  
+Branch: `ios-modernization`
 Engine: official `libslic3r` via `src/ios/orca_slice_c_api` → `liborca_engine.a`  
 Host: SwiftUI app in `ios/OrcaSlicerApp` (`ORCA_LINKED` when engine is linked).
 
@@ -11,13 +11,17 @@ Host: SwiftUI app in `ios/OrcaSlicerApp` (`ORCA_LINKED` when engine is linked).
 - iOS deps already built under:
   - `deps/build-ios-iphonesimulator-arm64/OrcaSlicer_dep/usr/local`
   - `deps/build-ios-iphoneos-arm64/OrcaSlicer_dep/usr/local`
+  - Intel simulator builds use `deps/build-ios-iphonesimulator-x86_64/OrcaSlicer_dep/usr/local` instead of the ARM simulator prefix.
 
 ## Engine rebuild
 
 ```bash
 export PATH="$HOME/local/bin:$PATH"
-# Simulator
+# Apple Silicon simulator
 ./scripts/build_ios_engine_after_deps.sh iphonesimulator arm64
+# Intel simulator (build dependencies for the same target architecture first)
+./scripts/build_ios_deps.sh iphonesimulator x86_64
+./scripts/build_ios_engine_after_deps.sh iphonesimulator x86_64
 # Device
 ./scripts/build_ios_engine_after_deps.sh iphoneos arm64
 ```
@@ -26,19 +30,31 @@ Bundles land in:
 
 - `build-ios-iphonesimulator-arm64/engine_bundle/lib/liborca_engine.a`
 - `build-ios-iphoneos-arm64/engine_bundle/lib/liborca_engine.a`
+- `build-ios-iphonesimulator-x86_64/engine_bundle/lib/liborca_engine.a` (Intel simulator)
 
 ## App build
 
 ```bash
-cd ios
-xcodebuild -project OrcaSlicer.xcodeproj -scheme OrcaSlicer \
-  -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.5' \
-  ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
-  DEVELOPMENT_TEAM=6PU4X4CG8B CODE_SIGN_STYLE=Automatic \
-  build
+# Generator defaults to an ARM simulator. On Intel, add --simulator-arch x86_64.
+python3 ios/generate_xcodeproj.py --require-engine iphonesimulator --simulator-arch arm64
+xcodebuild -project ios/OrcaSlicer.xcodeproj -scheme OrcaSlicer \
+  -sdk iphonesimulator -configuration Release -derivedDataPath build-ios-app \
+  ARCHS=arm64 CODE_SIGNING_ALLOWED=NO build
+# Run native, GPU and phone/tablet UI tests on the matching Mac architecture.
+bash scripts/test_ios_simulator.sh arm64
 ```
 
-Device install uses team **6PU4X4CG8B**. Prefer arm64-only destinations (engine is arm64).
+On Intel, use `x86_64` for both generator/build arguments and the simulator test.
+Choose an available iOS runtime from the selected Xcode SDK family; the smoke
+script selects one automatically. Device builds always target `iphoneos arm64`.
+Set your own development team in Xcode for physical installation.
+
+CI uses standard `macos-15-intel` hosts for both targets because ARM hosted jobs
+have been failing to acquire runners. Engine/dependency/compiler caches include
+host and target architectures. Native, GPU rendering and UI assertions remain
+enabled on the Intel simulator. `audit_ios_app.py` checks the requested CPU,
+iOS versus simulator platform, Apple runtime dependencies and foreign binaries.
+An SDK type-check pass alone does not establish native runtime correctness.
 
 ## Profiles
 

@@ -36,15 +36,21 @@ ORCA_API int orca_session_load_model(orca_session_t *s, const char *path);
 
 /** Same as load_model with append=1 (keep existing objects). */
 ORCA_API int orca_session_add_model(orca_session_t *s, const char *path);
+/** Append geometry only (desktop handy-model behavior); preserve current printer/process/filament settings. */
+ORCA_API int orca_session_add_model_geometry(orca_session_t *s, const char *path);
 
 /**
  * Load config from official .json / .ini profile.
  * Implementation: DynamicPrintConfig::load_from_json / load_from_ini
+ * Staged failures preserve the current configuration and processed preview.
+ * Success invalidates previous slicing/statistics.
  */
 ORCA_API int orca_session_load_config(orca_session_t *s, const char *config_path);
 
 /**
  * Set a single DynamicPrintConfig option (e.g. "layer_height", "0.2").
+ * Stage strict deserialization; failure preserves config and processed preview.
+ * Success invalidates previous slicing/statistics, including global settings.
  */
 ORCA_API int orca_session_set_option(orca_session_t *s, const char *key, const char *value);
 
@@ -63,6 +69,62 @@ ORCA_API void orca_session_set_progress_callback(
  * @return 0 on success
  */
 ORCA_API int orca_session_slice_to_gcode(orca_session_t *s, const char *gcode_out_path);
+
+/**
+ * Request cancellation of the active slice. Safe from another thread or the
+ * progress callback. Other session calls must be serialized by the caller;
+ * do not destroy the session until slice_to_gcode returns. Cancellation returns -7.
+ */
+ORCA_API void orca_session_cancel_slice(orca_session_t *s);
+
+
+/** Processed toolpath segment, in mm; feedrate is mm/min for the mobile viewer. */
+typedef struct orca_preview_segment {
+    float start_x, start_y, start_z;
+    float end_x, end_y, end_z;
+    float width, feedrate;
+    int role;
+    int travel;
+    float height; // processed extrusion height in mm (0 for travel)
+    float actual_speed, volumetric_flow, actual_volumetric_flow;
+    float fan_speed, temperature, pressure_advance, acceleration, jerk, layer_duration;
+    int extruder_id, color_id;
+    int move_type; // GCodeProcessor EMoveType: retract=1 ... travel=8, wipe=9, extrude=10
+    unsigned int layer_id, gcode_id;
+    unsigned int color_rgba; // interpreted filament/color-change RGB, alpha in low byte
+} orca_preview_segment_t;
+
+/**
+ * Preview from the last successful slice's official GCodeProcessorResult.
+ * Includes every physical move and preview event; no layer or path sampling.
+ * count equals total_count. Free *segments with orca_free().
+ * Returns an error if no successful slice is available or its buffers were transferred.
+ */
+ORCA_API int orca_session_export_preview(
+    orca_session_t *s, orca_preview_segment_t **segments, size_t *count, size_t *total_count);
+
+/** Owns the processed record vector independently of the originating session. */
+typedef struct orca_preview_buffer orca_preview_buffer_t;
+/** Transfer every processed record without copying. Null on failure; outputs are
+ * cleared. The returned data stays valid until buffer_destroy, including across
+ * later session edits, reloads or destruction. Never pass data to orca_free.
+ * Caller serializes session access. Stats/metadata stay in the session; another
+ * preview export/take requires reloading or slicing G-code again. */
+ORCA_API orca_preview_buffer_t *orca_session_take_preview(orca_session_t *s,
+    const orca_preview_segment_t **data, size_t *count, size_t *total_count);
+ORCA_API void orca_preview_buffer_destroy(orca_preview_buffer_t *buffer);
+
+/** Open a text G-code through the desktop GCodeProcessor without changing the
+ * model or selected presets. Failure retains the prior preview. File bytes are
+ * never modified and post-processing hooks are not run. Caller serializes access. */
+ORCA_API int orca_session_load_gcode(orca_session_t *s, const char *path);
+
+/** Last processed file's bed dimensions and filament densities as JSON. Pointer
+ * remains valid until the next preview result/session mutation. */
+ORCA_API const char *orca_session_preview_metadata_json(orca_session_t *s);
+
+/** Official feature label; valid until the next call on this thread. */
+ORCA_API const char *orca_preview_role_name(int role);
 
 /**
  * Axis-aligned bounding box of loaded model (mm).
@@ -126,6 +188,17 @@ ORCA_API int orca_session_option_info(
     char *category_buf, size_t category_len,
     char *sidetext_buf, size_t sidetext_len);
 
+/** Configured post-processing commands; returned strings belong to the session. */
+ORCA_API int orca_session_post_process_count(orca_session_t *s);
+ORCA_API const char *orca_session_post_process_script(orca_session_t *s, int index);
+
+/** Desktop presentation: scope 0=process, 1=filament, 2=printer, -1=internal.
+ * Returns the minimum ConfigOptionMode, or -1 for hidden/read-only options. */
+ORCA_API int orca_session_option_presentation(const char *key, int *scope_out);
+
+/** Native option explanation; borrowed process-lifetime text, null for missing/empty help. */
+ORCA_API const char *orca_option_tooltip(const char *key);
+
 /** Enum serialize keys / labels for coEnum options (from ConfigOptionDef). */
 ORCA_API int orca_session_option_enum_count(orca_session_t *s, const char *key);
 ORCA_API const char *orca_session_option_enum_value(orca_session_t *s, const char *key, int index);
@@ -159,9 +232,16 @@ ORCA_API int orca_session_rotate_object_axis(
 ORCA_API int orca_session_mirror_object(
     orca_session_t *s, int index, int axis);
 
-/**
- * Uniform scale object about its center. index = -1 → all.
- */
+/** Relative scale along local X/Y/Z axes. Keeps the visible center and bed contact. */
+ORCA_API int orca_session_scale_object_axes(orca_session_t *s, int index, float x, float y, float z);
+/** Primitive kinds: cube=0, cylinder=1, sphere=2, cone=3, torus=4, disc=5.
+ * x/y/z are cube dimensions; x is diameter, z height; torus x is hole diameter, y tube diameter.
+ * Returns the appended object index, or a negative error. */
+ORCA_API int orca_session_add_primitive(orca_session_t *s, int kind, float x, float y, float z);
+/** Preset scope: process=0, filament=1, printer=2. Origin: system=0, local=1, cloud=2. */
+ORCA_API int orca_session_preset_origin(orca_session_t *s, int scope, const char *name);
+
+/** Uniform scale about the selection center; index = -1 applies to the whole group. */
 ORCA_API int orca_session_scale_object(
     orca_session_t *s, int index, float factor);
 
@@ -175,6 +255,10 @@ ORCA_API int orca_session_scale_to_fit(
  * Official auto-orient (libslic3r orient) for object; index = -1 → all.
  */
 ORCA_API int orca_session_orient_object(orca_session_t *s, int index);
+/** Desktop Lay on Face. Pick a world-space point on a candidate hull face;
+ * native code resolves the touched instance, rotates that face down and drops
+ * that instance to the bed. Rejected picks leave model/preview untouched. */
+ORCA_API int orca_session_lay_on_face(orca_session_t *s, int object_index, float x, float y, float z);
 
 /**
  * Auto-arrange objects on bed (libnest2d arrange_objects).
@@ -185,6 +269,55 @@ ORCA_API int orca_session_arrange(orca_session_t *s);
  * FFF extruder / multi-filament slots from selected printer.
  * @return nozzle count (max(1, nozzle_diameter.size()))
  */
+/** Add one project filament using desktop PresetBundle sizing and flush data.
+ * Preserves existing material/process edits; respects the desktop paint limit. */
+ORCA_API int orca_max_project_filaments(void);
+ORCA_API int orca_max_paint_filaments(void);
+ORCA_API int orca_session_add_project_filament(orca_session_t *s);
+/** Desktop virtual mixed filament: 2-3 distinct physical, 1-based slots,
+ * positive integer percentages totaling 100. Linear gradients require 2 slots. */
+ORCA_API int orca_session_add_mixed_filament(orca_session_t *s, const int *components, const int *ratios,
+                                           size_t count, int gradient, int reverse, int per_part);
+
+/** Existing mixed slot data as JSON. Null on error; copy before the next call. */
+ORCA_API const char *orca_session_mixed_filament_json(orca_session_t *s, int slot);
+/** Edit an existing mix without changing its slot/components/painting IDs.
+ * Optional integer percentages must total 100; count=0 preserves original ratios.
+ * gradient_mode: -1 preserves all gradient fields, 0 disables, 1/2 use forward/
+ * reverse native linear gradients. per_part applies only with a new linear mode. */
+ORCA_API int orca_session_update_mixed_filament(orca_session_t *s, int slot,
+    const int *ratios, size_t count, int gradient_mode, int per_part);
+/** Replace 2/3 physical components of an existing mix, preserving its slot ID.
+ * Components are 1-based. A count change requires matching ratio_count;
+ * ratio_count=0 otherwise preserves exact original ratios. Gradient modes as above. */
+ORCA_API int orca_session_replace_mixed_components(orca_session_t *s, int slot,
+    const int *components, size_t component_count, const int *ratios, size_t ratio_count,
+    int gradient_mode, int per_part);
+
+/** Native editor limits for gradient shares (both components keep flowing). */
+ORCA_API void orca_mixed_gradient_limits(double *minimum, double *maximum);
+typedef struct orca_gradient_anchor {
+    double x, y;
+    double m_in, m_out; /* NaN selects the native automatic tangent. */
+} orca_gradient_anchor_t;
+/** Pure native curve helpers; no project/session mutation. Returned strings are
+ * borrowed until the next call to the same function on this thread. Invalid
+ * inputs return null (NaN for sample). Inspect JSON includes anchors and 129
+ * equally spaced samples from the desktop Hermite/PCHIP evaluator. */
+ORCA_API const char *orca_gradient_curve_json(const char *encoded);
+ORCA_API const char *orca_gradient_curve_encode(const orca_gradient_anchor_t *anchors, size_t count);
+ORCA_API double orca_gradient_curve_sample(const char *encoded, double position);
+/** Add/edit gradient fields using the existing native range/curve encodings.
+ * Empty curve selects a linear gradient. Edit can atomically include component
+ * and ratio changes; null components/count=0 and ratio_count=0 preserve them.
+ * Disabling a gradient keeps its range/curve for later re-enabling. */
+ORCA_API int orca_session_add_mixed_gradient(orca_session_t *s,
+    const int *components, const int *ratios, size_t count, int enabled,
+    const char *range, const char *curve, int per_part);
+ORCA_API int orca_session_edit_mixed_gradient(orca_session_t *s, int slot,
+    const int *components, size_t component_count, const int *ratios, size_t ratio_count,
+    int enabled, const char *range, const char *curve, int per_part);
+
 ORCA_API int orca_session_extruder_count(orca_session_t *s);
 
 /**
@@ -194,7 +327,9 @@ ORCA_API int orca_session_extruder_count(orca_session_t *s);
 ORCA_API const char *orca_session_filament_slot_name(orca_session_t *s, int slot);
 
 /**
- * Assign system/user filament preset to extruder slot, then apply_presets.
+ * Assign a system/cloud/personal profile to an existing physical project slot.
+ * Preserves process/printer/project settings and other slot values; resolves
+ * native nozzle variants and updates mixes derived from this physical slot.
  */
 ORCA_API int orca_session_set_filament_slot(
     orca_session_t *s, int slot, const char *filament_name);
@@ -237,6 +372,18 @@ ORCA_API int orca_session_model_info(
  * @return new object index, or <0 on error
  */
 ORCA_API int orca_session_duplicate_object(orca_session_t *s, int index);
+
+/** Number of instances of one object, or <0 for an invalid object. */
+ORCA_API int orca_session_object_instance_count(orca_session_t *s, int index);
+
+/**
+ * Set the selected object's total instances (desktop Copies, 0..1000).
+ * Zero removes the object. Added instances share its mesh, settings and paint,
+ * retain the last instance's transform, and receive a diagonal bed-sized offset.
+ * Invalid input/failures leave the model and preview unchanged. Success returns
+ * 0; an unchanged count is a no-op. Independent objects use duplicate_object.
+ */
+ORCA_API int orca_session_set_object_instances(orca_session_t *s, int index, int count);
 
 /**
  * Export mesh for a single object (world space after instances).
@@ -374,6 +521,15 @@ ORCA_API int orca_session_import_config(orca_session_t *s, const char *path);
 ORCA_API int orca_session_import_user_preset(
     orca_session_t *s, const char *path, int kind);
 
+/** Import native JSON or an Orca/ZIP preset bundle into the official catalog.
+ * Returns the number imported, or a negative error. Does not select or apply it. */
+ORCA_API int orca_session_import_preset_catalog(orca_session_t *s, const char *path);
+/** Apply cloud profile records using official preset inheritance and identity.
+ * path contains a JSON array of {id,name,updated_time,content}. */
+ORCA_API int orca_session_import_cloud_presets(orca_session_t *s, const char *path, const char *user_id);
+/** Export user printer, filament and process presets as cloud profile records. */
+ORCA_API int orca_session_export_user_profiles(orca_session_t *s, const char *path);
+
 /**
  * Clone object into an Nx × Ny grid with spacing_mm between origins, then arrange.
  * index = source object; nx,ny >= 1 (total clones = nx*ny including original kept).
@@ -412,11 +568,28 @@ ORCA_API int orca_session_mesh_stats(
     int *facets, int *open_edges, int *parts, float *volume_mm3);
 
 /**
- * Attempt official MeshBoolean::repair on object volumes (CGAL).
+ * Attempt official repair_mesh on object volumes (CGAL).
  * index = -1 → all objects. Updates mesh in place.
  * @return 0 on success (partial repairs still 0 if any volume fixed)
  */
 ORCA_API int orca_session_repair_mesh(orca_session_t *s, int index);
+
+/** Solid model parts (excludes modifiers/negative/support volumes).
+ * part_index is an ordinal in this filtered list, not a raw volume index.
+ * Names remain valid until the model changes; invalid queries return 0/NULL.
+ */
+ORCA_API int orca_session_model_part_count(orca_session_t *s, int object_index);
+ORCA_API const char *orca_session_model_part_name(orca_session_t *s, int object_index, int part_index);
+
+/** Desktop Split to objects / Split to parts, using native painting remapping.
+ * to_objects=1 splits the whole object; part_index is ignored. drop_to_bed
+ * optionally drops the resulting independent objects (otherwise Z is retained).
+ * to_objects=0 splits one selected solid part into volumes in the same object,
+ * preserving their placement. Original model is retained on failure/no split.
+ * Returns the number of resulting pieces (>1), or <0 with a diagnostic.
+ */
+ORCA_API int orca_session_split_model(orca_session_t *s, int object_index,
+    int part_index, int to_objects, int drop_to_bed);
 
 /**
  * Horizontal plane cut at world Z = z_mm (mm).
@@ -486,16 +659,37 @@ ORCA_API int orca_session_get_calib_mode(orca_session_t *s);
 
 /**
  * Per-object config override (ModelObject::config) — desktop Object Settings.
- * index: object index. set: deserialize key=value into object config.
+ * index: object index. set: strictly deserialize a supported key into object config.
+ * Successful edits/erases invalidate slice statistics and cached preview.
  * get: serialize option into buf (empty if not overridden).
  * erase: remove override so global process value applies.
  */
+/** 1 for desktop PrintObjectConfig/PrintRegionConfig keys (including extruder), else 0. */
+ORCA_API int orca_object_option_supported(const char *key);
+
 ORCA_API int orca_session_set_object_option(
     orca_session_t *s, int index, const char *key, const char *value);
 ORCA_API int orca_session_get_object_option(
     orca_session_t *s, int index, const char *key, char *buf, size_t buf_len);
 ORCA_API int orca_session_erase_object_option(
     orca_session_t *s, int index, const char *key);
+
+/** Native variable-layer profile, with Z referenced to the object's print base. */
+typedef struct orca_layer_height_point { double z, height; } orca_layer_height_point_t;
+typedef struct orca_layer_profile_info {
+    double min_height, max_height, object_height;
+    size_t point_count;
+    int is_custom;
+} orca_layer_profile_info_t;
+/** Export the effective profile from native PrintObject slicing parameters.
+ * Free *points with orca_free. Failure clears outputs and leaves the model intact. */
+ORCA_API int orca_session_export_layer_profile(orca_session_t *s, int object_index,
+    orca_layer_profile_info_t *info, orca_layer_height_point_t **points);
+/** mode: 0=adaptive (quality 0..1), 1=smooth (radius 1..10, keep_min 0/1),
+ * 2=reset. Stages native adaptive/smoothing output before changing the object's
+ * existing 3MF layer_height_profile. Successful edits invalidate prior slicing. */
+ORCA_API int orca_session_edit_layer_profile(orca_session_t *s, int object_index,
+    int mode, float quality, int radius, int keep_min);
 
 /**
  * Assign extruder (1-based desktop convention; 0 = default) on object config.
@@ -518,7 +712,7 @@ ORCA_API int orca_session_restore_snapshot(orca_session_t *s, const char *path);
  * paint_kind:
  *   0 = support (supported_facets)  state: 0=none 1=enforcer 2=blocker
  *   1 = seam (seam_facets)          state: 0=none 1=enforcer 2=blocker
- *   2 = mmu / multi-material        state: 0=none, 1..16 = extruder (EnforcerBlockerType)
+ *   2 = mmu / multi-material        state: 0=none, 1..orca_max_paint_filaments() = extruder (EnforcerBlockerType)
  *   3 = fuzzy skin                  state: 0=none 1=fuzzy (ENFORCER)
  *
  * object_index: specific object, or -1 for auto (nearest object under hit).
@@ -558,7 +752,8 @@ ORCA_API int orca_session_paint_stats(
     int *painted_count);
 
 /**
- * Export painted facets as world-space mesh for SceneKit overlay.
+ * Export shared painted facets through every instance's world transform for
+ * the SceneKit overlay. paint_stats counts annotations once per model volume.
  * state: specific EnforcerBlockerType value, or -1 for any non-NONE.
  * Free *out_positions / *out_indices with orca_free().
  * @return 0 on success (empty mesh is still 0 with counts 0)
@@ -618,6 +813,7 @@ ORCA_API int orca_session_export_brim_ear_mesh(
 /**
  * Mesh boolean between two objects (desktop GLGizmoMeshBoolean).
  * op: 0=union, 1=difference (A − B), 2=intersection.
+ * All world-space instances are included and flattened into one instance of A.
  * Result replaces object A volumes; object B is deleted when delete_b != 0.
  * @return 0 on success
  */

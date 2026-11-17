@@ -7,15 +7,17 @@ export PATH="$HOME/local/bin:/usr/bin:/bin:$PATH"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET="${1:-iphonesimulator}"   # iphonesimulator | iphoneos
 ARCH="${2:-arm64}"
+case "$TARGET:$ARCH" in
+  iphoneos:arm64|iphonesimulator:arm64|iphonesimulator:x86_64) ;;
+  *) echo "Expected iphoneos:arm64 or iphonesimulator:arm64/x86_64" >&2; exit 2 ;;
+esac
 BUILD_DIR="${ROOT}/deps/build-ios-${TARGET}-${ARCH}"
 LOG_DIR="${ROOT}/build_logs"
 mkdir -p "$LOG_DIR" "$BUILD_DIR"
 
 if [[ "$TARGET" == "iphonesimulator" ]]; then
-  PLATFORM=OS64SIMULATOR
   SYSROOT=iphonesimulator
 else
-  PLATFORM=OS64
   SYSROOT=iphoneos
 fi
 
@@ -44,4 +46,4 @@ cmake --build "$BUILD_DIR" --target deps -j "$(sysctl -n hw.ncpu)" \
   2>&1 | tee "${LOG_DIR}/ios_deps_build.log"
 
 echo "DEPS OK → ${BUILD_DIR}/OrcaSlicer_dep/usr/local"
-ls -la "${BUILD_DIR}/OrcaSlicer_dep/usr/local/lib" | head -40
+find "${BUILD_DIR}/OrcaSlicer_dep/usr/local/lib" -maxdepth 1 -type f -print

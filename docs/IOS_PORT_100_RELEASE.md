@@ -1,3 +1,6 @@
+> Historical checklist: completion claims below are not current verification.
+> See [current integration status](IOS_MODERNIZATION.md) and `IOS_PORT_STATUS.json`.
+
 # OrcaSlicer iOS port — 100% release notes (`ios-port`)
 
 **Tag:** `ios-port-100`  
