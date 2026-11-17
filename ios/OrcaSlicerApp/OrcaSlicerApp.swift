@@ -1219,8 +1219,9 @@ struct OrcaRootView: View {
 
     private func uploadGCodeToFlashforge() async {
         guard let source = engine.gcodeURL else { printerStatus = "Slice first to produce G-code"; return }
-        guard engine.selectedPrinter.lowercased().hasPrefix("flashforge") else {
-            printerStatus = "Select the matching Flashforge slicing profile in Process before uploading"
+        let printerModel = engine.getOption("printer_model") ?? ""
+        guard FlashforgeClient.profileMatches(printerModel: printerModel) else {
+            printerStatus = String(localized: "Select the matching Flashforge printer preset before uploading")
             return
         }
         isConnecting = true
@@ -1231,9 +1232,7 @@ struct OrcaRootView: View {
             let current = try await client.detail()
             guard !Task.isCancelled else { return }
             applyFlashforgeStatus(current)
-            let selected = engine.selectedPrinter.lowercased()
-            if (current.modelID == 38 && !selected.contains("ad5x")) ||
-               ([35, 36].contains(current.modelID ?? -1) && !selected.contains("5m")) {
+            if !FlashforgeClient.profileMatches(printerModel: printerModel, modelID: current.modelID) {
                 printerStatus = "The connected printer does not match the selected Flashforge slicing profile"
                 return
             }
@@ -1292,8 +1291,8 @@ struct OrcaRootView: View {
 
     private func uploadGCodeToFlashforgeTCP() async {
         guard let source = engine.gcodeURL else { printerStatus = String(localized: "Slice first to produce G-code"); return }
-        guard engine.selectedPrinter.lowercased().hasPrefix("flashforge") else {
-            printerStatus = String(localized: "Select the matching Flashforge slicing profile before uploading")
+        guard FlashforgeClient.profileMatches(printerModel: engine.getOption("printer_model") ?? "") else {
+            printerStatus = String(localized: "Select the matching Flashforge printer preset before uploading")
             return
         }
         isConnecting = true

@@ -44,6 +44,19 @@ struct FlashforgeSmoke {
         defer { session.invalidateAndCancel() }
         let client = try FlashforgeClient(address: "http://192.0.2.1", serial: "fixture-serial", code: "fixture-code", session: session)
         precondition(client.baseURL.port == 8898)
+        for model in ["Flashforge AD5X", "FLASHFORGE AD5X", "Flashforge AD5X "] {
+            precondition(FlashforgeClient.profileMatches(printerModel: model, modelID: 38))
+            precondition(!FlashforgeClient.profileMatches(printerModel: model, modelID: 35))
+        }
+        for model in ["Flashforge Adventurer 5M", "Flashforge Adventurer 5M Pro", "Flashforge AD5M"] {
+            precondition(FlashforgeClient.profileMatches(printerModel: model, modelID: 35))
+            precondition(FlashforgeClient.profileMatches(printerModel: model, modelID: 36))
+            precondition(!FlashforgeClient.profileMatches(printerModel: model, modelID: 38))
+        }
+        precondition(FlashforgeClient.profileMatches(printerModel: "Flashforge Creator 5"))
+        for model in ["", "Voron 2.4", "Bambu Lab A1", "My AD5X preset"] {
+            precondition(!FlashforgeClient.profileMatches(printerModel: model))
+        }
         FlashforgeFixtureProtocol.handler = { request in
             precondition(request.url!.path == "/detail" && request.httpMethod == "POST")
             let body = try jsonBody(request)
@@ -101,6 +114,6 @@ struct FlashforgeSmoke {
             do { _ = try FlashforgeClient.response(Data(body.utf8), status: 200); preconditionFailure("Invalid response accepted") }
             catch {}
         }
-        print("PASS: Flashforge AD5X/5M status, credentials, IFS mappings, multipart upload, explicit start/cancel and invalid response handling")
+        print("PASS: Flashforge AD5X/5M hardware profile matching, status, credentials, IFS mappings, multipart upload, explicit start/cancel and invalid response handling")
     }
 }

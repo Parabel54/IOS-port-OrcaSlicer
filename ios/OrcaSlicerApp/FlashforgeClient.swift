@@ -61,6 +61,18 @@ struct FlashforgeClient {
     let code: String
     private let session: URLSession
 
+    // Preset display names are editable (including synced user presets). Match
+    // the inherited hardware model instead, while retaining AD5X/5M safeguards.
+    static func profileMatches(printerModel: String, modelID: Int? = nil) -> Bool {
+        let model = printerModel.lowercased().filter { $0.isLetter || $0.isNumber }
+        guard model.hasPrefix("flashforge") else { return false }
+        switch modelID {
+        case 38: return model.contains("ad5x")
+        case 35, 36: return model.contains("adventurer5m") || model.contains("ad5m")
+        default: return true
+        }
+    }
+
     init(address: String, serial: String, code: String, session: URLSession = .shared) throws {
         guard let url = PrinterConnection.validatedURL(address),
               var parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
