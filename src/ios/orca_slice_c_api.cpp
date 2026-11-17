@@ -431,7 +431,7 @@ void orca_session_destroy(orca_session_t *s)
     delete s;
 }
 
-static int load_model_impl(orca_session_t *s, const char *path, bool append, bool include_settings = true)
+static int load_model_impl(orca_session_t *s, const char *path, bool append, bool include_settings = true, bool restore_placement = false)
 {
     if (!s || !path)
         return -1;
@@ -513,10 +513,13 @@ static int load_model_impl(orca_session_t *s, const char *path, bool append, boo
                 }
             }
         }
-        for (ModelObject *obj : s->model.objects) {
-            if (obj)
-                obj->ensure_on_bed();
-        }
+        // Undo must restore the original Z, including raised/sunk objects.
+        // New file imports retain their existing automatic bed placement.
+        if (!restore_placement)
+            for (ModelObject *obj : s->model.objects) {
+                if (obj)
+                    obj->ensure_on_bed();
+            }
         s->has_model = !s->model.objects.empty();
         s->config = std::move(next_config);
         s->has_config = true;
@@ -2246,6 +2249,7 @@ int orca_session_delete_object(orca_session_t *s, int index)
         if (s->model.objects.empty()) {
             s->has_model = false;
         }
+        invalidate_object_slice(s);
         return 0;
     } catch (const std::exception &ex) {
         s->set_error(std::string("delete_object: ") + ex.what());
@@ -2263,6 +2267,7 @@ int orca_session_clear_model(orca_session_t *s)
     try {
         s->model.clear_objects();
         s->has_model = false;
+        invalidate_object_slice(s);
         return 0;
     } catch (const std::exception &ex) {
         s->set_error(std::string("clear_model: ") + ex.what());
@@ -2387,6 +2392,7 @@ int orca_session_duplicate_object(orca_session_t *s, int index)
         }
         dup->invalidate_bounding_box();
         dup->ensure_on_bed();
+        invalidate_object_slice(s);
         return int(s->model.objects.size()) - 1;
     } catch (const std::exception &ex) {
         s->set_error(std::string("duplicate: ") + ex.what());
@@ -4145,7 +4151,7 @@ int orca_session_restore_snapshot(orca_session_t *s, const char *path)
     // Preserve bed size across restore when possible
     float bw = 220, bd = 220, bh = 250;
     orca_session_bed_size(s, &bw, &bd, &bh);
-    int rc = orca_session_load_model(s, path); // 3MF load applies embedded config
+    int rc = load_model_impl(s, path, false, true, true);
     if (rc != 0)
         return rc;
     // Snapshot is a full plate state — drop explode baselines

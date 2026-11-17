@@ -111,7 +111,7 @@ namespace Catch {
 
 using namespace Slic3r;
 
-TEST_CASE("Project restoration retains settings and shared instances while geometry import keeps its defaults", "[3mf][Regression]")
+TEST_CASE("Project restoration retains settings and shared instances while geometry import keeps its defaults", "[3MF][Regression]")
 {
     const bool restore_project = GENERATE(false, true);
     ScopedTemporaryDir backup("orca_3mf_restore");

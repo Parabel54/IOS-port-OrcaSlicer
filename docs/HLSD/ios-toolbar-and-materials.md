@@ -49,6 +49,8 @@ algorithms. Heavy model/profile operations prepare a 3MF undo snapshot and run
 outside the UI thread. Staged failures preserve the original model/preview.
 Successful edits invalidate derived slicing. Undo, Redo and public project saving
 honor the same gate, including keyboard-triggered actions.
+Snapshot restoration preserves instance Z positions, including raised/sunk
+geometry; automatic bed placement remains part of new file imports.
 
 Copies uses native instances of one object rather than independent duplicated
 objects. Add instance, Fewer instances and a total count from 0 to 1000 retain
@@ -73,6 +75,8 @@ clears the whole selection. Explicit object actions retain their requested targe
 across the background task. Raw plate clearing remains separate for plate
 switching and snapshot restore, so those internal paths do not create history.
 Snapshot capture failure returns before changing the existing rendered preview.
+Successful native Duplicate/Delete/Clear calls also invalidate cached toolpaths
+and slice statistics; rejected object indices preserve them.
 
 Paint annotations belong to shared model volumes. Overlay export transforms each
 color/annotation through every instance, while annotation counts remain per

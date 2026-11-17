@@ -129,6 +129,7 @@ int main(int argc, char **argv)
                      orca_session_add_primitive(copies.get(), 0, 3, 3, 3) == 1 &&
                      orca_session_scale_object_axes(copies.get(), 0, 1.5f, 0.75f, 1.25f) == 0 &&
                      orca_session_rotate_object_axis(copies.get(), 0, 2, 29) == 0 &&
+                     orca_session_translate_object(copies.get(), 0, 0, 0, 5) == 0 &&
                      orca_session_set_object_option(copies.get(), 0, "wall_loops", "5") == 0 &&
                      orca_session_paint_fill(copies.get(), 0, 2, 1) > 0,
                      "transformed painted instance fixture")) return 4;
@@ -230,6 +231,15 @@ int main(int argc, char **argv)
                      "zero copies removes only the selected object and supports empty plates") ||
             !require(orca_session_restore_snapshot(copies.get(), instance_snapshot.c_str()) == 0 && same_mesh(triple),
                      "snapshot restores copies after deleting the final object")) return 4;
+        const std::string sunk_snapshot = directory + "/sunk-instances.3mf";
+        if (!require(orca_session_translate_object(copies.get(), 0, 0, 0, -8) == 0,
+                     "place shared copies partly below the bed")) return 4;
+        const auto sunk = mesh();
+        if (!require(orca_session_snapshot(copies.get(), sunk_snapshot.c_str()) == 0 &&
+                     orca_session_translate_object(copies.get(), 0, 0, 0, 20) == 0 &&
+                     orca_session_restore_snapshot(copies.get(), sunk_snapshot.c_str()) == 0 && same_mesh(sunk) &&
+                     orca_session_restore_snapshot(copies.get(), instance_snapshot.c_str()) == 0 && same_mesh(triple),
+                     "snapshot restoration retains exact sunk and raised instance heights")) return 4;
         if (!require(orca_session_set_object_instances(copies.get(), 0, 1000) == 0 &&
                      orca_session_object_instance_count(copies.get(), 0) == 1000 &&
                      orca_session_object_instance_count(copies.get(), 1) == 1,
@@ -885,6 +895,26 @@ int main(int argc, char **argv)
             opened_count == retained_count;
         orca_free(opened);
         if (!require(paint_preserved, "unchanged/rejected painting preserves processed paths")) return 11;
+        for (int action : {0, 1, 2}) {
+            if (!require(orca_session_load_gcode(viewer.get(), output.c_str()) == 0 &&
+                         orca_session_duplicate_object(viewer.get(), 99) < 0 &&
+                         orca_session_delete_object(viewer.get(), 99) < 0,
+                         "invalid duplicate/delete leave an existing preview unchanged")) return 11;
+            opened = nullptr; opened_count = 0; opened_total = 0;
+            const bool edit_preserved = orca_session_export_preview(viewer.get(), &opened, &opened_count, &opened_total) == 0 &&
+                opened_count == retained_count &&
+                orca_session_last_slice_stats(viewer.get(), &taken_seconds, &taken_volume, &taken_layers) == 0;
+            orca_free(opened);
+            if (!require(edit_preserved, "rejected model edit preserves paths and statistics")) return 11;
+            const int edited = action == 0 ? orca_session_duplicate_object(viewer.get(), 0) :
+                action == 1 ? orca_session_delete_object(viewer.get(), 0) : orca_session_clear_model(viewer.get());
+            opened = nullptr; opened_count = 0; opened_total = 0;
+            const bool edit_invalidated = edited >= 0 &&
+                orca_session_export_preview(viewer.get(), &opened, &opened_count, &opened_total) != 0 &&
+                orca_session_last_slice_stats(viewer.get(), &taken_seconds, &taken_volume, &taken_layers) != 0;
+            orca_free(opened);
+            if (!require(edit_invalidated, "successful duplicate/delete/clear invalidate paths and statistics")) return 11;
+        }
         diagnostic_session = session.get();
         viewer.reset();
         if (!require(owned_records[0].end_x == first_endpoint && owned_records[owned_count - 1].end_z == last_endpoint,
