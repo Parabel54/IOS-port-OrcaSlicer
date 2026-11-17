@@ -563,6 +563,9 @@ ModelVolumeType type_from_string(const std::string &s)
         // Version of the 3mf file
         unsigned int m_version;
         bool m_check_version;
+        // Project saves/Undo need the full Orca state. Ordinary Prusa import
+        // deliberately filters settings and separates instances for desktop.
+        bool m_restore_project = false;
 
         // Semantic version of PrusaSlicer, that generated this 3MF.
         boost::optional<Semver> m_prusaslicer_generator_version;
@@ -596,7 +599,7 @@ ModelVolumeType type_from_string(const std::string &s)
         _3MF_Importer();
         ~_3MF_Importer();
 
-        bool load_model_from_file(const std::string& filename, Model& model, DynamicPrintConfig& config, ConfigSubstitutionContext& config_substitutions, bool check_version);
+        bool load_model_from_file(const std::string& filename, Model& model, DynamicPrintConfig& config, ConfigSubstitutionContext& config_substitutions, bool check_version, bool restore_project = false);
         unsigned int version() const { return m_version; }
 
     private:
@@ -719,13 +722,14 @@ ModelVolumeType type_from_string(const std::string &s)
         _destroy_xml_parser();
     }
 
-    bool _3MF_Importer::load_model_from_file(const std::string& filename, Model& model, DynamicPrintConfig& config, ConfigSubstitutionContext& config_substitutions, bool check_version)
+    bool _3MF_Importer::load_model_from_file(const std::string& filename, Model& model, DynamicPrintConfig& config, ConfigSubstitutionContext& config_substitutions, bool check_version, bool restore_project)
     {
         m_version = 0;
         m_fdm_supports_painting_version = 0;
         m_seam_painting_version = 0;
         m_mm_painting_version = 0;
         m_check_version = check_version;
+        m_restore_project = restore_project;
         m_model = &model;
         m_unit_factor = 1.0f;
         m_curr_object.reset();
@@ -812,32 +816,26 @@ ModelVolumeType type_from_string(const std::string &s)
                 std::string name(stat.m_filename);
                 std::replace(name.begin(), name.end(), '\\', '/');
 
-                /*
-                if (boost::algorithm::iequals(name, LAYER_HEIGHTS_PROFILE_FILE)) {
+                if (m_restore_project && boost::algorithm::iequals(name, LAYER_HEIGHTS_PROFILE_FILE)) {
                     // extract slic3r layer heights profile file
                     _extract_layer_heights_profile_config_from_archive(archive, stat);
                 }
-                else if (boost::algorithm::iequals(name, LAYER_CONFIG_RANGES_FILE)) {
+                else if (m_restore_project && boost::algorithm::iequals(name, LAYER_CONFIG_RANGES_FILE)) {
                     // extract slic3r layer config ranges file
                     _extract_layer_config_ranges_from_archive(archive, stat, config_substitutions);
                 }
-                else if (boost::algorithm::iequals(name, SLA_SUPPORT_POINTS_FILE)) {
+                else if (m_restore_project && boost::algorithm::iequals(name, SLA_SUPPORT_POINTS_FILE)) {
                     // extract sla support points file
                     _extract_sla_support_points_from_archive(archive, stat);
                 }
-                else if (boost::algorithm::iequals(name, SLA_DRAIN_HOLES_FILE)) {
+                else if (m_restore_project && boost::algorithm::iequals(name, SLA_DRAIN_HOLES_FILE)) {
                     // extract sla support points file
                     _extract_sla_drain_holes_from_archive(archive, stat);
                 }
-                else if (boost::algorithm::iequals(name, PRINT_CONFIG_FILE)) {
+                else if (m_restore_project && boost::algorithm::iequals(name, PRINT_CONFIG_FILE)) {
                     // extract slic3r print config file
                     _extract_print_config_from_archive(archive, stat, config, config_substitutions, filename);
                 }
-                else if (boost::algorithm::iequals(name, CUSTOM_GCODE_PER_PRINT_Z_FILE)) {
-                    // extract slic3r layer config ranges file
-                    _extract_custom_gcode_per_print_z_from_archive(archive, stat);
-                }
-                */
                 // only read the model config for Prusa 3mf
                 if (boost::algorithm::iequals(name, MODEL_CONFIG_FILE)) {
                     // extract slic3r model config file
@@ -852,7 +850,7 @@ ModelVolumeType type_from_string(const std::string &s)
 
         close_zip_reader(&archive);
 
-        if (m_version == 0) {
+        if (!m_restore_project && m_version == 0) {
             // if the 3mf was not produced by PrusaSlicer and there is more than one instance,
             // split the object in as many objects as instances
             size_t curr_models_count = m_model->objects.size();
@@ -981,7 +979,7 @@ ModelVolumeType type_from_string(const std::string &s)
 
         //BBS: copy object isteadof instance
         int object_size = model.objects.size();
-        for (int obj_index = 0; obj_index < object_size; obj_index ++) {
+        for (int obj_index = 0; !m_restore_project && obj_index < object_size; obj_index ++) {
             ModelObject* object = model.objects[obj_index];
             while (object->instances.size() > 1) {
                 ModelObject* new_model_object = model.add_object(*object);
@@ -2097,7 +2095,7 @@ ModelVolumeType type_from_string(const std::string &s)
         };
 
         auto itor = std::find(valid_keys.begin(), valid_keys.end(), key);
-        if (itor == valid_keys.end() && !(type == VOLUME_TYPE && boost::starts_with(key, PRECISE_SEAM_CONFIG_PREFIX))) {
+        if (!m_restore_project && itor == valid_keys.end() && !(type == VOLUME_TYPE && boost::starts_with(key, PRECISE_SEAM_CONFIG_PREFIX))) {
             // do nothing if not valid keys
             return true;
         }
@@ -3354,6 +3352,18 @@ bool load_3mf(const char* path, DynamicPrintConfig& config, ConfigSubstitutionCo
     CNumericLocalesSetter locales_setter;
     _3MF_Importer         importer;
     bool res = importer.load_model_from_file(path, *model, config, config_substitutions, check_version);
+    importer.log_errors();
+    handle_legacy_project_loaded(importer.version(), config);
+    return res;
+}
+
+bool restore_3mf(const char* path, DynamicPrintConfig& config, ConfigSubstitutionContext& config_substitutions, Model* model)
+{
+    if (path == nullptr || model == nullptr)
+        return false;
+    CNumericLocalesSetter locales_setter;
+    _3MF_Importer importer;
+    const bool res = importer.load_model_from_file(path, *model, config, config_substitutions, true, true);
     importer.log_errors();
     handle_legacy_project_loaded(importer.version(), config);
     return res;

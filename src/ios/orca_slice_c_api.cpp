@@ -460,7 +460,7 @@ static int load_model_impl(orca_session_t *s, const char *path, bool append, boo
             }
         }
         if (slic3r_archive) {
-            if (!load_3mf(path, file_config, substitutions, &incoming, true)) {
+            if (!restore_3mf(path, file_config, substitutions, &incoming)) {
                 s->set_error("Unable to read Slic3r 3MF project");
                 return -3;
             }

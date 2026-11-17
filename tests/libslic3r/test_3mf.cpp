@@ -111,6 +111,60 @@ namespace Catch {
 
 using namespace Slic3r;
 
+TEST_CASE("Project restoration retains settings and shared instances while geometry import keeps its defaults", "[3mf][Regression]")
+{
+    const bool restore_project = GENERATE(false, true);
+    ScopedTemporaryDir backup("orca_3mf_restore");
+    ScopedTemporaryFile file(".3mf");
+    Model original;
+    original.set_backup_path(backup.string());
+    ModelObject *object = original.add_object();
+    ModelVolume *volume = object->add_volume(make_cube(10, 10, 10));
+    object->config.set_key_value("wall_loops", new ConfigOptionInt(5));
+    object->config.set_key_value("enable_support", new ConfigOptionBool(true));
+    volume->config.set_key_value("wall_loops", new ConfigOptionInt(7));
+    object->layer_height_profile.set(std::vector<double>{0, 0.2, 5, 0.1, 10, 0.2});
+    object->layer_config_ranges[{2, 4}].set_key_value("wall_loops", new ConfigOptionInt(6));
+    object->add_instance()->set_offset(Vec3d(10, 20, 0));
+    object->add_instance()->set_offset(Vec3d(30, 40, 0));
+    ModelObject *neighbor = original.add_object();
+    neighbor->add_volume(make_cube(3, 3, 3));
+    neighbor->add_instance();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("layer_height", new ConfigOptionFloat(0.17));
+    REQUIRE(store_3mf(file.string().c_str(), &original, &config, false));
+
+    Model restored;
+    DynamicPrintConfig restored_config;
+    ConfigSubstitutionContext context{ForwardCompatibilitySubstitutionRule::EnableSilent};
+    if (restore_project)
+        REQUIRE(restore_3mf(file.string().c_str(), restored_config, context, &restored));
+    else
+        REQUIRE(load_3mf(file.string().c_str(), restored_config, context, &restored, true));
+
+    REQUIRE(restored.objects.size() == (restore_project ? 2 : 3));
+    const ModelObject *result = restored.objects.front();
+    REQUIRE(result->instances.size() == (restore_project ? 2 : 1));
+    REQUIRE(result->config.has("wall_loops") == restore_project);
+    REQUIRE(result->config.has("enable_support") == restore_project);
+    REQUIRE(result->volumes.front()->config.has("wall_loops") == restore_project);
+    REQUIRE(restored_config.has("layer_height") == restore_project);
+    REQUIRE(result->layer_height_profile.empty() == !restore_project);
+    REQUIRE(result->layer_config_ranges.empty() == !restore_project);
+    REQUIRE_FALSE(restored.objects[1]->config.has("wall_loops"));
+    if (restore_project) {
+        REQUIRE(result->config.opt_int("wall_loops") == 5);
+        REQUIRE(result->config.get().opt_bool("enable_support"));
+        REQUIRE(result->volumes.front()->config.opt_int("wall_loops") == 7);
+        REQUIRE_THAT(restored_config.opt_float("layer_height"), Catch::Matchers::WithinAbs(0.17, 1e-9));
+        REQUIRE(result->layer_height_profile.get() == object->layer_height_profile.get());
+        REQUIRE(result->layer_config_ranges.size() == 1);
+        REQUIRE(result->layer_config_ranges.begin()->second.opt_int("wall_loops") == 6);
+        for (size_t i = 0; i < 2; ++i)
+            REQUIRE(result->instances[i]->get_offset().isApprox(object->instances[i]->get_offset()));
+    }
+}
+
 
 SCENARIO("Reading 3mf file", "[3mf]") {
     GIVEN("umlauts in the path of the file") {

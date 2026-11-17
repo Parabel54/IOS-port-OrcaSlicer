@@ -101,7 +101,9 @@ int main(int argc, char **argv)
                      orca_session_get_object_option(objects.get(), 0, "support_type", value, sizeof(value)) == 0 &&
                      std::string(value) == "tree(auto)", "invalid edits preserve existing object values")) return 4;
         const std::string object_snapshot = directory + "/object-settings.3mf";
-        if (!require(orca_session_snapshot(objects.get(), object_snapshot.c_str()) == 0 &&
+        if (!require(orca_session_set_option(objects.get(), "layer_height", "0.17") == 0 &&
+                     orca_session_snapshot(objects.get(), object_snapshot.c_str()) == 0 &&
+                     orca_session_set_option(objects.get(), "layer_height", "0.29") == 0 &&
                      orca_session_erase_object_option(objects.get(), 0, "wall_loops") == 0 &&
                      orca_session_get_object_option(objects.get(), 0, "wall_loops", value, sizeof(value)) != 0,
                      "reset object setting removes the override") ||
@@ -109,7 +111,13 @@ int main(int argc, char **argv)
                      orca_session_get_object_option(objects.get(), 0, "wall_loops", value, sizeof(value)) == 0 &&
                      std::string(value) == "5" &&
                      orca_session_get_object_option(objects.get(), 0, "enable_support", value, sizeof(value)) == 0 &&
-                     std::string(value) == "1", "3MF snapshot retains object overrides")) return 4;
+                     std::string(value) == "1" &&
+                     orca_session_get_object_option(objects.get(), 0, "support_type", value, sizeof(value)) == 0 &&
+                     std::string(value) == "tree(auto)" &&
+                     orca_session_get_option(objects.get(), "layer_height", value, sizeof(value)) == 0 &&
+                     std::fabs(std::strtod(value, nullptr) - 0.17) < 1e-6 &&
+                     orca_session_get_object_option(objects.get(), 1, "wall_loops", value, sizeof(value)) != 0,
+                     "3MF snapshot retains global and isolated object overrides")) return 4;
         std::printf("PASS: native object setting ownership, isolation, strict edits, reset and 3MF persistence\n");
     }
     {
